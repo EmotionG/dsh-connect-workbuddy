@@ -21,6 +21,7 @@ import { WORKBUDDY_TRANSFER_PATH, withWorkBuddyRouteAction } from '../status-pat
 import type { WorkBuddyWebRegion, WorkBuddyTransferPreview } from '../status-paths.ts'
 import type { Translate } from './searched-paths.ts'
 import { BusyOverlay } from './BusyOverlay.tsx'
+import { settlesWithin } from './OAuthSignIn.tsx'
 
 /** Props: the region tab, the card's copy, and the accounts the Host knows. */
 export interface AccountTransferProps {
@@ -40,10 +41,24 @@ export interface AccountTransferProps {
    * the exact "imported but still not listed" the veil below now narrates.
    *
    * Resolves when the re-read has landed; the veil stays up until it does,
-   * which is what turns the old silent gap into a visible step.
+   * which is what turns the old silent gap into a visible step — but only up to
+   * {@link REFRESH_SETTLE_TIMEOUT_MS}, because a re-read that never settles
+   * must not be able to hold the veil forever (issue #51).
    */
   onChanged?: () => void | Promise<unknown>
 }
+
+/**
+ * How long the veil may wait on the card's re-read before it comes down.
+ *
+ * Same ceiling and same reasoning as the sign-in path's
+ * `SYNC_SETTLE_TIMEOUT_MS` (issue #51): the veil is the only feedback this
+ * operation gives, so its exit condition must not be a promise that can stay
+ * pending. The `refreshing` phase has no other way out — no deadline, no
+ * failure branch — so an unsettled re-read left the operator staring at
+ * 「正在导入…」 over an import that had already succeeded.
+ */
+const REFRESH_SETTLE_TIMEOUT_MS = 5_000
 
 type Phase =
   | { kind: 'idle' }
@@ -184,7 +199,9 @@ export function AccountTransfer({ t, region, accounts, onChanged }: AccountTrans
       // is the fast half; the account table is what the user is looking at, and
       // it only changes once the fresh snapshot lands.
       setPhase({ kind: 'refreshing', message })
-      await onChanged?.()
+      // Bounded, exactly as the sign-in path is (see REFRESH_SETTLE_TIMEOUT_MS):
+      // both veils wait on the same card re-read, so both need the same ceiling.
+      await settlesWithin(Promise.resolve(onChanged?.()), REFRESH_SETTLE_TIMEOUT_MS)
       if (!mounted.current) return
       setPhase({ kind: 'done', message })
     } catch (error: unknown) {

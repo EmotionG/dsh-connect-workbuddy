@@ -60,7 +60,56 @@ function elapsedSeconds(sinceMs: number, nowMs: number): number {
   return Math.max(0, Math.floor((nowMs - sinceMs) / 1000))
 }
 
-/** Copy the sign-in URL to the clipboard; true on success. */
+/**
+ * How long the `syncing` phase may hold the veil before it lets go (issue #51).
+ *
+ * Shorter than a poll interval would be pointless; a few seconds is far longer
+ * than a healthy loopback re-read takes, and anything past that is
+ * indistinguishable from "never".
+ *
+ * What sits below this decision is an asymmetry worth spelling out. The
+ * `waiting` phase has its own local deadline (see the waiting-clock effect), so
+ * a login whose `loginId` died still ends. The `syncing` phase reached the veil
+ * and awaited the card's re-read with NEITHER a deadline NOR a `catch` — and the
+ * veil's visibility is `phase.kind === 'syncing'` and nothing else. So a re-read
+ * that never settled held the veil up forever, while the credential was already
+ * in the vault: reopening the card (or force-quitting DSH) showed the account,
+ * which is exactly the "half usable" report — sign-in succeeded, the screen
+ * never said so.
+ */
+const SYNC_SETTLE_TIMEOUT_MS = 5_000
+
+/**
+ * Await `work` but give up after `timeoutMs`; resolves `false` on timeout.
+ *
+ * The timer is cleared in a `finally`, so the common case (the re-read settles
+ * first) leaves no pending timer holding the event loop — the reason this is a
+ * race with an explicit cleanup rather than `Promise.race` alone.
+ *
+ * The timeout arm never rejects: a re-read that FAILS is not a failed sign-in,
+ * and the caller must not be able to confuse the two. Rejection and timeout
+ * stand for the same thing here — "the list did not prove it refreshed" — so
+ * they take the same path.
+ *
+ * EXPORTED because `AccountTransfer`'s veil awaits the same card re-read and had
+ * the same unbounded wait; sharing one implementation is what stops the two
+ * veils from drifting apart again.
+ */
+export async function settlesWithin(work: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Promise.resolve(work).then(() => true, () => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs) }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Copy the sign-in URL to the clipboard; true on success.
+ */
 async function copyUrl(url: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(url)
@@ -81,6 +130,17 @@ export function OAuthSignIn({ t, region, onAdded }: OAuthSignInProps): ReactElem
   const [copied, setCopied] = useState(false)
   const [pollTick, setPollTick] = useState(0)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  /**
+   * The account the Host just added, held for the sync effect.
+   *
+   * The poll that answers `done` names the account; the effect that ends the
+   * `syncing` phase needs that name to write the success line, and it cannot
+   * read it off the phase because the phase is what it is about to replace.
+   * State rather than a ref: the effect is keyed on it, so a second sign-in
+   * (adding a second account) re-arms the deadline properly instead of reusing
+   * a stale closure value.
+   */
+  const [addedAccountName, setAddedAccountName] = useState('')
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -137,10 +197,13 @@ export function OAuthSignIn({ t, region, onAdded }: OAuthSignInProps): ReactElem
             // Hold the veil across the re-read: the credential is stored, but
             // the account table changes only when the card's fresh snapshot
             // lands. Same reasoning as the import path in AccountTransfer.
+            //
+            // The wait itself lives in its own effect (the 'syncing' deadline
+            // effect below) rather than here, and that placement IS the fix —
+            // see the note on that effect for why awaiting it from THIS closure
+            // cannot work.
             setPhase({ kind: 'syncing', accountName })
-            await onAdded?.()
-            if (cancelled || !mounted.current) return
-            setPhase({ kind: 'finished', message: 'added', accountName })
+            setAddedAccountName(accountName)
           }
         } catch {
           // A transport blip is not a dead login; the next tick retries, and
@@ -154,6 +217,64 @@ export function OAuthSignIn({ t, region, onAdded }: OAuthSignInProps): ReactElem
       clearTimeout(timer)
     }
   }, [onAdded, phase, pollTick, region])
+
+  /**
+   * End the `syncing` phase — on the re-read, or on the deadline, whichever
+   * comes first (issue #51).
+   *
+   * ## Why this is a separate effect and not an `await` in the poll
+   *
+   * The first attempt at this fix put the race inside the poll's `done` branch:
+   *
+   *     setPhase({ kind: 'syncing', accountName })
+   *     await settlesWithin(onAdded?.(), SYNC_SETTLE_TIMEOUT_MS)
+   *     if (cancelled || !mounted.current) return
+   *     setPhase({ kind: 'finished', … })
+   *
+   * and it did not work — measured, not assumed. `phase` is a dependency of the
+   * poll effect, so `setPhase({kind:'syncing'})` re-runs that effect, and React
+   * runs the PREVIOUS cleanup first. That cleanup sets the old closure's
+   * `cancelled = true`. React commits the cleanup before the `await` it is
+   * inside ever resumes, so the resume always sees `cancelled === true` and
+   * returns: the veil stayed up exactly as it had before.
+   *
+   * This also explains why the defect was invisible in review. A FAST re-read
+   * resolves inside the same microtask batch, before React commits the cleanup,
+   * so it passes the guard and the success line appears. Only a re-read slow
+   * enough to cross a React commit — i.e. the reported case — loses the race
+   * against its own cleanup. The bug hid behind its own common path.
+   *
+   * Running the wait in an effect keyed on the phase sidesteps the whole
+   * interaction: this effect's own cleanup runs when the phase LEAVES
+   * `syncing`, which is after it has already done its job, so there is no
+   * self-cancellation to lose.
+   *
+   * ## The two outcomes
+   *
+   * Both end in `finished`/`added` and the difference is deliberately not shown
+   * to the user. The account IS added — the Host stored the credential before it
+   * answered the poll — so the honest report is success either way; the deadline
+   * only stops the screen from claiming otherwise indefinitely. (`refreshUsage`
+   * already surfaces a failed re-read as `refreshError` on the card itself, so
+   * a genuinely broken usage route is still reported, by the component that
+   * owns that data.)
+   */
+  useEffect(() => {
+    if (phase.kind !== 'syncing') return
+    let cancelled = false
+    const finish = (): void => {
+      if (cancelled || !mounted.current) return
+      setPhase({ kind: 'finished', message: 'added', accountName: addedAccountName })
+    }
+    void settlesWithin(Promise.resolve(onAdded?.()), SYNC_SETTLE_TIMEOUT_MS).then(finish)
+    // The deadline is a floor under `finish`, not an alternative to it: if the
+    // re-read never answers, nothing else would ever call it.
+    const timer = setTimeout(finish, SYNC_SETTLE_TIMEOUT_MS)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [addedAccountName, onAdded, phase])
 
   /**
    * Open a placeholder window WITHOUT `noopener`, and deliberately so.

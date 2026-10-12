@@ -30,6 +30,7 @@
     "tests/issue46-namespace-binding.spec.tsx",
     "tests/refresh-after-mutation.spec.tsx",
     "tests/oauth-wording.spec.tsx",
-    "tests/oauth-auto-open.spec.tsx"
+    "tests/oauth-auto-open.spec.tsx",
+    "tests/issue51-sync-veil.spec.tsx"
   ]
 }
