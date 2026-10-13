@@ -1140,6 +1140,26 @@ describe('a live failure becomes a measurement the next request reads', () => {
     // writing measurements would be bookkeeping nobody reads.
     expect(recorder, 'recording ignores the pool switch')
       .toContain('poolPreferencesOf(current(), region).enabled')
+    // The quota refresh point MUST reach `cooldownOf` here, exactly as it does on
+    // the probe path. Leaving it out gave one `out-of-credit` failure two
+    // different answers depending on which door it arrived through: the probe
+    // said "the quota refreshes on the 1st" (a time the billing side states
+    // outright) while a live chat failure said "30 minutes from now" — a window
+    // the account cannot clear, so the pool put it back to be refused again.
+    //
+    // Asserted as the ARGUMENT NAME reaching the call, because that is the part
+    // that was missing; `quotaRefreshOf` alone would also be satisfied by its
+    // own declaration further up the file.
+    expect(recorder, 'the live path does not look up the quota refresh point')
+      .toContain('quotaRefreshOf(')
+    expect(recorder, 'the quota refresh point is not passed into cooldownOf')
+      .toContain('quotaRefreshAtMs')
+    // …and only for the outcome that can have one. `quotaRefreshOf` costs an
+    // upstream call, and a rate limit or a transport blip has no refresh point
+    // to find — paying for that read would spend a request to learn nothing.
+    // (`stripLiterals` blanks the string, hence the empty-quoted form.)
+    expect(recorder, 'the refresh point is looked up for outcomes that cannot have one')
+      .toContain(`outcome === ''`)
   })
 })
 

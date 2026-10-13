@@ -1469,6 +1469,21 @@ export function apply(ctx: Context, config: Config): void {
    * 「将在 … 重置」 — which `cooldownOf` parses. When it states no time, the store's
    * own short window applies rather than a guess at a long one.
    *
+   * THE QUOTA REFRESH POINT IS PASSED IN, and it is not decoration. This path
+   * used to omit `quotaRefreshAtMs` while the PROBE path supplied it, so one
+   * `out-of-credit` failure got two different answers depending on which door it
+   * arrived through: the probe said "the quota refreshes on the 1st" (a time the
+   * billing side states outright) while a live chat failure said "30 minutes
+   * from now" — a window the account cannot possibly clear, so the pool put it
+   * back and paid another refused round trip. Worse, the write below combines
+   * with the stored record, and the stored refresh point was being LOST in the
+   * process (see {@link mergePoolProbe}).
+   *
+   * Reading it costs one `fetchCredits`, affordable here but not on every
+   * failure: it runs only for `out-of-credit`, where the refresh point is the one
+   * honest answer and there is no cheaper source. Failing to read it is not an
+   * error — the fallback still applies.
+   *
    * The upstream's text is persisted alongside the outcome so the card can name
    * the reason. It is REDACTED first because this message is a raw upstream body:
    * without that, a failure containing a token-shaped string would write it into
@@ -1486,11 +1501,21 @@ export function apply(ctx: Context, config: Config): void {
     const members = poolPreferencesOf(current(), region).memberAccountIds
     if (members.length > 0 && !members.includes(accountId)) return
     const outcome = outcomeOfFailure(failure.status, failure.message)
+    // Only for the outcome that HAS a real answer to look up. `quotaRefreshOf`
+    // makes an upstream call, and a rate limit or a transport blip has no
+    // refresh point to find — paying for that read would spend a request to
+    // learn nothing.
+    const quotaRefreshAtMs = outcome === 'out-of-credit'
+      ? await stacks[region].store.credentialFor(accountId)
+        .then(credential => credential === undefined ? undefined : quotaRefreshOf(region, credential))
+        .catch(() => undefined)
+      : undefined
     const { retryAtMs } = cooldownOf({
       outcome,
       retryAfter: null,
       nowMs: Date.now(),
       body: failure.message,
+      ...quotaRefreshAtMs === undefined ? {} : { quotaRefreshAtMs },
     })
     const message = failure.message === '' ? '' : redactUpstreamText(failure.message)
     await writePoolProbes(region, {

@@ -189,6 +189,16 @@ npm install dsh-connect-workbuddy
 
 安装、更新或卸载 bundle 后，需要重启对应的 DSH 进程。
 
+> ⚠️ **刚发布的版本请写「精确版本号」，不要依赖浮动范围。** pnpm 有**新版本等待期**（`minimumReleaseAge`，默认 24 小时），所以一个版本刚发布不久时，浮动范围会被**静默压回上一个版本**：声明 `^4.4.2` 时它仍解析到 `4.4.2`，而写精确的 `4.4.3` 则立即拿到 `4.4.3`。由于**两种写法都「安装成功」**，表现是「升级命令跑完了、版本却没变」，很容易被误判成发布失败。已实测（隔离目录、pnpm 12.3.4、`--lockfile-only`，未触碰用户环境）：
+>
+> | 目标写法 | 解析到的版本 |
+> | --- | --- |
+> | 浮动 `^4.4.2` | **4.4.2** ⚠️ |
+> | 精确 `4.4.3` | **4.4.3** |
+> | 浮动 + `--config.minimum-release-age=0` | **4.4.3** |
+>
+> 想立刻用上新版，请写精确版本号：`dsh plugin --profile desktop add dsh-connect-workbuddy@4.4.4`。过了等待期之后，浮动范围会自然跟上。
+
 插件在 **Web**、**Desktop**、**TUI** 三种界面下均可运行，按你使用的 profile 选择对应命令：
 
 ```sh
@@ -299,6 +309,18 @@ pnpm run check   # typecheck + test + build
 ```sh
 dsh plugin --profile desktop add /Users/dmh2002/DshProject/dsh-connect-workbuddy
 ```
+
+### 写脚本调用 `chatStream()` 时注意：它返回的是**信封**，不是可迭代流
+
+```ts
+const envelope = await client.chatStream(credential, bodyJson)
+if (!envelope.ok) { /* 失败：envelope.status / .kind / .message / .detail */ }
+else { await envelope.response.text() /* 或者按 SSE 消费 */ }
+```
+
+**先查 `envelope.ok` 再消费** —— 它返回 `{ ok: true, response }` 或 `{ ok: false, status, kind, message, detail }`，而不是一个可以直接 `for await` 的流。跳过这一步的典型后果是**把失败全报成成功**（`response` 是 `undefined`，读它会抛错或被吞掉，于是「每个模型都成功」）。这条来自 issue #56 报告者的实测提醒，写在这里是为了让下一个人少踩一次同样的坑。
+
+失败信封里的 `kind` 就是本文提到的失败分类（`soft_rate` / `model_busy` / `hard_credit` / `session_dead` / `policy_reject` / `not_found` / `server` / `client`），`detail` 携带上游的 `upstreamCode` / `requestId` / `displayMsg`。
 
 ## 市场收录与展示
 

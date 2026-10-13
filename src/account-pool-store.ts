@@ -124,11 +124,55 @@ function knownProbeSource(value: unknown): WorkBuddyPoolProbeSource | undefined 
 }
 
 /**
+ * Merge ONE new measurement over the record already stored for that account.
+ *
+ * A plain `{ ...existing, ...update }` is wrong here, and the damage is silent.
+ * The two writers describe the same account at different moments and carry
+ * different fields:
+ *
+ *   - `test-batch` measures the TARGET MODEL deliberately, so it is the only
+ *     writer that can produce a refresh point (`retryAtMs` with
+ *     `retrySource: 'quota-refresh'`) — a time the billing side states outright.
+ *   - `live-request` reports what a real chat request just hit. It often carries
+ *     no `retryAtMs` at all (a transport blip names no time), and a spread would
+ *     therefore DELETE the refresh point the probe had already resolved.
+ *
+ * Measured consequence of the spread, on a real `14018` account: the probe
+ * recorded "quota refreshes 2026-11-01", the next live failure rewrote the
+ * record without that field, and the pool then reported "retry in about 30
+ * minutes" — putting an exhausted account back into rotation to be refused
+ * again. The correct value was in the file one write earlier.
+ *
+ * So `retryAtMs` is INHERITED when the update does not state one, and every
+ * other field is the update's (the newer measurement owns `outcome`, `atMs`,
+ * `source` and `message`). Inheriting is only about the one field whose absence
+ * is not a statement: an update that DOES carry a time still overrides, which is
+ * what lets a fresh, shorter cooldown supersede a stale longer one.
+ *
+ * Pure and exported so the rule is unit-testable without a filesystem — this is
+ * exactly the kind of "two writers, one slot" rule that this project has been
+ * bitten by before.
+ */
+export function mergePoolProbe(
+  existing: WorkBuddyPoolProbe | undefined,
+  update: WorkBuddyPoolProbe,
+): WorkBuddyPoolProbe {
+  if (existing === undefined) return update
+  if (update.retryAtMs !== undefined) return update
+  // A stored time that has already PASSED is not worth inheriting: carrying it
+  // forward would date the record to a moment in the past and make the row read
+  // as "back after <a time that is already gone>".
+  if (existing.retryAtMs === undefined || existing.retryAtMs <= update.atMs) return update
+  return { ...update, retryAtMs: existing.retryAtMs }
+}
+
+/**
  * Merge measurements into one region's store and write it atomically.
  *
  * A MERGE rather than a replace, because batches measure one account at a time
  * and a partial failure must not erase what earlier runs learned. An account
- * absent from `updates` keeps its previous measurement.
+ * absent from `updates` keeps its previous measurement, and an account present
+ * in both is combined by {@link mergePoolProbe} rather than overwritten.
  *
  * Never throws: a failed write loses only the newest measurements, and the
  * caller's results are still returned to the user. Surfacing a disk error here
@@ -143,9 +187,13 @@ export async function writePoolProbes(
   try {
     await withFileLock(path, async () => {
       const existing = await readPoolProbes(region)
+      const merged: Record<string, WorkBuddyPoolProbe> = { ...existing }
+      for (const [accountId, update] of Object.entries(updates)) {
+        merged[accountId] = mergePoolProbe(existing[accountId], update)
+      }
       const document: PoolDocument = {
         version: STORE_FORMAT_VERSION,
-        probes: { ...existing, ...updates },
+        probes: merged,
       }
       await writeFileAtomic(path, `${JSON.stringify(document, null, 2)}\n`, {
         mode: 0o600,

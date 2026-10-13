@@ -179,6 +179,16 @@ npm install dsh-connect-workbuddy
 
 Restart the DSH process after install/update/uninstall.
 
+> ⚠️ **Pin an EXACT version for a fresh release; do not rely on a floating range.** pnpm enforces a release-age window (`minimumReleaseAge`, 24h by default), so shortly after a version ships a floating range is **silently resolved back to the previous one**: `^4.4.2` still resolves to `4.4.2`, while an exact `4.4.3` gets `4.4.3` immediately. Both spellings "install successfully", so the symptom is *"the upgrade command finished and the version did not change"* — easily misread as a failed release. Measured (isolated directory, pnpm 12.3.4, `--lockfile-only`, touching nothing of the user's environment):
+>
+> | Target spelling | Resolved version |
+> | --- | --- |
+> | floating `^4.4.2` | **4.4.2** ⚠️ |
+> | exact `4.4.3` | **4.4.3** |
+> | floating + `--config.minimum-release-age=0` | **4.4.3** |
+>
+> To pick up a new release right away, pin it: `dsh plugin --profile desktop add dsh-connect-workbuddy@4.4.4`. A floating range catches up once the window elapses.
+
 The plugin also runs under **Web** and **TUI**; pick the command matching your profile:
 
 ```sh
@@ -289,6 +299,18 @@ Local dev via a `link:` install to the desktop profile (restart DSH Desktop afte
 ```sh
 dsh plugin --profile desktop add /Users/dmh2002/DshProject/dsh-connect-workbuddy
 ```
+
+### Calling `chatStream()` from a script: it returns an **envelope**, not a stream
+
+```ts
+const envelope = await client.chatStream(credential, bodyJson)
+if (!envelope.ok) { /* failure: envelope.status / .kind / .message / .detail */ }
+else { await envelope.response.text() /* or consume it as SSE */ }
+```
+
+**Check `envelope.ok` before consuming.** It returns `{ ok: true, response }` or `{ ok: false, status, kind, message, detail }` — not something you can `for await` directly. Skip that check and the usual outcome is **every failure reported as a success** (there is no `response`, reading it throws or is swallowed, and "all models passed"). Recorded here on the strength of the issue #56 reporter's own note, so the next person does not lose the same hour.
+
+`kind` on a failed envelope is the failure classification used throughout this document (`soft_rate` / `model_busy` / `hard_credit` / `session_dead` / `policy_reject` / `not_found` / `server` / `client`), and `detail` carries the upstream `upstreamCode` / `requestId` / `displayMsg`.
 
 ## Marketplace listing
 
