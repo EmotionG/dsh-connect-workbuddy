@@ -117,23 +117,36 @@ export interface WorkBuddyUpstreamModel {
 export interface WorkBuddyCreditPackage {
   packageName: string
   /**
-   * Remaining credit, always read from `CapacityRemain` (issue #48).
+   * Remaining credit, always read from the CYCLE family (issue #58).
    *
    * The upstream reports a monthly resource (`CapacityType 4`) with TWO
-   * capacity families, and they answer different questions:
+   * capacity families, and for a long time this field carried the POOL one on
+   * the theory that the pool answers "how much do I have" (issue #48). That was
+   * wrong, and the official client settles it: on a live CN account the client
+   * shows `总剩余积分 2,196.61` = `套餐基础积分 500` + `平台奖励积分 1,696.61`,
+   * which is EXACTLY Σ `CycleCapacityRemainPrecise` over the same response
+   * (1696.61 + 500), while Σ `CapacityRemain` is 2,196 — the pool figure lands
+   * on the right integer only because that account's cycle is untouched, and
+   * the cent is what proves which family the client reads.
    *
-   * - `CapacityRemain` / `CapacitySize` / `CapacityUsed` — the capacity POOL.
-   * - `CycleCapacityRemain` / `CycleCapacitySize` / `CycleCapacityUsed` — the
-   *   CURRENT BILLING CYCLE.
+   * The pool family is not a balance at all: on a monthly resource whose cycle
+   * is fully spent it still reports `CapacityRemain=500, CapacityUsed=0`, i.e.
+   * "nothing used, everything left", while the cycle reports
+   * `CycleCapacityUsed=500`. Read as a balance it OVER-reports by the whole
+   * monthly allowance of every account (measured on 8/8 CN accounts: pool and
+   * cycle agree only where the cycle is untouched).
    *
-   * "How much credit do I have" is the pool, so that is what this field
-   * carries. Reading `CycleCapacityRemain` here was the defect: on three real
-   * global accounts the upstream returned `CapacityRemain=100` together with
-   * `CycleCapacityRemain=0` and `CycleCapacityUsed=100` inside an UNFINISHED
-   * cycle (`CycleEndTime` days out, `Status=0`), so the plugin reported 0
-   * credits for accounts that were not exhausted at all.
+   * Independent confirmation comes from the international gateway: three global
+   * accounts report `CapacityRemain=100` while the gateway REFUSES their chat
+   * requests with `14018 Credits exhausted`, so the pool figure is not spendable
+   * credit there either.
+   *
+   * A gift (`CapacityType 1`) carries both families with identical values, so
+   * reading the cycle uniformly costs nothing and removes the branch that
+   * produced the defect.
    */
   remain: number
+  /** The package's capacity, from the same family as {@link remain}. */
   size: number
   /** CapacityType 4: refreshed every cycle and never expires. */
   monthly: boolean
@@ -141,16 +154,6 @@ export interface WorkBuddyCreditPackage {
   refreshAtMs?: number
   /** One-off expiry; the package disappears from the account at this time. */
   expiresAtMs?: number
-  /**
-   * Remaining credit in the CURRENT cycle; only on monthly packages.
-   *
-   * Kept beside {@link remain} because it answers the one question the pool
-   * total cannot: whether THIS cycle's allowance is spent. That is what makes
-   * `refreshAtMs` meaningful — "you are out until the cycle resets" is a
-   * different statement from "you are out of credit", and only the cycle
-   * figure can tell them apart.
-   */
-  cycleRemain?: number
 }
 
 /** Aggregated credit answer for one credential. */
@@ -1385,29 +1388,34 @@ export class WorkBuddyUpstreamClient {
       if (typeof raw !== 'object' || raw === null) continue
       const account = raw as Record<string, unknown>
       const numberField = (key: string): number => (typeof account[key] === 'number' ? account[key] as number : 0)
+      // Every capacity is ALSO sent as a `*Precise` string carrying the fraction
+      // the integer field drops ("96.61000218" beside 96). The official client
+      // reads these — its total ends in a decimal (2,196.61) which no sum of the
+      // integer fields can produce. Prefer the precise spelling, fall back to the
+      // integer so a response that omits it still parses.
+      const preciseField = (key: string): number => {
+        const raw = account[`${key}Precise`]
+        if (typeof raw === 'string' && raw !== '') {
+          const parsed = Number.parseFloat(raw)
+          if (Number.isFinite(parsed)) return parsed
+        }
+        if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+        return numberField(key)
+      }
       // CapacityType 4 = monthly capacity resource (refreshed every cycle, never
       // expires: empty ExpiredTime, DeductionEndTime years out). CapacityType 1 =
       // deduction-based gift (CapacityRemain drains to 0, ExpiredTime set).
       // CycleEndTime exists on both, so it alone cannot tell them apart.
       const monthly = numberField('CapacityType') === 4
-      // The BALANCE is always the capacity pool, for BOTH kinds (issue #48).
-      // A monthly resource reports the pool and the current cycle as two
-      // separate capacity families, and only the pool answers "how much do I
-      // have left" — see WorkBuddyCreditPackage.remain. Reading the cycle
-      // figure here reported 0 for three real global accounts whose pool held
-      // 100 and whose cycle had not even ended.
-      //
-      // The SIZE is the only field the two kinds name differently:
-      // `CapacitySize` exists on gifts, and on a real global monthly resource
-      // BOTH spellings were present and equal (100). `CapacitySize` is
-      // therefore read unconditionally, with the cycle spelling kept as a
-      // fallback for a monthly resource that omits it.
-      const size = numberField('CapacitySize') || numberField('CycleCapacitySize')
-      const remain = numberField('CapacityRemain')
-      // The cycle figure is still read for monthly resources: it answers the
-      // different question "is THIS cycle's allowance spent", which is the only
-      // thing that makes the refresh hint truthful.
-      const cycleRemain = monthly ? numberField('CycleCapacityRemain') : undefined
+      // The BALANCE is the cycle family, for BOTH kinds (issue #58 — see
+      // WorkBuddyCreditPackage.remain for the evidence and for what #48 got
+      // wrong). `CycleCapacitySize` is read first because on a monthly resource
+      // it is the size the balance is a fraction OF; `CapacitySize` is both the
+      // gift spelling and the fallback for a row that carries no cycle family.
+      const size = preciseField('CycleCapacitySize') || preciseField('CapacitySize')
+      const hasCycle = account['CycleCapacityRemain'] !== undefined
+        || account['CycleCapacityRemainPrecise'] !== undefined
+      const remain = hasCycle ? preciseField('CycleCapacityRemain') : preciseField('CapacityRemain')
       const cappedRemain = remain < 0 ? 0 : remain
       // For the monthly resource the cycle end is the refresh point; display the
       // next cycle's start (end + 1s) since "refreshes on 08/31 23:59:59" reads
@@ -1434,7 +1442,6 @@ export class WorkBuddyUpstreamClient {
         remain: cappedRemain,
         size,
         monthly,
-        ...cycleRemain === undefined ? {} : { cycleRemain: Math.max(0, cycleRemain) },
         ...refreshAtMs === undefined ? {} : { refreshAtMs },
         ...expiresAtMs === undefined ? {} : { expiresAtMs },
       })
