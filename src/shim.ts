@@ -789,12 +789,18 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
   // is only ever called on the failed attempt that triggered a switch.
   if (failure.ok) return 'unusable'
   switch (failure.kind) {
-    // Both credit walls read the same to a user: the account cannot serve this
-    // request right now. `soft_rate` is the 6004 rate limit the probe exists to
-    // detect; `hard_credit` is an exhausted balance.
+    // The 6004 volume limit: the account serves this request again once the
+    // stated reset passes.
     case 'soft_rate':
-    case 'hard_credit':
       return 'rate limited'
+    // NOT the same sentence as `soft_rate`, though both leave the pool. The
+    // remedy differs in kind: an exhausted account cannot pay for this model AT
+    // ALL until it is topped up or its quota cycle rolls over, so "rate limited"
+    // sends the user to wait for something that will not arrive. Kept
+    // failover-worthy — another ACCOUNT may well have credits, which is exactly
+    // why the notice has to name the real reason.
+    case 'hard_credit':
+      return 'out of credits'
     case 'model_busy':
       // NOT "rate limited": that phrasing is what sent issue #56's reporter to
       // the account pool. The failure belongs to the model, and the notice this

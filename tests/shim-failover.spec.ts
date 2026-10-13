@@ -736,6 +736,37 @@ describe('a failover says so in the answer', () => {
     expect(text.indexOf('dsh-connect-workbuddy')).toBeLessThan(text.indexOf('Hello from the fallback.'))
   })
 
+  it('names an exhausted account as out of credits, not as merely rate limited', async () => {
+    // The two used to share one sentence ("rate limited"). They need opposite
+    // advice: a rate limit clears on its own at a stated time, while an
+    // exhausted account cannot pay for the model until it is topped up. Calling
+    // both "rate limited" sends the user off to wait for something that will not
+    // arrive — the same class of misleading-but-adjacent wording that issue #56
+    // reported for the model-scoped throttle.
+    const other = credentialFor('other')
+    const seen: string[] = []
+    shim = mount({
+      others: [other],
+      chatStream: async credential => {
+        seen.push(credential.uin ?? '')
+        return seen.length === 1
+          ? { ok: false, status: 429, kind: 'hard_credit', message: '{"msg":"Credits exhausted."}' }
+          : answering('Hello from the fallback.')
+      },
+      failover: async tried => (tried.includes(SELECTED_ID) ? other : undefined),
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(response.status).toBe(200)
+    const text = contentOf(response.body)
+    expect(text).toContain('out of credits')
+    expect(text).not.toContain('rate limited')
+    // Still failover-worthy: another ACCOUNT may well have a balance, which is
+    // the whole reason the notice has to name the real reason.
+    expect(seen).toEqual(['selected', 'other'])
+  })
+
   it('adds NO notice when the selected account serves the request', async () => {
     // The case that keeps the feature honest: a notice on every reply would be
     // noise, and would also mean the notice does not actually signal anything.
