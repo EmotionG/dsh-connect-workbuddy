@@ -34,6 +34,28 @@ export interface BusyOverlayProps {
 }
 
 /**
+ * The shared busy veil's spinner: an arc that breathes while it turns.
+ *
+ * Deliberately the host's own state-spinner shape (dsh's `_dsh-state-dot-spin`)
+ * rather than a border-ring: a two-tone CSS ring at .7s read as a loading
+ * indicator from another decade and was out of step with every spinner in the
+ * shell. The motion lives in CSS (`dsm-workbuddy-veil-spin` /
+ * `-dash`), so this element only describes the geometry; `currentColor` lets it
+ * inherit whatever tier it sits in.
+ *
+ * `aria-hidden` because the veil's `role="status"` already announces the
+ * message — a second announcement from a decorative arc is noise.
+ */
+function VeilSpinner(): ReactElement {
+  return (
+    <svg className="dsm-workbuddy-veil-spinner" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <circle className="dsm-workbuddy-veil-spinner-track" cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+      <circle className="dsm-workbuddy-veil-spinner-arc" cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+/**
  * The veil. Deliberately NOT a modal dialog: it carries no focusable control
  * and no dismissal — there is nothing for the user to decide, only a step to
  * wait through. `aria-busy` plus a polite live region state that to screen
@@ -44,7 +66,7 @@ export function BusyOverlay({ message, hint, visible }: BusyOverlayProps): React
   return (
     <div className="dsm-workbuddy-veil" role="status" aria-busy="true" aria-live="polite">
       <div className="dsm-workbuddy-veil-card">
-        <span className="dsm-workbuddy-veil-spinner" aria-hidden="true" />
+        <VeilSpinner />
         <span className="dsm-workbuddy-veil-text">{message}</span>
         {hint === undefined ? null : <span className="dsm-workbuddy-veil-hint">{hint}</span>}
       </div>

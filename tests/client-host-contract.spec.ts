@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import ts from 'typescript'
 
 /**
  * Regression suite for two defects that shipped together and share one root
@@ -97,6 +98,52 @@ function packageRootOf(specifier: string): string | undefined {
   const [scope, name] = specifier.split('/')
   return scope === undefined || name === undefined ? undefined : `${scope}/${name}`
 }
+
+describe('WORKBUDDY_CARD_CSS template literal', () => {
+  /**
+   * The stylesheet is a template literal, so a stray backtick inside it
+   * TERMINATES the string early — and TypeScript does not complain, because
+   * what follows still parses as valid syntax. The result is a silently
+   * truncated CSS bundle: every rule after the backtick is gone, so those
+   * elements fall back to browser defaults with no error anywhere.
+   *
+   * That is not hypothetical. It happened while reworking the busy veil's
+   * colours: the new comments quoted CSS tokens in backticks (the file's
+   * convention for TS comments ABOVE the literal, which is harmless), the
+   * literal split at the first one, and the veil block vanished. typecheck
+   * and the build both passed; only the "every class is styled" guard noticed,
+   * and only because it happened to cover those classes.
+   *
+   * So the check is on the SOURCE, not the extracted string: require the
+   * literal's body to hold no backtick. A regex extraction cannot catch this —
+   * it would simply match the shorter, broken literal.
+   */
+  it('leaves no stray statements behind, which is what truncation produces', () => {
+    // A stray backtick inside the literal ends the string early, and the rest
+    // of the stylesheet is then parsed as UNRELATED SYNTAX rather than as CSS.
+    // Neither typecheck nor the build complains: the file is still valid TS,
+    // it just exports a stub stylesheet and a pile of junk expression
+    // statements. That is exactly what happened while reworking the veil.
+    //
+    // So count the file's top-level statements. A healthy styles.ts declares
+    // its CSS exports and nothing else; truncation turns the remainder into
+    // dozens of expression statements, one per token.
+    const source = readFileSync(fileURLToPath(new URL('src/client/styles.ts', repoRoot)), 'utf8')
+    const sf = ts.createSourceFile('styles.ts', source, ts.ScriptTarget.ESNext, true)
+    const strays = sf.statements.filter(st => !ts.isVariableStatement(st))
+    expect(strays.map(st => ts.SyntaxKind[st.kind])).toEqual([])
+    expect(sf.statements.length).toBe(2)
+  })
+
+  it('still carries the veil rules the shared busy overlay depends on', () => {
+    // Belt and braces for the same defect: if the literal is ever truncated
+    // again, these selectors disappear from the extracted CSS.
+    const css = cardCss()
+    expect(css).toContain('.dsm-workbuddy-veil{')
+    expect(css).toContain('.dsm-workbuddy-veil-card{')
+    expect(css).toContain('.dsm-workbuddy-veil-spinner{')
+  })
+})
 
 describe('dsh.client.inject', () => {
   it('never names a package the client half does not reference', () => {
