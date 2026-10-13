@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.4.2 (2026-10-13)
+
+### Fixes
+
+- **DSH 0.2.1-alpha.2 下 workbuddy 模型工具调用全失效：把 pi-ai 主版本 1 判为 modern。**（PR #52，issues #24/#25/#26 的同源延伸）
+  - **现象**：DSH `0.2.1-alpha.2` 起，**所有** workbuddy / workbuddy-global 模型都无法调用工具（本地模型与 deepseek 账号组不受影响），且**界面上没有任何报错**。会话事件流停在「只有思考块」→「整轮 completed」，全程没有 `tool-call` 事件；模型有时还会把 DSML 标记当**正文**吐出来。
+  - **根因**：`src/pi-ai-runtime.ts` 的 `generationOf()` 用 `/^0\.(\d+)\./u` 解析版本，**只认 `0.x`**。DSH 0.2.1-alpha.2 随包的是 `@earendil-works/pi-ai@1.0.2`，`'1.0.2'` 匹配不到 → 返回 `'legacy'`。`legacy` 会让 `withLegacyContext()` 用 `adaptLegacyPiAiContext()` 把上下文折成 pi-ai **0.85** 形状：system 消息抽出去当 `systemPrompt`，工具声明搬到**顶层 `tools`**。而 pi-ai 1.x 从 `context.messages` 里 system 消息的 `toolsAdded` 读工具（`resolveTranscriptTools` / `getCurrentTools`），**不看顶层 `tools`**——请求里一个工具声明都没有，模型自然发不出 `toolCall`。国内网关容忍无 system 的请求，模型就把 DSML 写进正文。更隐蔽的是 shim 的 DSML 恢复也一并失效（`gate.declaredNames` 为空 → 整段禁用），所以整套缺陷**完全静默**。
+  - **为什么在作者 checkout 上不复现**：源码注释里写着 "this checkout resolves 0.85.1 today"——解析到 0.85.1 时 `legacy` 分支是**正确**的。另外 `doctor` 在宿主**之外**跑会显示 `modern`，那是 `resolvedLocally: false` 的默认值，与宿主内的真实判定无关。
+  - **修法**：只特判**主版本 1**，`>= 87` 的 minor 判定保持不变。已逐包对照 **pi-ai 0.87.1、1.0.2、1.1.0、1.2.0** 四个版本：三者的 `openai-completions` 都从 `context.messages` 调 `resolveTranscriptTools()`，`getCurrentTools()` 都读 system 消息的 `toolsAdded`/`toolsRemoved`，契约一致。**刻意是 `=== 1` 而不是 `>= 1`**：未核验未来 2.x 的上下文契约，不替未验证的版本做兼容承诺；测试里 `2.0.0` 明确断言仍为 `legacy`。
+  - **顺带记录的边界事实**（本版**未**改动 peer 范围）：宿主 `dsh-app-boot` 的 `evaluatePluginCompatibility()` 只校验 `@deepseek-ai/dsh*` 命名空间，所以 `"@earendil-works/pi-ai": ">=0.85.0 <0.88.0"` 这条 peer **从不参与校验**，插件会对着越界的 1.x 静默运行。peer 范围的取舍留给维护者单独决定。
+  - **守卫**：`tests/pi-ai-runtime.spec.ts` 的版本→代际用例改为数据驱动，并用临时目录里伪造的 `package.json` 驱动 `piAiRuntimeFor()`，**不依赖本机解析到哪个版本**，因此在解析到 0.85.1 的机器上也能跑。覆盖 `0.85.0/0.85.1/0.86.3 → legacy`、`0.87.0/0.87.1/1.0.0/1.0.2/1.1.0 → modern`、`2.0.0 → legacy`、不可解析版本保守判 `legacy`。变异验证（还原修复）后恰好 4 个 1.x 用例变红，其余 13 个不变。
+
+- **上游流被截断时，恢复层把补写的 `[DONE]` 粘在半截帧之后，客户端 SSE 解析崩溃（PI_AI_ERROR）。**（PR #54，issue #53）
+  - **现象**：对话中途偶发整轮直接失败，报错文本 `Unexpected non-whitespace character after JSON at position 319 (line 2 column 1)`，宿主归到兜底码 `PI_AI_ERROR`。该码**不在宿主的原地重试集**里（只认 `EMPTY_RESPONSE`/`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`），所以一旦出现，这一轮直接结束、不重试——用户看到的就是「突然断了」。已确认与具体模型、工作区无关，且**紧跟在一次 transport 故障之后**。
+  - **根因**：是恢复层自己制造了非法的 SSE 帧，不是上游发的。两处叠加——① `consume()` 把流尾巴的残余帧直接透传，不补帧分隔空行；② `finish()` 补写合成终止帧时，没有确保前面有帧分隔。于是客户端实际收到的是**同一个 SSE 事件里的两条 `data:` 行**（中间只有一个 `\n`，不是空行）。openai SDK 的 `SSEDecoder` 会把一个事件内的多条 `data:` 行用 `\n` 拼起来再解析，拼出来就是「一个完整 JSON + 换行 + 第二个 JSON」，`JSON.parse` 在第二行行首抛错。**报错位置恰好是 319，因为第一段 chunk 的长度正好是 318**——这不是巧合。
+  - **修法**：把「每个帧必须自带空行终止符」变成不变量，而不是在 `finish()` 里特判——`RecoveryStream` 有 6 处直接 `res.write`，逐个补分隔容易漏，而 `handleFrame` 里 JSON 解析失败的原帧透传路径同样会写出不带空行的帧。现在类内所有帧写出收敛到单一出口 `emitFrame()`，由它补齐帧尾；`consume()` 对 `carry` 剩下的半帧先归一化再交给 `handleFrame`。**缺换行和缺空行是两种情形**：前者补一个 `\n` 只结束「行」不结束「事件」，必须补 `\n\n` 才能让随后的 `[DONE]` 不粘上去。
+  - **顺带修掉一个静默丢内容**：`finish()` **不**补 `[DONE]` 时，半截帧没有空行收尾，SDK 永远等不到分隔，最后那一小段内容被静默丢弃。归一化帧尾后这段内容能正常 dispatch 出来。
+  - **不影响普通路径**：`push()` 切出的帧本就带终止符，经 `emitFrame` 原样通过，仍是 byte-for-byte 透传——「帧顺序永不改变」的既有承诺不受影响。
+  - **守卫**：新增 `tests/issue53-sse-terminator.spec.ts`，断言在**字节层**：按 SSE 规范切事件，每个事件内多条 `data:` 行拼接后必须是单个合法 JSON。缺陷本质是字节粘连，只有字节级断言能抓住它。变异验证（还原两处修复）后 3 个缺陷用例全部变红，「完整流字节不变」的守卫用例保持绿色——说明没有过度归一化。
+
+### Docs
+
+- 无。本版只含上述两处修复与配套测试。
+
 ## 4.4.1 (2026-10-12)
 
 ### Fixes
