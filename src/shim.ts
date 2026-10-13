@@ -311,6 +311,15 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
  *      Once a native `delta.tool_calls` appears, recovery switches off for the
  *      rest of the response — two live call channels for one answer is worse
  *      than either one alone.
+ *
+ *   5. EVERY FRAME LEAVES SELF-CONTAINED. An SSE event ends at a blank line,
+ *      and a frame written without its terminator merges into the NEXT event
+ *      the client decodes — whose `data:` lines are then joined and parsed as
+ *      one document (issue #53). Every write therefore goes through
+ *      {@link emitFrame}, which completes the terminator; `push()` cuts frames
+ *      that already carry it, and the one source of unterminated bytes — the
+ *      half-frame left in `carry` when the upstream dies — is normalized in
+ *      {@link consume}.
  */
 class RecoveryStream {
   private carry = ''
@@ -386,7 +395,7 @@ class RecoveryStream {
     // could need to replace — and putting it through the window would let a
     // discarded attempt take it away again after the user had seen it.
     this.windowOpened = true
-    this.res.write(contentFrame(chunk, choiceRecord, notice))
+    this.emitFrame(contentFrame(chunk, choiceRecord, notice))
   }
 
   /** True when a call or real prose has reached the client. */
@@ -397,6 +406,44 @@ class RecoveryStream {
   /** True when the held bytes contain markup the gates refused. */
   get residueSeen(): boolean {
     return this.sawResidue
+  }
+
+  /**
+   * The single exit every byte of a FRAME passes through.
+   *
+   * SSE dispatches one event per blank-line-terminated run of `data:` lines.
+   * A frame written WITHOUT its terminator leaves the client's decoder
+   * waiting for a blank line that never arrives, so the NEXT write is
+   * appended to the SAME event — and a client that joins the several `data:`
+   * lines of one event with `\n` and parses the result as one JSON document
+   * (openai's `SSEDecoder` does exactly that) then reads two payloads as one
+   * and fails. Issue #53 is that failure: the upstream died between a `data:`
+   * line and its blank line, `consume()` forwarded the half-frame verbatim,
+   * and `finish()` glued its synthetic `[DONE]` onto it, producing
+   * `data: {...}\ndata: [DONE]\n\n` — parsed as one event whose data is
+   * `"{...}\n[DONE]"`, which throws "Unexpected non-whitespace character
+   * after JSON at position N". The whole turn is then classified as a
+   * non-retryable error, so the user simply sees the answer stop.
+   *
+   * Completing the terminator here fixes both halves at once: the truncated
+   * frame becomes a self-contained event, and the `[DONE]` that follows can no
+   * longer be joined to it. It is idempotent for the frames `push()` cuts —
+   * those always carry the terminator already, so they pass through
+   * byte-for-byte, which keeps guarantee 1 (frame order is never changed)
+   * intact.
+   *
+   * Note that a missing NEWLINE is also completed: `data: {…}` cut mid-line
+   * needs the full `\n\n`, not a single `\n`, to close the event. Such a frame
+   * is upstream-corrupted JSON that cannot be repaired here; closing it at
+   * least keeps the corruption confined to its own event instead of taking
+   * the terminator down with it.
+   */
+  private emitFrame(frame: string): void {
+    if (frame.endsWith('\n\n')) {
+      this.res.write(frame)
+      return
+    }
+    this.res.write(frame.endsWith('\n') ? `${frame}\n` : `${frame}\n\n`)
   }
 
   /** Record that text the gates refused was seen (markup residue, not prose). */
@@ -419,7 +466,25 @@ class RecoveryStream {
     }
     const tail = this.carry
     this.carry = ''
-    if (tail !== '') this.handleFrame(tail)
+    if (tail !== '') {
+      // `push()` only cuts a frame at an EMPTY line, so whatever is left in
+      // `carry` when the upstream ends is by definition a frame that never
+      // received its terminator — the upstream died between a `data:` line and
+      // the blank line that would have closed it. Forwarding it verbatim leaves
+      // the client's SSE decoder inside that event, so the `[DONE]` written by
+      // `finish()` becomes a SECOND `data:` line of the SAME event and the two
+      // payloads are joined and parsed as one JSON document — issue #53's
+      // "Unexpected non-whitespace character after JSON at position N".
+      //
+      // Closing the frame here keeps it a self-contained event: the last real
+      // chunk of the answer is delivered instead of being lost (without a
+      // terminator the client never dispatches the event at all and silently
+      // drops that content), and the synthetic terminator that follows can no
+      // longer be glued onto it. `emitFrame` completes the terminator for every
+      // write, so this normalization is the tail's share of that guarantee.
+      const lineTerminated = tail.endsWith('\n')
+      this.handleFrame(lineTerminated ? `${tail}\n` : `${tail}\n\n`)
+    }
   }
 
   /**
@@ -433,7 +498,7 @@ class RecoveryStream {
       this.emitContent(flushed.text)
     }
     this.closeWindow()
-    if (!this.sawDone && this.res.writable) this.res.write('data: [DONE]\n\n')
+    if (!this.sawDone && this.res.writable) this.emitFrame('data: [DONE]\n\n')
     if (this.res.writable) this.res.end()
   }
 
@@ -536,7 +601,7 @@ class RecoveryStream {
       this.windowOpened = true
       this.flushNotice()
       this.closeWindow()
-      this.res.write(frame)
+      this.emitFrame(frame)
       this.wroteContent = true
       return
     }
@@ -555,7 +620,7 @@ class RecoveryStream {
       this.wroteContent = true
       this.closeWindow()
       // Any text the same chunk also carried still belongs to the client.
-      if (outcome.text !== '') this.res.write(contentFrame(chunk, choiceRecord, outcome.text))
+      if (outcome.text !== '') this.emitFrame(contentFrame(chunk, choiceRecord, outcome.text))
       return
     }
 
@@ -617,7 +682,7 @@ class RecoveryStream {
   /** Queue a frame while the window is open, or write it once it has closed. */
   private send(frame: string, final: boolean): void {
     if (this.windowClosed || !this.windowOpened) {
-      this.res.write(frame)
+      this.emitFrame(frame)
       return
     }
     // A frame carrying `finish_reason` belongs AFTER content still in flight,
@@ -642,7 +707,7 @@ class RecoveryStream {
     this.windowClosed = true
     const pending = this.held
     this.held = []
-    for (const entry of pending) this.res.write(entry.frame)
+    for (const entry of pending) this.emitFrame(entry.frame)
   }
 }
 
