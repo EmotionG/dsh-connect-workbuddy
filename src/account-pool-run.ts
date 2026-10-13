@@ -236,6 +236,11 @@ export function probeUpdatesOf(
       // subsequent `live-request` entry is explainable rather than looking
       // like the file rolled back to an older value.
       source: 'test-batch',
+      // The name is written HERE, at the one moment it is certainly available
+      // (issue #60): the batch holds the account because it just resolved it.
+      // A member whose sign-in later disappears can then still be named in the
+      // card, instead of degrading to a bare id and a subjectless count.
+      ...row.accountName === '' ? {} : { accountName: row.accountName },
       ...row.result.retryAtMs === undefined ? {} : { retryAtMs: row.result.retryAtMs },
       ...row.result.message === undefined ? {} : { message: row.result.message },
     }

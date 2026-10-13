@@ -107,6 +107,24 @@ export interface WorkBuddyPoolProbe {
    * old probe files stay readable rather than being discarded.
    */
   message?: string
+  /**
+   * The account's display name AT THE MOMENT IT WAS MEASURED (issue #60).
+   *
+   * Stored because a saved pool member can outlive its sign-in. Once the
+   * desktop app drops a login, that id resolves to no listed account, so the
+   * card has nothing left to render for it — and the old warning ("1 saved
+   * account is no longer signed in") was a count with no subject, leaving the
+   * user unable to tell WHICH account had gone. The name was in hand at write
+   * time (both writers already carry it) and nowhere afterwards, so the record
+   * is the only place it can survive.
+   *
+   * ABSENT on records written before this field existed, and when the desktop
+   * app recorded no name: the card then falls back to a short id prefix rather
+   * than inventing a label. Snapshots are never refreshed from a LISTING — only
+   * a real measurement writes this, so a stale name cannot be "confirmed" by a
+   * routine scan that never saw the account.
+   */
+  accountName?: string
 }
 
 /** One account's live credit situation, as the pool ranks it. */

@@ -290,6 +290,16 @@ export interface WorkBuddyPoolDeps {
    */
   effectiveMemberAccountIds?(region: WorkBuddyRegion): Promise<readonly string[]>
   /**
+   * Last display name measured for each of a region's saved member ids
+   * (issue #60), from the runtime probe store — no upstream call.
+   *
+   * The card needs this for the one case it cannot answer from its own props: a
+   * saved member whose sign-in is gone resolves to no listed account, so its
+   * name exists ONLY in the measurement that once saw it. Optional: a Host
+   * built without it still renders, with the id-prefix fallback.
+   */
+  memberNames?(region: WorkBuddyRegion): Promise<Readonly<Record<string, string>>>
+  /**
    * Test ONE account against the region's target model.
    *
    * The per-row button's Host half. Optional: a Host built without it simply
@@ -815,6 +825,17 @@ async function workBuddyWebPool(
       .map(account => ({ account, member: false })),
   ]
 
+  /**
+   * Names for saved members the roster above does NOT contain (issue #60).
+   *
+   * Read for the SAVED ids only, and only from the measurement record: those
+   * are exactly the accounts the card cannot name from `accounts`, because
+   * nothing about them is left on this machine except the fact that they were
+   * once measured. Best-effort — a failed read names nothing, and the card
+   * falls back to an id prefix rather than inventing a label.
+   */
+  const memberNames = await pool.memberNames?.(region).catch(() => undefined) ?? undefined
+
   const accounts: WorkBuddyWebPoolAccount[] = rows.map(({ account, member, ranked: row }) => {
     const measured = byId.get(account.id)
     return {
@@ -870,6 +891,12 @@ async function workBuddyWebPool(
       accounts.map(account => account.accountId),
       new Set(preferences.memberAccountIds),
     ),
+    // Best-effort, and only for the ids the card cannot label itself: a saved
+    // member that still resolves has a live name in `accounts` above, so
+    // shipping those too would give the card two sources that could disagree.
+    // A read failure degrades to "unknown name", which the card renders as an
+    // id prefix — never to a wrong name.
+    ...memberNames === undefined ? {} : { memberNames },
     accounts,
     // The same displayed roster the model table uses, so the pool's manual
     // picker can never offer a model id the rest of the card does not know —

@@ -91,6 +91,66 @@ export function ghostMemberIds(
   return draftMembers.filter(id => !listedIds.has(id))
 }
 
+/** One saved-but-unsigned member, labelled as well as this machine can. */
+export interface GhostMember {
+  id: string
+  /**
+   * What to call it on screen.
+   *
+   * A measured name when one exists (see `WorkBuddyPoolProbe.accountName`),
+   * otherwise a short id prefix — never a blank. The prefix is a poor label but
+   * an honest one, and it is still enough to tell two ghosts apart; inventing
+   * something friendlier (a position, an index) would point the user at the
+   * wrong account.
+   */
+  label: string
+  /** True when {@link label} is a name rather than an id prefix. */
+  named: boolean
+}
+
+/** How many characters of an id are shown when no name was ever measured. */
+const GHOST_ID_PREFIX = 8
+
+/**
+ * Label saved member ids that resolve to no local sign-in (issue #60).
+ *
+ * The old warning was a bare count, which named no account and had no
+ * corresponding row — the user could neither identify the member nor act on it,
+ * even though the collected name was in hand at write time. This turns the same
+ * set into something renderable and specific.
+ *
+ * `names` is the Host's last-measured map; a missing entry means no measurement
+ * ever recorded a name, not that the account has none. Ids keep the order the
+ * saved list has, so the rendered list does not reshuffle between polls.
+ */
+export function ghostMembers(
+  draftMembers: readonly string[],
+  listedIds: ReadonlySet<string>,
+  names: Readonly<Record<string, string | undefined>> = {},
+): GhostMember[] {
+  return ghostMemberIds(draftMembers, listedIds).map((id) => {
+    const measured = names[id]
+    const named = typeof measured === 'string' && measured !== ''
+    return {
+      id,
+      label: named ? measured : `${id.slice(0, GHOST_ID_PREFIX)}…`,
+      named,
+    }
+  })
+}
+
+/**
+ * The names to show in one sentence, capped so the warning stays readable.
+ *
+ * Beyond three the sentence would wrap into a paragraph, so it ends with an
+ * ellipsis — the removable list rendered underneath carries the full set, which
+ * is why truncating here cannot hide a member.
+ */
+export function ghostNameList(ghosts: readonly GhostMember[], limit = 3): string {
+  const shown = ghosts.slice(0, limit).map(ghost => ghost.label).join('、')
+  return ghosts.length <= limit ? shown : `${shown}…`
+}
+
 /**
  * How many accounts a batch will really touch, as the log announces it.
  *

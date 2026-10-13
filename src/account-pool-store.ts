@@ -48,6 +48,11 @@ function isProbe(value: unknown): value is WorkBuddyPoolProbe {
     && typeof candidate['atMs'] === 'number'
     && (candidate['retryAtMs'] === undefined || typeof candidate['retryAtMs'] === 'number')
     && (candidate['message'] === undefined || typeof candidate['message'] === 'string')
+    // The display name a measurement observed (issue #60). Accepted only as a
+    // string: it is the one field here that reaches the card as a LABEL, so a
+    // non-string (a number id, an object) must not survive into the UI as
+    // `[object Object]`.
+    && (candidate['accountName'] === undefined || typeof candidate['accountName'] === 'string')
     // A source this build does not recognise is DROPPED, not rejected: refusing
     // the whole record would silently discard a real measurement written by a
     // newer build, whereas dropping only the label leaves the measurement
@@ -106,6 +111,7 @@ export async function readPoolProbes(
       ...knownProbeSource(probe.source) === undefined ? {} : { source: knownProbeSource(probe.source)! },
       ...probe.retryAtMs === undefined ? {} : { retryAtMs: probe.retryAtMs },
       ...probe.message === undefined ? {} : { message: probe.message },
+      ...probe.accountName === undefined ? {} : { accountName: probe.accountName },
     }
   }
   return probes
@@ -158,12 +164,21 @@ export function mergePoolProbe(
   update: WorkBuddyPoolProbe,
 ): WorkBuddyPoolProbe {
   if (existing === undefined) return update
-  if (update.retryAtMs !== undefined) return update
+  // The display name is INHERITED when the update does not carry one, for the
+  // same reason `retryAtMs` is: its absence is not a statement. A writer that
+  // could not see the account (a live failure on a credential the store can no
+  // longer name) must not erase the name an earlier measurement DID see — that
+  // name is the only thing that can identify a member whose sign-in has gone,
+  // which is exactly the record #60 needs kept.
+  const merged = update.accountName === undefined && existing.accountName !== undefined
+    ? { ...update, accountName: existing.accountName }
+    : update
+  if (update.retryAtMs !== undefined) return merged
   // A stored time that has already PASSED is not worth inheriting: carrying it
   // forward would date the record to a moment in the past and make the row read
   // as "back after <a time that is already gone>".
-  if (existing.retryAtMs === undefined || existing.retryAtMs <= update.atMs) return update
-  return { ...update, retryAtMs: existing.retryAtMs }
+  if (existing.retryAtMs === undefined || existing.retryAtMs <= update.atMs) return merged
+  return { ...merged, retryAtMs: existing.retryAtMs }
 }
 
 /**

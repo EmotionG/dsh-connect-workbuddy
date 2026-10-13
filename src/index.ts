@@ -1082,6 +1082,27 @@ export function apply(ctx: Context, config: Config): void {
         return effectiveMembersOf(saved, new Set(accounts.map(account => account.id)))
       },
       /**
+       * Last measured display name per saved member id (issue #60).
+       *
+       * Answers the one question the card cannot answer itself: a saved member
+       * whose sign-in is gone has no row in the roster, so the name the pool
+       * once saw is the only thing that can identify it. Read from the runtime
+       * probe store — no upstream call, and no credential touched.
+       *
+       * Best-effort, and deliberately NOT filtered to ghosts here: the route
+       * knows which ids are unlisted (it built the roster) and names only
+       * those, so this stays a plain lookup with one meaning.
+       */
+      memberNames: async (region: WorkBuddyRegion) => {
+        const probes = await readPoolProbes(region)
+        const names: Record<string, string> = {}
+        for (const [accountId, probe] of Object.entries(probes)) {
+          if (probe.accountName === undefined || probe.accountName === '') continue
+          names[accountId] = probe.accountName
+        }
+        return names
+      },
+      /**
        * Local sign-ins the pool does NOT cover.
        *
        * Sent so the card can offer them to check in. Membership is an explicit

@@ -933,6 +933,17 @@ export interface WorkBuddyWebPool {
    * ran on ZERO accounts and reported success.
    */
   effectiveMemberAccountIds?: readonly string[]
+  /**
+   * Last measured display name per saved member id (issue #60).
+   *
+   * Only ids the roster above does NOT list are useful here: those are the
+   * members whose sign-in has gone, and whose name therefore survives nowhere
+   * else. The card renders a name when there is one and a short id prefix when
+   * there is not — the point is that the ghost warning stops being a
+   * subjectless count ("1 saved account is no longer signed in") that the user
+   * has no way to act on.
+   */
+  memberNames?: Readonly<Record<string, string>>
   accounts: readonly WorkBuddyWebPoolAccount[]
   /**
    * The models a manual target can be chosen from.

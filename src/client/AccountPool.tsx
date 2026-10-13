@@ -49,7 +49,8 @@ import {
   announcedBatchCount,
   draftBaseFor,
   effectiveMemberIds,
-  ghostMemberIds,
+  ghostMembers as ghostMemberLabels,
+  ghostNameList,
   poolFailureText,
   usableMemberIds,
 } from './pool-state.ts'
@@ -398,8 +399,15 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     listedIds,
     dirty,
   })
-  /** Saved ids with no matching sign-in; surfaced rather than silently ignored. */
-  const ghostMembers = ghostMemberIds(active.memberAccountIds, listedIds)
+  /**
+   * Saved ids with no matching sign-in; surfaced rather than silently ignored.
+   *
+   * Named from the Host's last-measured map (issue #60): the id alone told the
+   * user nothing, because nothing on screen shows ids. `pool.memberNames` can
+   * only be absent for an older Host or an account never measured, and the
+   * helper then falls back to an id prefix instead of a blank.
+   */
+  const ghostMembers = ghostMemberLabels(active.memberAccountIds, listedIds, pool?.memberNames ?? {})
 
   /**
    * Pool MEMBERS that can serve right now.
@@ -537,6 +545,23 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       if (mounted.current) setSaving(false)
     }
   }, [dirty, discard, draft, onSaved, region, settingsScope, t])
+
+  /**
+   * Drop one ghost member from the draft.
+   *
+   * A DRAFT edit, not a write: membership is one of the preferences the Save
+   * button commits, and a control that wrote straight through would leave the
+   * panel claiming "unsaved changes" for an edit it had already persisted. The
+   * ghost rows therefore behave exactly like unchecking a listed account, which
+   * is the behaviour the old copy ("save again to drop them") described but
+   * gave the user no way to perform — the ids had no rows to uncheck.
+   */
+  const removeGhost = useCallback((accountId: string): void => {
+    editDraft(current => ({
+      ...current,
+      memberAccountIds: current.memberAccountIds.filter(id => id !== accountId),
+    }))
+  }, [editDraft])
 
   /** Check or uncheck one account in this pool. */
   const toggleMember = useCallback((accountId: string, next: boolean): void => {
@@ -1120,11 +1145,33 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
         : null,
       // State the discrepancy instead of silently ignoring the stale ids: the
       // user's saved list still contains them, and they need to know why the
-      // pool behaves as if they were absent.
+      // pool behaves as if they were absent — and WHICH they are (issue #60).
       ghostMembers.length === 0
         ? null
-        : h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
-            t('row.poolGhostMembers', { count: ghostMembers.length })),
+        : h('div', { className: 'dsm-workbuddy-pool-ghosts' },
+            h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
+              t('row.poolGhostMembers', {
+                count: ghostMembers.length,
+                names: ghostNameList(ghostMembers),
+              })),
+            // One removable chip per ghost. This is the "corresponding mark" the
+            // warning never had: the ids have no row in the table above (that
+            // roster is local sign-ins, and a ghost is precisely the member that
+            // is not in it), so without this the user could see that something
+            // was wrong but had nowhere to act.
+            h('ul', { className: 'dsm-workbuddy-pool-ghost-list' },
+              ghostMembers.map(ghost => h('li', { key: ghost.id, className: 'dsm-workbuddy-pool-ghost' },
+                h('span', { className: 'dsm-workbuddy-pool-ghost-name' }, ghost.label),
+                h('button', {
+                  type: 'button',
+                  className: 'dsm-workbuddy-pool-ghost-remove',
+                  title: t(ghost.named ? 'row.poolGhostRemoveNamed' : 'row.poolGhostRemoveUnnamed', {
+                    account: ghost.label,
+                  }),
+                  'aria-label': t('row.poolGhostRemove', { account: ghost.label }),
+                  disabled: saving,
+                  onClick: () => { removeGhost(ghost.id) },
+                }, '✕'))))),
       dirty && !sameIds(active.memberAccountIds, saved.memberAccountIds)
         ? h('p', { className: 'dsm-workbuddy-pool-dirty' }, t('row.poolUnsavedMembers'))
         : null,
