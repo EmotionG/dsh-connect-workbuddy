@@ -37,6 +37,7 @@ import {
   withWorkBuddyRegion,
 } from '../status-paths.ts'
 import { writeAccountSlot } from './account-selection.ts'
+import { formatCredits } from './credit-format.ts'
 import { exclusionText } from './exclusion-text.ts'
 import { WORKBUDDY_COMPOSER_CSS } from './styles.ts'
 import type { WorkBuddyWebAccountCredit, WorkBuddyWebRegion, WorkBuddyWebUsage } from '../status-paths.ts'
@@ -124,11 +125,6 @@ export function hostCreditsShownOf(usage: WorkBuddyWebUsage | undefined): boolea
   if (usage === undefined || usage.status === 'error') return undefined
   const value = usage.showCreditsInMainUi
   return typeof value === 'boolean' ? value : undefined
-}
-
-/** Group the digits so a four-figure balance stays readable in a narrow row. */
-function formatCredits(value: number): string {
-  return value.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 
 function formatClock(value: number): string {

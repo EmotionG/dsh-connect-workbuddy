@@ -38,6 +38,7 @@ import type {
   WorkBuddyWebRegion,
 } from '../status-paths.ts'
 import { exclusionText } from './exclusion-text.ts'
+import { formatCredits } from './credit-format.ts'
 import { BusyOverlay } from './BusyOverlay.tsx'
 import type { Translate } from './searched-paths.ts'
 import { readNdjson } from './ndjson.ts'
@@ -250,7 +251,7 @@ function outcomeText(t: Translate, outcome: WorkBuddyWebProbeOutcome): string {
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
+  return formatCredits(value)
 }
 
 /**

@@ -208,7 +208,7 @@ function SearchedPaths(
 function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   }).format(value)
 }
 
