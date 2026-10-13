@@ -1,11 +1,18 @@
 # 发布流程（Release Flow）
 
 > 本文档是 `dsh-connect-workbuddy` 的**唯一权威发布流程**。发布前请通读一遍。
+>
+> 🤖 **由 AI 助手代跑发布时，请先读 [`docs/RELEASE_EXPERIENCE.md`](docs/RELEASE_EXPERIENCE.md)**。
+> 它记着本文档尚未覆盖的四条，其中两条最要紧：**① 2FA 授权窗口只有约 5 分钟**（拿到链接后再靠人工
+> 转述往返就赶不上了，实测 92 次轮询耗尽 → `GET 404`；在自己的终端里跑则 13 次、49 秒完成），
+> 所以 `npm login` 与 `npm publish` 应交给用户在自己的交互式终端执行；**② npm 日志上限是 10 份、
+> 会静默轮转**（发布当天只跑必要命令，尽早摘出 `PUT` 状态行等关键证据）。
 
 ## 前置条件
 
 - npm 已登录：`npm whoami` 应显示 `dmh2002`（若报 `need auth`，先 `npm login`）。
-- 账号若开启 2FA（两步验证）：`npm publish` 时需**在浏览器确认一步**。
+- 账号若开启 2FA（两步验证）：`npm publish` 时需**在浏览器确认一步**。**这一步请在自己的交互式
+  终端里做**，理由见 [`docs/RELEASE_EXPERIENCE.md`](docs/RELEASE_EXPERIENCE.md) §1 与 §5。
 - GitHub 仓库：`https://github.com/dingminhua/dsh-connect-workbuddy`（默认分支 `main`）。
 - `gh` 已登录且带 `repo` 权限：`gh auth status` 应显示 `Logged in to github.com account dingminhua`、scope 含 `repo`（第 9 步要用）。
 
@@ -136,7 +143,15 @@ npm pack --dry-run
 
 > ⚠️ **这一步必须在交互式终端里做。** npm 在 stdout 不是 TTY 时（管道 `| tail`、重定向、后台任务、CI、agent 的 shell）会**印出被遮蔽的授权链接**（`…/auth/cli/***`，日志里也捞不回来）并**立刻退出**，不会等待浏览器确认——于是既拿不到链接、也没有进程接着上传。需要 2FA 的发布会话请直接在自己的终端跑 `npm publish`。详见[常见问题](#常见问题)里那条 EOTP 条目。
 
+> ⚠️ **授权窗口只有约 5 分钟，别把链接转述给别人等回复。** npm 拿到 `authId` 后按响应的 `retry-after`
+> （实测约 3 秒）轮询 `GET /-/v1/done?authId=…`；**约 92 次（≈4.6 分钟）后放弃并把该 authId 作废**，
+> 之后即使确认也只会拿到 `E404`。所以「AI 跑命令 → 把链接转给用户 → 用户切窗口确认 → 回复 AI」
+> 这条链路**必然赶不上**：实测 AI 代跑 4 次全部超时（含用 `script` 伪造 pty 绕过 TTY 那层），
+> 而用户在自己的终端里跑的那一次，**13 次轮询、49 秒**就完成了（观测记录见
+> [`docs/RELEASE_EXPERIENCE.md`](docs/RELEASE_EXPERIENCE.md) §1，含证据来源说明）。
+
 若浏览器打开的验证 URL 失效（404），重跑一次 `npm publish` 让 npm 生成新的授权链接，再在浏览器确认。
+（**链接 404 = 那次 2FA 会话已过期**；此时包**一个字节都没上传**，重试安全、**不需要改版本号**。）
 
 ### 8. 验证发布成功
 
@@ -227,6 +242,9 @@ gh release view vX.Y.Z --json name,tagName,isDraft,isPrerelease,assets
   - 参考：[Staged publishing for npm packages](https://docs.npmjs.com/staged-publishing/)。v3.0.0、v3.0.2 发布时都撞到这一点，且**两次都不是失败**——版本最终是在维护者批准后才出现在 registry 上。
 - **发布后 `npm view ... version` 还是旧版本 / 甚至 `@新版本` 报 404**：**先别断定发布失败**。本机 `~/.npmrc` 的本地代理会缓存 registry 响应——用第 8 步的 `curl --noproxy '*'` 直连命令复核，或 `npm view --prefer-online`。v1.4.0 发布时就是这样被误判过一次。真正的失败特征是：`npm publish` 输出里**没有** `+ dsh-connect-workbuddy@X.Y.Z` 那一行。
 - **`npm whoami` 报 E401**：说明 `~/.npmrc` 里的 `_authToken` 已失效（注意 `npm whoami` 偶尔会回显**缓存**的上一次结果，别被它迷惑）。先 `npm login --auth-type=web` 重新登录再发布。
+- **`npm error code E404 ... GET https://registry.npmjs.org/-/v1/done?authId=***`**：**2FA 会话过期**，不是包名错、也不是网络问题（npm 轮询约 92 次 ≈4.6 分钟后作废该 authId）。重跑 `npm publish` 生成新链接即可，**不需要改版本号**——此时包一个字节都没上传。
+- **想用 `authId` 判断「这条链接属于哪次运行」——做不到，别试**：npm **自己**就把 `authId` 遮蔽成 `***` 写进日志（与上一条登录链接的 `***` 同源），所以它不可能出现在任何日志里。要归属请换指纹：**轮询次数**（近百次 = 超时；十几次就 `GET 200` = 当场确认成功）、日志起始时间（文件名即 UTC 时间戳）、`~/.zsh_history`。详见 [`docs/RELEASE_EXPERIENCE.md`](docs/RELEASE_EXPERIENCE.md) §2。
+- **排查发布问题时想回头翻当天的日志，发现已经没了**：npm 日志保留上限是 **10 份**（`debug-0.log` 开头会记 `logs-max:10`），**每条新命令都会挤掉最旧的一份**。发布当天只跑必要命令，并**尽早**摘出关键证据（`PUT` 状态行、轮询次数、末次响应、退出码）。详见 [`docs/RELEASE_EXPERIENCE.md`](docs/RELEASE_EXPERIENCE.md) §3。
 - **本地开发与发布的关系**：本地开发用 `link:` 安装，与 npm 发布互不影响；npm 发布的包是 `lib/`、README 等静态文件，同一份源码。
 - **GitHub 上没有本次 Release / `gh release list` 看不到新版本**：第 9 步漏了。npm 与 GitHub 是两条独立的发布通道，**`npm publish` 成功不会自动创建 Release**，CI 也不会——本仓库没有 release 自动化（`.github/workflows/` 只有 `ci.yml`）。补做即可：版本、tag、正文都还在仓库里，事后补建与当时创建完全等效，只是 GitHub 上的时间戳会晚。历史上 `v2.0.0`、`v2.0.16`、`v2.0.17` 就是这样漏掉的。
 - **`gh release create` 报 `tag not found`**：tag 还没推。先完成第 5 步的 `git push origin vX.Y.Z`。**不要**为了让它通过就去掉 `--verify-tag`——那会让 gh 新建一个指向当前 HEAD 的 tag，可能覆盖或偏离你实际发布的提交。
