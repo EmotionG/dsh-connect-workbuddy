@@ -236,6 +236,10 @@ function outcomeText(t: Translate, outcome: WorkBuddyWebProbeOutcome): string {
   switch (outcome) {
     case 'ok': return t('row.probeOk')
     case 'rate-limited': return t('row.poolExcludedRateLimited')
+    // Its own label: naming the MODEL as the limited party is the point — the
+    // row shows an ACCOUNT, and "被限流" beside an account name is what made
+    // issue #56's reporter hunt for a bad account that did not exist.
+    case 'model-busy': return t('row.poolExcludedModelBusy')
     case 'out-of-credit': return t('row.poolExcludedOutOfCredit')
     case 'credential-rejected': return t('row.probeCredentialRejected')
     case 'not-found': return t('row.probeNotFound')
@@ -282,7 +286,12 @@ function stateColor(account: WorkBuddyWebPoolAccount): string {
     // user to act. `unavailable` is an unreachable upstream — the same
     // "wait, do not re-auth" class as a rate limit — so painting it red would
     // assert the account is broken when only the network was.
-    return account.excludedBy === 'rate-limited' || account.excludedBy === 'unavailable'
+    // `model-busy` is in the amber set for the same reason as `rate-limited`:
+    // it clears on its own, and the account is not broken — painting it red
+    // would accuse the account of a fault that belongs to the model.
+    return account.excludedBy === 'rate-limited'
+      || account.excludedBy === 'model-busy'
+      || account.excludedBy === 'unavailable'
       ? 'var(--dsw-alias-state-warn-primary, #f59e0b)'
       : 'var(--dsw-alias-state-error-primary, #ef4444)'
   }
@@ -1197,7 +1206,7 @@ function renderAccountRow(input: {
       // bare outcome would leave the user unable to tell "the upstream gave no
       // time" apart from "this plugin forgot to show it" — and the honest
       // absence is the same contract `cooldownOf()` already keeps.
-      : probe.outcome === 'rate-limited' || probe.outcome === 'out-of-credit'
+      : probe.outcome === 'rate-limited' || probe.outcome === 'model-busy' || probe.outcome === 'out-of-credit'
         ? `${outcomeText(t, probe.outcome)} · ${t('row.poolRetryUnknown')}`
         : outcomeText(t, probe.outcome)
   // The reason worth inlining, from the ONE rule both tables share (see

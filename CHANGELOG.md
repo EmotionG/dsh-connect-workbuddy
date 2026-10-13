@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.4.3 (2026-10-13)
+
+### Fixes
+
+- **插件页里 `dsh-connect-workbuddy` 的设置项整片空白，且不报任何错。**（issue #55）
+  - **现象**：侧边栏「插件」→「已安装」→ 点进 `dsh-connect-workbuddy`，详情页里本该出现的 WorkBuddy 卡片（国内版 / 国际版两个标签页、扫码登录、账号检测、积分、模型勾选）**整个不见**，没有占位、没有报错、控制台也干净。报告者按另一份 AI 建议在 `node_modules` 里打补丁续了一版，但那是打在产品产物上、升级即失效。
+  - **根因是两处叠加，各自都足以让卡片消失**：
+    - **① 注册用的 key 与页面查找用的 name 不是同一个东西。** `plugins.bundle.config` / `plugins.row.config` 是 **keyed** 槽位（`kind: 'keyed'`，每个 `key` 每个优先级只能有一条）。插件页渲染它们时用的是 `renderSlot('plugins.bundle.config', { view: 'page' }, { entryKey: pkg.name })`，而 `pkg.name` 来自插件管理器清单里的**包名**；渲染前还要先过一道 `ledger.bundles.has(pkg.name)` —— 而这个 Set 装的正是各注册条目的 `key`。**两侧都是精确相等比较，比的都是包名，没有一处回落到 Loader 条目 id**。所以清单里叫 `dsh-connect-workbuddy`、而卡片只注册在 `include:dsh-connect-workbuddy` 下时，查找必然落空：整段不渲染，`apply()` 平静结束。
+    - **② 注册这件事被挂在了「namespace 到达」的边沿上。** 卡片原本只在 `configForms.whileServed()` 的 `register` 回调里注册，而这个回调只在 **unserved→served 的跳变**上跑一次。若 settings 镜像始终不上报本插件的 namespace（名字不在候选表里、settings 面答得晚或答失败、该部署本就没把插件挂成可配置条目），这个跳变永远不会发生，`registerAllSlots()` 一次都不执行。因为整个 `apply` 体包在只打日志的 try/catch 里，**UI 就这样静默空白** —— 报告者遇到的那份补丁也正是这条。
+  - **修法**：① 卡片的 `plugins.bundle.config` / `plugins.row.config` 注册改为覆盖包名的**所有拼写**（`WORKBUDDY_CARD_KEYS`：裸包名 + `include:` 前缀形式，行 key 为 `<包名>#<包名>`）。这些 key 各占一个 cell，属于**无遮蔽的重复条目**而非冲突，所以「全注册一遍」严格优于赌一个。② 注册**不再等待边沿**：`whileServed` 保留原语义（等 namespace 真到了再重绑一次、拿到可写表单），同时无条件先注册一遍；卡片在没有 `settingsScope` 时本就以**只读**形态渲染，这与「宿主没有 settings 面」的既有降级路径是同一条。
+  - **顺带修掉一个会让上面②反而变成「整片空白 2.0」的顺序坑**：`rebindSlots()` 必须**先 dispose 再 register**。keyed 槽位会拒绝一个仍然存活的 key（`already has an entry for key …`），而每次注册都有各自的 try/catch 把它吞成一行 `console.error` —— 于是「先注册后 dispose」的结果是：旧条目刚被拆掉、新条目全被拒绝，账本归空。这一点由新增用例显式钉住，并在变异验证（把顺序改回去）下变红。
+  - **守卫**：新增 `tests/issue55-card-not-registered.spec.ts`（8 例），按**页面真正读的那个账本**断言：裸名与 `include:` 前缀两种清单名下 `ledger.bundles.has(pkg.name)` 都为真；namespace 永不到达时仍完成注册；namespace 已经到了时不产生重复注册（不触发 keyed 冲突）；无 settings 面的宿主仍注册（只读降级）；以及上面那条 dispose/register 顺序。`tests/client-fallback.spec.ts` 的手工镜像同步更新（注册数 3→5）。
+
+- **14003 是模型级、逐请求的软限流，却被当成账号级失败：换号循环把池内每个账号各锁 30 分钟。**（issue #56）
+  - **现象**：报告者的决定性对照 —— **同一凭据、同一时刻**，除 `model` 一个字段外逐字节相同的请求，`deepseek-v4.1-flash`（×0）3 发只成 1 发、`deepseek-v4.1-flash-sg`（×0.03）同样 1/3、而 `glm-5.3-flash` / `hy3` / `kimi-k2.6` 全部 **3/3**。同一秒内同账号别的模型全部正常，所以**账号没有被限流**。上游原话也把维度说明白了：`displayTips` = 「建议等待约 1 分钟后重试，**或切换到负载较低的模型**」。而插件的实际效果是：三个账号全部变 `rate-limited`，用户在此后约 30 分钟里完全无法交流 —— 把上游说的一分钟放大了 30 倍，还放大到了整个账号池。
+  - **根因**：`classifyUpstreamError()` 把 429 一律归为 `soft_rate`。14003 的报文里**没有任何日期时间**，所以 `parseUpstreamResetAt()` 返回 `undefined` → `cooldownOf()` 返回 `{}` → `retryDue()` 落到 `probe.atMs + 18e5`（`POOL_UNKNOWN_COOLDOWN_MS` = 30 分钟）。三重放大同时发生：**等太久**、**锁错对象**（锁的是账号，而限制跟着模型走）、**把每个账号都锁一遍**（failover 逐个撞同一堵墙，每撞一次就给一个本来健康的账号写入一条 `live-request` 的限流记录，覆盖掉它先前的 `ok` 测量）。
+  - **修法**（四处，各自独立可验）：
+    - **分类**：新增 `model_busy` 这一 kind（`UpstreamErrorKind` / `WorkBuddyProbeOutcome` / `WorkBuddyPoolExclusion` 三处词汇表各加一枚），判据是 **`"code":14003` 这一带引号的 key 形式** —— 不用 `displayTips` 文案当判据，否则一个恰好提到「负载较低的模型」的网关横幅也会被改判。检查放在**积分标记之后**（两者同时出现时仍按「要充值」这条可执行的结论走）、**普通 429 分支之前**。
+    - **时长**：`MODEL_BUSY_COOLDOWN_MS = 2 分钟`，与上游「约 1 分钟」同量级（取 2 而非 1，是为了越过这一阵而不是踩在边上）。`cooldownOf()` 为 `model-busy` 补上这个兜底，并把 `retrySource` 标成新的 `'upstream-tips'` —— 它如实说明这个数字的来路是**上游给的数量级**，不是上游给的时刻。
+    - **不换号**：`isFailoverWorthy()` 把 `model_busy` 与 `client` 一起排除。换号撞的是同一堵墙，只会每个账号各花一次请求去学到第一发已经说过的事实，并往每个账号写一条假测量。失败**仍然如实上报一次**（卡片要靠它显示「为什么这个账号不在池里」）。
+    - **如实告知**：shim 给 `model_busy` 单独一条错误文案 —— 沿用上游自己的话（「请求过于频繁，请稍后重试。」）+ `requestId`，并明确写出**这不是账号被限流、换账号没用、建议等待约 1 分钟或切换模型**。卡片侧新增 `row.probeModelBusy*` / `row.poolExcludedModelBusy` 文案，池表里「模型繁忙」与「被限流」**分开显示**（把模型的问题写在账号名旁边，正是让报告者去找一个并不存在的坏账号的原因）。
+  - **顺带对齐两处**：`probe-reason.ts` 把 `model-busy` 列入「标签已说清、不再内联原始报文」的集合（该报文只是 14003 信封，会把补救办法挤掉）；`AccountPool` 的状态色把 `model-busy` 归入琥珀（会自行恢复、账号没坏）而非红色。
+  - **守卫**：新增 `tests/issue56-model-scoped-throttle.spec.ts`（14 例），用报告者的原文报文当 fixture：分类正确（14003→`model-busy`，6004→`soft_rate` 不变）、不误伤（只有文案没有 code、或 requestId 恰好含 `14003`，都仍是普通限流）、与积分同时出现时仍判积分、冷却时长为分钟级且带 `'upstream-tips'` 来源、有真实时刻时以时刻为准、模型级账号在一分钟后回到池内而普通限流仍在池外。`tests/shim-failover.spec.ts` 新增 3 例：`model_busy` **不走**换号（池里明明有候选也不问）、失败仍上报且只报一次、用户看到的是「模型繁忙」而不是「账号被限流」。
+  - **刻意保留的重复**：`MODEL_BUSY_COOLDOWN_MS` 在 `src/probe.ts` 与 `src/account-pool.ts` 各声明一次。两者不能互相 import（一个是 Host 侧探测、一个是纯排序规则，后者刻意不依赖前者），所以由一条测试断言两个声明**必须相等** —— 探测写一种冷却、排序读另一种，就会悄悄把这个缺陷重新打开。
+
+### Docs
+
+- 无。本版含上述两处修复与配套测试。
+
 ## 4.4.2 (2026-10-13)
 
 ### Fixes

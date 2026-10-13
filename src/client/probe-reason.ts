@@ -25,8 +25,15 @@ import type { WorkBuddyWebProbeOutcome } from '../status-paths.ts'
 /**
  * Outcomes whose label + stated recovery time ARE the whole story.
  *
- * Both carry a reset instant, which the row prints right beside them; their
- * bodies restate that instant and add a `code`/`requestId` pair nobody reads.
+ * `rate-limited` and `out-of-credit` both carry a reset instant, which the row
+ * prints right beside them; their bodies restate that instant and add a
+ * `code`/`requestId` pair nobody reads.
+ *
+ * `model-busy` belongs here for the opposite reason: its label states the whole
+ * finding INCLUDING the remedy ("this model is loaded right now · not your
+ * account — wait about a minute or switch models"). The recorded body is the
+ * upstream's `14003` envelope, and appending it in a 72-character cell would
+ * bury the remedy under the JSON the label was written to translate.
  *
  * `credential-rejected` and `not-found` are deliberately NOT here: their labels
  * state a conclusion ("sign in again", "no such model"), and the upstream's own
@@ -34,6 +41,7 @@ import type { WorkBuddyWebProbeOutcome } from '../status-paths.ts'
  */
 const SELF_EXPLANATORY: ReadonlySet<WorkBuddyWebProbeOutcome> = new Set([
   'rate-limited',
+  'model-busy',
   'out-of-credit',
 ])
 

@@ -56,8 +56,13 @@ function apply(ctx: any): void {
     }
 
     const registerAllSlots = (): Array<() => void> => [
-      registerCard('plugins.bundle.config', 'dsh-connect-workbuddy'),
-      registerCard('plugins.row.config', 'dsh-connect-workbuddy#dsh-connect-workbuddy'),
+      // Every package-name spelling, because the Plugins page looks a card up
+      // by EXACT `key` equality against the inventory's package name (issue
+      // #55) — see `WORKBUDDY_CARD_KEYS` in `src/status-paths.ts`.
+      ...['dsh-connect-workbuddy', 'include:dsh-connect-workbuddy']
+        .map(key => registerCard('plugins.bundle.config', key)),
+      ...['dsh-connect-workbuddy', 'include:dsh-connect-workbuddy']
+        .map(key => registerCard('plugins.row.config', `${key}#${key}`)),
       registerCard('settings.plugin.item', 'workbuddy'),
     ].filter((disposer): disposer is () => void => disposer !== undefined)
 
@@ -74,6 +79,11 @@ function apply(ctx: any): void {
           liveDisposers = []
         }
       }), 'dsh-connect-workbuddy: settings namespace binding')
+      // Register anyway, without waiting for the unserved→served edge: the card
+      // is useful read-only, and a deployment whose namespace never appears in
+      // the mirror would otherwise get NO card and NO error (issue #55).
+      for (const dispose of liveDisposers) dispose()
+      liveDisposers = registerAllSlots()
     } else if (forms !== undefined) {
       settingsScope = forms.get('workbuddy')
       liveDisposers = registerAllSlots()
@@ -112,9 +122,15 @@ describe('client card fallback', () => {
     }
 
     expect(() => apply(fakeCtx)).not.toThrow()
-    // The broken slot is logged per-slot, the other two still registered.
-    expect(registered).toEqual(['plugins.bundle.config', 'settings.plugin.item'])
-    expect(errors).toHaveLength(1)
+    // The broken slot is logged per-slot; every OTHER registration still landed.
+    expect(registered).toEqual([
+      'plugins.bundle.config',
+      'plugins.bundle.config',
+      'settings.plugin.item',
+    ])
+    // One line per failed keyed registration: the row slot is tried twice (once
+    // per package-name spelling), so both failures are reported.
+    expect(errors).toHaveLength(2)
     expect(String(errors[0])).toContain('plugins.row.config')
     expect(String(errors[0])).toContain('already has an entry')
 
@@ -140,7 +156,7 @@ describe('client card fallback', () => {
     }
 
     expect(() => apply(fakeCtx)).not.toThrow()
-    expect(registered).toHaveLength(3)
+    expect(registered).toHaveLength(5)
     expect(errors).toHaveLength(0)
 
     spy.mockRestore()

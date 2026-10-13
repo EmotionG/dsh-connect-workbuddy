@@ -97,6 +97,16 @@ const RATE_LIMITED: WorkBuddyChatResult = {
   message: '您的使用量已超出频率限制，将在 2026-10-02 05:23:27 UTC+8 重置，您也可以切换其他模型继续使用。',
 }
 
+/**
+ * The reporter's 14003 body from issue #56, verbatim.
+ *
+ * `kind` is set by `classifyUpstreamError` in production; this fixture states it
+ * directly because the shim's contract is about what it DOES with a classified
+ * failure, not about how it was classified (that is covered in
+ * `issue56-model-scoped-throttle.spec.ts`).
+ */
+const MODEL_BUSY_MESSAGE = '{"code":14003,"msg":"too many requests","requestId":"00dc90c7-f7b6-40ad-8960-a00c2d92b567","displayMsg":{"en":"Too many requests. Please retry later.","zh":"请求过于频繁，请稍后重试。"},"displayTips":{"en":"Wait about a minute before retrying, or switch to a less busy model.","zh":"建议等待约 1 分钟后重试，或切换到负载较低的模型。"}}'
+
 function ok(): WorkBuddyChatResult {
   return { ok: true, response: new Response('data: [DONE]\n\n', { status: 200 }) }
 }
@@ -165,6 +175,50 @@ describe('pool failover: retrying a failed chat on another account', () => {
       await shim.close()
       shim = undefined
     }
+  })
+
+  it('does NOT walk the pool for a MODEL-scoped throttle (issue #56)', async () => {
+    // The 14003 limit belongs to the model, so a second account answers the same
+    // 14003 one round trip later — and each attempt writes a rate-limited
+    // measurement onto an account that was never the problem. The reporter's
+    // measurement is what makes this decidable: same credential, same second,
+    // other models answered 3/3.
+    const other = credentialFor('other')
+    const seen: string[] = []
+    shim = mount({
+      others: [other],
+      chatStream: async credential => {
+        seen.push(credential.uin ?? '')
+        return { ok: false, status: 429, kind: 'model_busy', message: MODEL_BUSY_MESSAGE }
+      },
+      // The pool is HAPPY to offer another account; the shim must not ask.
+      failover: async () => other,
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(seen).toEqual(['selected'])
+    expect(response.status).toBe(429)
+  })
+
+  it('tells the user the model is busy rather than blaming their account', async () => {
+    shim = mount({
+      chatStream: async () => ({ ok: false, status: 429, kind: 'model_busy', message: MODEL_BUSY_MESSAGE }),
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    // `code` carries the host-facing translation (a 429 that must stay OUT of
+    // the host's in-place retry set), `type` names the class honestly.
+    expect(response.body).toContain('"code":"quota_exceeded"')
+    expect(response.body).toContain('"type":"model_busy"')
+    // The three things the user needs: it is not the account, what to do, and the
+    // upstream's own words as the receipt.
+    expect(response.body).toContain('这不是账号被限流')
+    expect(response.body).toContain('等待约 1 分钟')
+    expect(response.body).toContain('请求过于频繁，请稍后重试。')
+    // The count of accounts tried is absent because nobody else was tried.
+    expect(response.body).not.toContain('after trying')
   })
 
   it('reports the failure unchanged when the pool offers nobody else', async () => {
@@ -560,6 +614,29 @@ describe('failure reporting without a pool to fail over to', () => {
         chatStream: async () => ({ ok: false, status: 400, kind: 'client', message: 'bad request' }),
       } as unknown as WorkBuddyUpstreamClient,
       catalog: new WorkBuddyCatalog(),
+      onAccountFailure: accountId => { reports.push(accountId) },
+    })
+    await shim.ready
+    await chat(shim)
+    expect(reports).toEqual([SELECTED_ID])
+  })
+
+  it('still reports a model-scoped throttle, and reports it once', async () => {
+    // The shim refuses to FAIL OVER for `model_busy` (no point hitting the same
+    // model wall twice), but it must still REPORT the attempt: the card lists why
+    // an account is out, and the plugin's `recordAccountFailure` is what turns
+    // the report into a measurement — on the SHORT clock, in
+    // `issue56-model-scoped-throttle.spec.ts`. Reporting it once (not once per
+    // suppressed candidate) is what keeps the pool's record honest.
+    const other = credentialFor('other')
+    const reports: string[] = []
+    shim = createWorkBuddyShim({
+      store: storeWith([other]),
+      client: {
+        chatStream: async () => ({ ok: false, status: 429, kind: 'model_busy', message: MODEL_BUSY_MESSAGE }),
+      } as unknown as WorkBuddyUpstreamClient,
+      catalog: new WorkBuddyCatalog(),
+      failoverAccount: async () => other,
       onAccountFailure: accountId => { reports.push(accountId) },
     })
     await shim.ready

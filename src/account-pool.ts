@@ -141,6 +141,7 @@ export interface WorkBuddyPoolMember {
 export type WorkBuddyPoolExclusion =
   | 'unusable'
   | 'rate-limited'
+  | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
   | 'not-found'
@@ -171,6 +172,33 @@ export interface WorkBuddyPoolRanked {
  * heal itself, since nothing else re-probes an excluded member.
  */
 export const POOL_UNKNOWN_COOLDOWN_MS = 30 * 60_000
+
+/**
+ * How long a MODEL-scoped throttle benches its account.
+ *
+ * Short on purpose, and THIS is the fix for issue #56.
+ *
+ * `model_busy` (upstream 14003) is not a statement about the account at all: it
+ * is the model's own load, and the reporter's measurement shows the same
+ * credential answering other models at the same second. Benching the account for
+ * the generic half-hour fallback therefore did three wrong things at once:
+ *
+ * 1. It waited 30x longer than the upstream's own advice ("wait about a
+ *    minute").
+ * 2. It benched EVERY account, because failover walked the pool and each member
+ *    hit the same model-level wall — so the user could not talk to the model at
+ *    all for half an hour.
+ * 3. It taught the pool a false fact about each account, overwriting a good
+ *    `test-batch` measurement with a `live-request` failure that said nothing
+ *    about the account.
+ *
+ * The value is deliberately the same order as {@link MODEL_BUSY_COOLDOWN_MS} in
+ * `src/probe.ts`, but it is NOT imported from there: this module is deliberately
+ * dependency-light (it is the pure ranking rule), and a cooldown that a probe
+ * writes and a ranking reads must not be able to drift by a refactor of either
+ * file. A unit test pins the two together instead.
+ */
+export const MODEL_BUSY_COOLDOWN_MS = 2 * 60_000
 
 /**
  * Whether one account can be billed at `nowMs`.
@@ -232,6 +260,17 @@ export function exclusionOf(
       return retryDue(probe, nowMs) ? undefined : 'failed'
     case 'rate-limited':
       return retryDue(probe, nowMs) ? undefined : 'rate-limited'
+    case 'model-busy':
+      // The model is loaded, not the account. It STILL leaves the pool — a
+      // request billed to it right now would hit the same wall — but on its own
+      // short clock ({@link MODEL_BUSY_COOLDOWN_MS}), never the half-hour
+      // fallback that turned one busy minute into a pool-wide outage.
+      //
+      // NOT a permanent candidacy either: returning `undefined` here (the
+      // treatment `policy-rejected` gets) would make failover re-try the same
+      // account against a model known to be refusing it, which is exactly the
+      // "walk every member into the same wall" behaviour issue #56 reports.
+      return retryDue(probe, nowMs, MODEL_BUSY_COOLDOWN_MS) ? undefined : 'model-busy'
     case 'out-of-credit':
       return retryDue(probe, nowMs) ? undefined : 'out-of-credit'
     case 'policy-rejected':
@@ -264,9 +303,18 @@ export function exclusionOf(
  * transport failure, so `atMs + POOL_UNKNOWN_COOLDOWN_MS` is what brings those
  * back. That is deliberate — the alternative is a permanent exclusion decided by
  * an event that said nothing about the account.
+ *
+ * `fallbackMs` lets one outcome carry a SHORTER clock than the generic one: the
+ * model-scoped throttle is upstream's own "about a minute", and applying the
+ * half-hour account fallback to it is issue #56. It is a parameter rather than a
+ * second function so every outcome keeps sharing one definition of "due".
  */
-function retryDue(probe: WorkBuddyPoolProbe, nowMs: number): boolean {
-  const until = probe.retryAtMs ?? probe.atMs + POOL_UNKNOWN_COOLDOWN_MS
+function retryDue(
+  probe: WorkBuddyPoolProbe,
+  nowMs: number,
+  fallbackMs: number = POOL_UNKNOWN_COOLDOWN_MS,
+): boolean {
+  const until = probe.retryAtMs ?? probe.atMs + fallbackMs
   return nowMs >= until
 }
 

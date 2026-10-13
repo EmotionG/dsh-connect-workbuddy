@@ -179,6 +179,10 @@ function isJsonContentType(req: IncomingMessage): boolean {
 const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   hard_credit: 402,
   soft_rate: 429,
+  // Same status as `soft_rate`, because that is what the upstream returned — the
+  // distinction lives in `code`/`type`, not in a relabelled status. See
+  // KIND_HOST_CODE for why the host must not read this as an account limit.
+  model_busy: 429,
   session_dead: 401,
   policy_reject: 403,
   not_found: 502,
@@ -224,9 +228,18 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
  * place would spend the retry budget on a request the server will refuse again,
  * and cross-provider failover cannot help a policy decision either. The code the
  * host receives therefore names the class honestly.
+ *
+ * `model_busy` gets the same `quota_exceeded` translation as `soft_rate`, and
+ * for a sharper version of the same reason: it arrives as a 429, and the host's
+ * in-place retry set is exactly where a request that is about to be refused
+ * again must not go. A model that is loaded for everyone will not clear inside
+ * one turn's backoff, so spending five attempts on it delays the honest answer
+ * without ever producing one. `type` still says `model_busy`, which is what a
+ * human reads and what routes the wording below.
  */
 const KIND_HOST_CODE: Partial<Readonly<Record<UpstreamErrorKind, string>>> = {
   soft_rate: 'quota_exceeded',
+  model_busy: 'quota_exceeded',
 }
 
 /**
@@ -782,6 +795,12 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
     case 'soft_rate':
     case 'hard_credit':
       return 'rate limited'
+    case 'model_busy':
+      // NOT "rate limited": that phrasing is what sent issue #56's reporter to
+      // the account pool. The failure belongs to the model, and the notice this
+      // text feeds only ever appears when the plugin DID switch accounts — which
+      // it no longer does for this kind.
+      return 'throttled on this model (not the account)'
     case 'session_dead':
       return 'signed out'
     case 'policy_reject':
@@ -924,12 +943,24 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
    * `client` is deliberately NOT one of them: the upstream rejected the
    * REQUEST (malformed body, unsupported field), so every account answers the
    * same 400 and walking the rest of the pool only multiplies the wait before
-   * the user sees an error they must act on anyway. Everything else describes a
-   * PER-ACCOUNT condition — a rate limit, exhausted credits, a dead session, a
-   * gateway that failed this one call — which another account may well survive.
+   * the user sees an error they must act on anyway.
+   *
+   * `model_busy` is NOT one of them either, and the distinction is the whole of
+   * issue #56. The 14003 throttle belongs to the MODEL — the upstream's own
+   * message says so ("switch to a less busy model") and the reporter's
+   * measurement confirms it: same credential, same second, other models answer.
+   * So a second account does not answer better than the first; it answers the
+   * same 14003, one round trip later, and each attempt writes a rate-limited
+   * measurement onto an account that was never the problem. The measured outcome
+   * was a pool in which every member had been taught a false fact, and a user
+   * who could not talk to the model for half an hour.
+   *
+   * Everything else describes a PER-ACCOUNT condition — a volume limit,
+   * exhausted credits, a dead session, a gateway that failed this one call —
+   * which another account may well survive.
    */
   function isFailoverWorthy(kind: UpstreamErrorKind): boolean {
-    return kind !== 'client'
+    return kind !== 'client' && kind !== 'model_busy'
   }
 
   async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1125,6 +1156,27 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         const message =
           `${lead}（${meta.join('，')}）${note}。该请求被 WorkBuddy 服务端策略拒绝，重新登录不会解决；` +
           '可在 WorkBuddy 桌面端用同一账号验证，或切换区域/账号后重试'
+        writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
+        return
+      }
+      if (result.kind === 'model_busy') {
+        // The upstream's own advice, made actionable.
+        //
+        // A 14003 is not the user's account being limited, and saying so would
+        // send them to fix something that is not broken (add accounts, wait half
+        // an hour, re-sign-in). The upstream already says what is wrong and what
+        // to do — "建议等待约 1 分钟后重试，或切换到负载较低的模型" — so the reply
+        // says it too, and the plugin deliberately does NOT switch accounts on
+        // this failure: every account shares the model, so a retry elsewhere
+        // would spend a request to be told the same thing (issue #56).
+        const detail = result.detail
+        const lead = detail?.displayMsg ?? result.message.slice(0, 200)
+        const meta = ['模型当前负载较高']
+        if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
+        if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
+        const message =
+          `${lead}（${meta.join('，')}）${note}。这不是账号被限流——同一凭据下换一个模型即可正常使用；` +
+          '插件不会为此切换账号，因为该限制跟随模型本身。建议等待约 1 分钟后重试，或切换到负载较低的模型'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }

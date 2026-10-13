@@ -22,7 +22,7 @@
  * @module dsh-connect-workbuddy/client
  */
 
-import { WORKBUDDY_SETTINGS_NAMESPACE_CANDIDATES, WORKBUDDY_SETTINGS_NS } from '../status-paths.ts'
+import { WORKBUDDY_CARD_KEYS, WORKBUDDY_SETTINGS_NAMESPACE_CANDIDATES, WORKBUDDY_SETTINGS_NS } from '../status-paths.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
@@ -105,7 +105,15 @@ export function apply(ctx: WorkBuddyClientContext): void {
     // `settingsScope` service was removed with the 0.1.5 line (2.1.0), so
     // there is no fallback to bind.
 
-    /** Register one card slot; returns its disposer, or undefined if it failed. */
+    /**
+     * Register one card slot; returns its disposer, or undefined if it failed.
+     *
+     * `ctx.slots.inject(name, …)` resolves as soon as the slot is DECLARED (the
+     * Plugins page declares all three ledgers — `plugins.item`,
+     * `plugins.bundle.config`, `plugins.row.config` — as children of its own
+     * registration), and is otherwise queued until a later declaration. So a
+     * registration here is not lost just because the page has not mounted yet.
+     */
     const registerCard = (slotName: string, key: string): (() => void) | undefined => {
       try {
         return ctx.slots.inject(slotName as never, () => (ctx.slots as unknown as {
@@ -178,9 +186,22 @@ export function apply(ctx: WorkBuddyClientContext): void {
      * registrations must move TOGETHER: see {@link bindSettingsScope} for why a
      * late-arriving namespace has to produce fresh registrations rather than a
      * mutated closure.
+     *
+     * The card registers under EVERY spelling of its package name (see
+     * {@link WORKBUDDY_CARD_KEYS}): the Plugins page looks a
+     * configuration up by exact `key` equality against the inventory's package
+     * name, and a deployment is free to name the install row whatever it likes
+     * — issue #55 is exactly that mismatch, which renders an empty page and
+     * reports nothing at all.
      */
+    const registerAllSlots = (): Array<() => void> => [
+      ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.bundle.config', key)),
+      ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.row.config', `${key}#${key}`)),
+      registerComposerCredits(),
+    ].filter((disposer): disposer is () => void => disposer !== undefined)
+
     /**
-     * Disposers of the slots registered for the CURRENT namespace binding.
+     * Disposers of the slots registered for the CURRENT binding.
      *
      * Declared before {@link bindSettingsScope} because that function closes
      * over it and reassigns it; the binding is only armed at the end of `apply`,
@@ -189,11 +210,27 @@ export function apply(ctx: WorkBuddyClientContext): void {
      */
     let liveDisposers: Array<() => void> = []
 
-    const registerAllSlots = (): Array<() => void> => [
-      registerCard('plugins.bundle.config', 'dsh-connect-workbuddy'),
-      registerCard('plugins.row.config', 'dsh-connect-workbuddy#dsh-connect-workbuddy'),
-      registerComposerCredits(),
-    ].filter((disposer): disposer is () => void => disposer !== undefined)
+    /**
+     * Replace the live registrations with a fresh set.
+     *
+     * ORDER MATTERS: dispose FIRST, then register.
+     *
+     * The ledger is a KEYED slot with one entry per `key` per priority, so
+     * registering a key that is still live THROWS (`already has an entry for
+     * key …`). Every registration in this entry is isolated by its own
+     * try/catch, so the failure is not visible — the throw is logged and the
+     * key is simply left with NO entry, because the old one was just disposed
+     * by the `previous` loop. Registering before disposing therefore produces
+     * an EMPTY ledger, which is a worse version of the very defect this
+     * function exists to prevent.
+     */
+    const rebindSlots = (): void => {
+      for (const dispose of liveDisposers) {
+        try { dispose() } catch { /* already disposed by the slot service */ }
+      }
+      liveDisposers = []
+      liveDisposers = registerAllSlots()
+    }
 
     /**
      * Bind `settingsScope` to whichever namespace the Host really serves, and
@@ -250,10 +287,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
           settingsScope = ns === undefined ? undefined : forms.get(ns)
           // Replace, never append: the renderer's inject cache is keyed by entry
           // identity, so a stale registration would keep serving stale props.
-          for (const dispose of liveDisposers) {
-            try { dispose() } catch { /* already disposed by the slot service */ }
-          }
-          liveDisposers = registerAllSlots()
+          rebindSlots()
           return () => {
             for (const dispose of liveDisposers) {
               try { dispose() } catch { /* already disposed by the slot service */ }
@@ -262,6 +296,31 @@ export function apply(ctx: WorkBuddyClientContext): void {
           }
         },
       ), 'dsh-connect-workbuddy: settings namespace binding')
+      // AND REGISTER ANYWAY, without waiting for the edge.
+      //
+      // `whileServed` fires `register` only on the unserved→served EDGE. When
+      // the mirror's FIRST answer already contains our namespace, the service's
+      // `sync()` runs inside `whileServed` itself and the edge fires there — so
+      // this call is the same path, and the disposers it creates are the ones
+      // the watch later replaces. But when the FIRST answer does NOT contain it
+      // (a name the candidate list does not anticipate, a settings surface that
+      // answers late or fails, a deployment that mounts the plugin without a
+      // configurable entry at all), no edge ever fires and the card would never
+      // be registered — issue #55: an empty Plugins page with no error, because
+      // the whole `apply` body is wrapped in a try/catch that only logs.
+      //
+      // The card is useful WITHOUT the form: it reads its state from the Host's
+      // own status route and renders read-only, exactly as the `forms ===
+      // undefined` branch above already does. So registration must not be
+      // conditional on the settings namespace, and a later edge — if one ever
+      // comes — replaces these registrations with bound ones.
+      //
+      // `liveDisposers` is REPLACED, not appended to: when the edge fired
+      // synchronously inside `whileServed`, this would otherwise dispose nothing
+      // and register a second copy of every key at the same priority, which the
+      // slot service refuses outright ("already has an entry for key …"). Every
+      // previous registration is torn down first, so exactly one set is live.
+      rebindSlots()
     }
 
     bindSettingsScope()

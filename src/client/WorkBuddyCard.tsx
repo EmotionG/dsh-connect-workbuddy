@@ -291,6 +291,19 @@ function probeResultView(
             + retrySuffix(t, result.retryAtMs, nowMs),
         tone: 'warn',
       }
+    case 'model-busy':
+      // Its own state, never "被限流": the account is fine and switching it
+      // would not help. `retryAtMs` here comes from the upstream's stated
+      // MAGNITUDE ("about a minute", `retrySource: 'upstream-tips'`) rather than
+      // a timestamp, which is why the label says what the failure actually is
+      // instead of implying the upstream printed a time it never printed.
+      return {
+        text: result.retryAtMs === undefined
+          ? t('row.probeModelBusyUnknown')
+          : t('row.probeModelBusyAt', { at: formatDate(result.retryAtMs) })
+            + retrySuffix(t, result.retryAtMs, nowMs),
+        tone: 'warn',
+      }
     case 'out-of-credit':
       // Only a quota-reset answer is a real time; without one, the honest text
       // is the same "no time given" the rate-limit branch uses.

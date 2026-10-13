@@ -31,6 +31,22 @@ import type { WorkBuddyCredential } from './auth.ts'
 import { classifyUpstreamError } from './upstream.ts'
 
 /**
+ * How long to bench a MODEL that answered 14003 with no stated time.
+ *
+ * One minute, because that is what the upstream itself says: the failure body
+ * carries `displayTips.zh` = "建议等待约 1 分钟后重试，或切换到负载较低的模型"
+ * (and its English twin "Wait about a minute before retrying, or switch to a
+ * less busy model"). A fallback coarser than the upstream's own advice is not
+ * conservatism, it is a different and worse claim: issue #56 reports 14003 being
+ * multiplied into 30 minutes per account, which turned a one-minute model
+ * hiccup into a half-hour outage across the whole pool.
+ *
+ * Two minutes rather than one, because a probe costs a full request and the
+ * point of the wait is to be past the burst, not to land exactly on its edge.
+ */
+export const MODEL_BUSY_COOLDOWN_MS = 2 * 60_000
+
+/**
  * The system message every probe carries.
  *
  * Not decoration: the international gateway rejects a conversation that does not
@@ -154,10 +170,17 @@ export function probeRequestBody(modelId: string, inputTokens: number = DEFAULT_
  * `rate-limited` is split out from a generic failure because it is the one
  * outcome the feature exists for: it means "this model works, but not right
  * now". Everything else is a real, actionable failure or a success.
+ *
+ * `model-busy` is a second such split, and it is NOT cosmetic — see
+ * {@link MODEL_BUSY_COOLDOWN_MS} and `exclusionOf`. A 14003 says the MODEL is
+ * loaded, everywhere, for everyone; a 6004 says THIS ACCOUNT exceeded a volume
+ * limit. Reporting both as `rate-limited` made the pool bench every account for
+ * the cooldown of one, which is the outage issue #56 describes.
  */
 export type WorkBuddyProbeOutcome =
   | 'ok'
   | 'rate-limited'
+  | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
   | 'policy-rejected'
@@ -184,8 +207,16 @@ export interface WorkBuddyProbeResult {
   message?: string
   /** A time the upstream named, in ms. Absent when it named none. */
   retryAtMs?: number
-  /** Where a supplied `retryAtMs` came from, so the card can say so. */
-  retrySource?: 'retry-after' | 'upstream-message' | 'quota-refresh'
+  /**
+   * Where a supplied `retryAtMs` came from, so the card can say so.
+   *
+   * `upstream-tips` is the odd one and it says exactly what it is: the upstream
+   * stated a MAGNITUDE in prose ("wait about a minute") rather than a timestamp,
+   * and this build turned it into {@link MODEL_BUSY_COOLDOWN_MS}. Naming it
+   * separately keeps the card honest — the other three sources are the upstream
+   * giving a time, this one is the upstream giving an order of magnitude.
+   */
+  retrySource?: 'retry-after' | 'upstream-message' | 'quota-refresh' | 'upstream-tips'
 }
 
 /**
@@ -296,6 +327,14 @@ export function parseUpstreamResetAt(message: string): number | undefined {
  * A limited outcome with none of the three returns `{}`, which the card renders
  * as "the upstream did not say when". That remains the honest answer for a
  * genuinely timeless failure; inventing a number here would be pure fiction.
+ *
+ * `model-busy` is the ONE exception, and it is not an invented countdown: the
+ * upstream states a magnitude in prose ("about a minute") rather than a
+ * timestamp, and the card's own vocabulary has no way to render "about". A
+ * per-account fallback of 30 minutes is what it used to get, which is both wrong
+ * about the magnitude and wrong about the scope (issue #56). The returned value
+ * is {@link MODEL_BUSY_COOLDOWN_MS}, and it is used only to bench the MODEL, never
+ * an account.
  */
 export function cooldownOf(input: {
   outcome: WorkBuddyProbeOutcome
@@ -313,6 +352,9 @@ export function cooldownOf(input: {
   if (input.outcome === 'out-of-credit' && input.quotaRefreshAtMs !== undefined) {
     return { retryAtMs: input.quotaRefreshAtMs, retrySource: 'quota-refresh' }
   }
+  if (input.outcome === 'model-busy') {
+    return { retryAtMs: input.nowMs + MODEL_BUSY_COOLDOWN_MS, retrySource: 'upstream-tips' }
+  }
   return {}
 }
 
@@ -323,8 +365,10 @@ export function cooldownOf(input: {
  * probe and a real chat request can never disagree about what the same upstream
  * answer means. The extra splits here are `credential-rejected`, which the
  * upstream signals with a non-JSON 401/403 edge page and which needs completely
- * different advice (re-auth, not "wait"), and `policy-rejected`, a JSON 403
- * content-policy refusal where re-auth advice would be actively misleading.
+ * different advice (re-auth, not "wait"), `policy-rejected`, a JSON 403
+ * content-policy refusal where re-auth advice would be actively misleading, and
+ * `model-busy`, the model-scoped 14003 throttle that must NOT be benched as an
+ * account failure (issue #56).
  */
 export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOutcome {
   if (status === 401 || status === 403) {
@@ -333,6 +377,7 @@ export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOu
   }
   switch (classifyUpstreamError(status, body)) {
     case 'soft_rate': return 'rate-limited'
+    case 'model_busy': return 'model-busy'
     case 'hard_credit': return 'out-of-credit'
     case 'session_dead': return 'credential-rejected'
     case 'not_found': return 'not-found'

@@ -18,6 +18,10 @@ export function exclusionText(
 ): string | undefined {
   switch (excludedBy) {
     case 'rate-limited': return t('row.poolExcludedRateLimited')
+    // Its own label, NOT `rate-limited`: the account is fine and the model is
+    // loaded, and calling that "被限流" next to the account's name is what sent
+    // issue #56's reporter looking for a bad account.
+    case 'model-busy': return t('row.poolExcludedModelBusy')
     case 'out-of-credit': return t('row.poolExcludedOutOfCredit')
     case 'credential-rejected': return t('row.poolExcludedRejected')
     // These four used to be folded into 'credential-rejected', which made the

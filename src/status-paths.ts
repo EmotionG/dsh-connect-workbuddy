@@ -747,6 +747,17 @@ export type WorkBuddyWebUsage =
 export type WorkBuddyWebProbeOutcome =
   | 'ok'
   | 'rate-limited'
+  /**
+   * The MODEL is loaded, not the account (upstream code 14003).
+   *
+   * Kept apart from `rate-limited` because the two need OPPOSITE advice:
+   * `rate-limited` is this account's volume limit (wait, or bill another
+   * account), while `model-busy` follows the model everywhere — every account
+   * hits the same wall, so switching accounts only spends a request per account
+   * to learn what the first one already said. The remedy is the upstream's own:
+   * wait about a minute, or switch to a less busy model.
+   */
+  | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
   | 'policy-rejected'
@@ -768,15 +779,17 @@ export interface WorkBuddyWebProbeResult {
    * A time the upstream named for using this model again, in ms.
    *
    * ABSENT means the upstream named none, and the card must say exactly that.
-   * A client-invented countdown here would be fiction. Three sources fill it:
+   * A client-invented countdown here would be fiction. Four sources fill it:
    * a real `Retry-After` header; the reset sentence the upstream writes into
    * its own failure BODY (`将在 … UTC+8 重置`, which is where this service
-   * actually puts it — its 429s carry no rate-limit header at all); or, for an
-   * exhausted quota, the region's own quota refresh point.
+   * actually puts it — its 429s carry no rate-limit header at all); the
+   * region's own quota refresh point for an exhausted quota; or, for the
+   * model-scoped 14003 throttle, the magnitude the upstream states in PROSE
+   * ("wait about a minute") — see {@link WorkBuddyWebProbeOutcome}.
    */
   retryAtMs?: number
-  /** Which of those three sources supplied {@link retryAtMs}. */
-  retrySource?: 'retry-after' | 'upstream-message' | 'quota-refresh'
+  /** Which of those four sources supplied {@link retryAtMs}. */
+  retrySource?: 'retry-after' | 'upstream-message' | 'quota-refresh' | 'upstream-tips'
 }
 
 /** The probe endpoint's answer document. */
@@ -788,6 +801,17 @@ export interface WorkBuddyWebProbeAnswer {
 export type WorkBuddyWebPoolExclusion =
   | 'unusable'
   | 'rate-limited'
+  /**
+   * The MODEL this account was measured against is loaded, not the account.
+   *
+   * Mirrors the same-named member of `WorkBuddyPoolExclusion` in
+   * `./account-pool.ts`, and mirrored here for the same reason as the outcome
+   * vocabulary above: this module is the node-free bridge and must not import
+   * the Host-side pool module. The card renders it with its own label, because
+   * showing "被限流" next to an ACCOUNT name asserts something the measurement
+   * does not say (issue #56).
+   */
+  | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
   | 'not-found'
@@ -1030,4 +1054,33 @@ export const WORKBUDDY_SETTINGS_NAMESPACE_CANDIDATES: readonly string[] = [
   'dsh-connect-workbuddy',
   'include:dsh-connect-workbuddy',
   WORKBUDDY_SETTINGS_NS,
+]
+
+/**
+ * The `<package name>` keys under which the card registers itself in the
+ * Plugins panel.
+ *
+ * `plugins.bundle.config` and `plugins.row.config` are KEYED slots: the page
+ * renders them with `entryKey: pkg.name`, and it decides whether to render the
+ * section at all from `ledger.bundles.has(pkg.name)` — a `Set` of exactly the
+ * `key` values registered on that slot, compared against the plugin-manager
+ * inventory's own package name. Both halves of that comparison are EXACT and
+ * neither side is the settings namespace: the inventory name comes from the
+ * profile's package list, while a deployment may mount the same code under a
+ * different Loader entry id.
+ *
+ * That is the whole of issue #55. A deployment whose inventory name is
+ * `dsh-connect-workbuddy` and whose card registered only under
+ * `include:dsh-connect-workbuddy` gets NO card and NO error: the keyed lookup
+ * finds nothing, the section is simply not rendered, and `apply()` finished
+ * happily. Since the keys live in separate cells (one entry per `key` per
+ * priority), registering under every spelling at once is a shadowing-free
+ * duplicate rather than a conflict, and is strictly safer than betting on one.
+ *
+ * The bare package name is FIRST because it is the common case — a profile that
+ * installs the package by name mounts it under that name.
+ */
+export const WORKBUDDY_CARD_KEYS: readonly string[] = [
+  'dsh-connect-workbuddy',
+  'include:dsh-connect-workbuddy',
 ]

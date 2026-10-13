@@ -35,7 +35,37 @@ export type WorkBuddyRegion = 'cn' | 'global'
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
 export type UpstreamErrorKind =
   | 'hard_credit'
+  /**
+   * The upstream's own volume limit (business code 6004, or a 429 whose body
+   * names a reset time). A statement about the ACCOUNT: it comes with a
+   * timestamp, it lasts, and another account is a real way around it.
+   */
   | 'soft_rate'
+  /**
+   * MODEL-scoped throttling with no stated time (business code 14003).
+   *
+   * Deliberately its own kind, because treating it as {@link soft_rate} is a
+   * 30x amplification of an upstream that says "wait about a minute" — and it
+   * makes the pool walk every account into the same wall (issue #56).
+   *
+   * The evidence that this is the MODEL's load and not the account's, measured
+   * on one credential at one moment, byte-identical requests differing ONLY in
+   * the `model` field, three attempts each:
+   *
+   *   | model                  | multiplier | ok  | failures   |
+   *   | ---                    | ---        | --- | ---        |
+   *   | deepseek-v4.1-flash    | x0.00      | 1/3 | 429 / 14003 |
+   *   | deepseek-v4.1-flash-sg | x0.03      | 1/3 | 429 / 14003 |
+   *   | glm-5.3-flash          | x0.06      | 3/3 | —          |
+   *   | hy3                    | x0.00      | 3/3 | —          |
+   *   | kimi-k2.6              | x0.77      | 3/3 | —          |
+   *
+   * The same account served other models at the same second, so the credential
+   * was fine. The upstream's own words agree: "Wait about a minute before
+   * retrying, or switch to a less busy model." Both halves are rendered to the
+   * user; the second one is the actual remedy.
+   */
+  | 'model_busy'
   | 'session_dead'
   | 'policy_reject'
   | 'not_found'
@@ -288,6 +318,58 @@ const SESSION_DEAD_MARKERS: readonly string[] = ['Offline user session not found
  */
 const POLICY_REJECT_MARKERS: readonly string[] = ['request illegal', '"code":11140']
 
+/**
+ * Business code of the MODEL-scoped throttle (`14003`, "too many requests").
+ *
+ * The quoted-key form for the same reason as the policy markers: a request id is
+ * hexadecimal and can contain the digits `14003` by coincidence, and a bare
+ * substring search over an arbitrary failure body is how a red herring gets
+ * promoted into a routing decision.
+ */
+const MODEL_BUSY_CODE = '"code":14003'
+
+/**
+ * The upstream's own advice for {@link MODEL_BUSY_CODE}, in both shapes it ships
+ * (`displayTips.zh` and its English twin).
+ *
+ * NOT a criterion — {@link isModelBusyBody} decides on the code alone. It is
+ * recorded here because it is the sentence that names the remedy, and the card
+ * quotes the upstream rather than inventing advice. Keeping it as data (rather
+ * than as a second condition) is what stops a gateway banner that happens to
+ * mention "a less busy model" from being routed as this kind.
+ */
+const MODEL_BUSY_TIPS_MARKERS: readonly string[] = [
+  'less busy model',
+  '负载较低的模型',
+  '負載較低的模型',
+]
+
+/**
+ * Whether a failure body is the MODEL-scoped throttle rather than an account
+ * limit.
+ *
+ * `14003` and `6004` are different codes from the same gateway and mean
+ * different things. Measured on one credential at one moment, with requests that
+ * differed ONLY in `model`, three attempts each: `deepseek-v4.1-flash`
+ * (multiplier x0.00) answered 1/3 and refused 2/3 with `429 / 14003`, while
+ * `glm-5.3-flash`, `hy3` and `kimi-k2.6` answered 3/3 — the SAME account, the
+ * SAME second. A 6004, by contrast, carries a `将在 … UTC+8 重置` sentence and
+ * is per-account.
+ *
+ * So the criterion is the CODE alone, matched in its quoted-key form so a
+ * request id that happens to contain the digits cannot promote it. Exported so
+ * the probe and the chat path cannot drift into two different answers about one
+ * body.
+ */
+export function isModelBusyBody(body: string): boolean {
+  return body.includes(MODEL_BUSY_CODE)
+}
+
+/** Whether a body carries the upstream's own "switch to a less busy model" advice. */
+export function carriesModelBusyTip(body: string): boolean {
+  return MODEL_BUSY_TIPS_MARKERS.some(marker => body.includes(marker))
+}
+
 /** Classify an upstream failure from its HTTP status and body excerpt. */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
   if (status === 402) return 'hard_credit'
@@ -301,6 +383,15 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   for (const marker of POLICY_REJECT_MARKERS) {
     if (body.includes(marker)) return 'policy_reject'
   }
+  // BEFORE the plain 429 branch: a 14003 is a 429, and classifying it as
+  // `soft_rate` is the whole of issue #56 — it made the pool treat a
+  // model-scoped, second-scale throttle as a 30-minute per-account cooldown and
+  // walk every account into the same wall.
+  //
+  // Checked AFTER the credit markers so a body carrying both ("insufficient
+  // credit" alongside a throttling code) still reads as the actionable,
+  // wallet-shaped failure: the user must top up, not retry.
+  if (isModelBusyBody(body)) return 'model_busy'
   if (status === 429) return 'soft_rate'
   if (status === 404) return 'not_found'
   if (status >= 500) return 'server'
