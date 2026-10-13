@@ -230,6 +230,26 @@ export function apply(ctx: WorkBuddyClientContext): void {
       }
       liveDisposers = []
       liveDisposers = registerAllSlots()
+      // Say what actually landed, once per rebind.
+      //
+      // The issue #55 reporter's own point: the whole `apply` body is wrapped in
+      // a try/catch that only logs, so "no card" and "worked fine" look
+      // IDENTICAL on the page — locating that took them far longer than the fix
+      // did. A single line naming the count and where the settings form came
+      // from turns the next occurrence into a one-look diagnosis:
+      //
+      //   [dsh-connect-workbuddy] registered 5 slots (settings form: dsh-connect-workbuddy)
+      //   [dsh-connect-workbuddy] registered 5 slots (settings form: none — card is read-only)
+      //
+      // Deliberately `console.info`, not `warn`/`error`: this is the healthy
+      // path, and a warning-per-page-load would train users to ignore the one
+      // channel that matters when something really is wrong.
+      try {
+        console.info(
+          `[dsh-connect-workbuddy] registered ${String(liveDisposers.length)} slots `
+          + `(settings form: ${settingsScope === undefined ? 'none — card is read-only' : 'bound'})`,
+        )
+      } catch { /* a host without console must still get its slots */ }
     }
 
     /**

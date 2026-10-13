@@ -300,13 +300,48 @@ const ERROR_BODY_LIMIT = 4096
  */
 const PROBE_TIMEOUT_MS = 10_000
 
-/** Insufficient-credit markers, ASCII lowercase plus the original Chinese. */
+/**
+ * Insufficient-credit markers.
+ *
+ * ENGLISH IS MATCHED CASE-INSENSITIVELY (see {@link classifyUpstreamError}) so
+ * each entry is spelled once, lowercase. Chinese has no case, so those entries
+ * are the upstream's own wording.
+ *
+ * `credits exhausted` is listed alongside `credit exhausted` because the
+ * upstream ships the PLURAL — measured 2026-10-13 on a live `14018`:
+ *
+ *   {"error":{"data":{"code":14018,"msg":"Credits exhausted. Please visit the
+ *    link below to purchase add-on packs and get more credits: …"}}}
+ *
+ * The singular-only entry silently missed it (`'credits exhausted.'.includes(
+ * 'credit exhausted')` is FALSE — the `s` sits between the two words), so a
+ * failure whose entire point is "go top up" was reported as "wait a bit" and
+ * benched a healthy account for the 30-minute fallback. Both spellings are kept
+ * because the gateway has been observed to change its wording; neither is
+ * assumed to be the only one.
+ */
 const HARD_CREDIT_MARKERS: readonly string[] = [
-  'insufficient credit', 'no credit', 'credit exhausted', 'out of credit',
-  'quota exceeded', 'quota exhaust', 'payment required', 'credit not enough',
-  'not enough credit',
+  'insufficient credit', 'no credit', 'credit exhausted', 'credits exhausted',
+  'out of credit', 'quota exceeded', 'quota exhaust', 'payment required',
+  'credit not enough', 'not enough credit', 'credits not enough',
   '积分不足', '额度不足', '余额不足', '积分用完', '额度用尽', '没有积分',
 ]
+
+/**
+ * Business code of the exhaustion refusal (`14018`).
+ *
+ * The CODE, not the prose — see {@link HARD_CREDIT_MARKERS} for the wording bug
+ * this guards against. Marker tables rot in a way codes do not: the gateway can
+ * reword its sentence without changing the contract it advertises, and the
+ * failure is silent (the branch simply stops matching). A code cannot drift like
+ * that, and matching it in quoted-key form keeps a request id that happens to
+ * contain the digits from promoting an unrelated body.
+ *
+ * ONLY a corroborating signal, never a substitute: the code is checked in
+ * addition to the markers, so a body that names the code AND reads as a policy
+ * refusal still resolves by the marker table's order.
+ */
+const CREDITS_EXHAUSTED_CODE = '"code":14018'
 
 /** Session-invalidation markers that mean "sign in again in the WorkBuddy app". */
 const SESSION_DEAD_MARKERS: readonly string[] = ['Offline user session not found', '12153']
@@ -377,6 +412,16 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   for (const marker of HARD_CREDIT_MARKERS) {
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return 'hard_credit'
   }
+  // The code path, for the same class of failure. Kept INSTEAD OF trusting the
+  // markers alone rather than replacing them: the live `14018` body spells
+  // "Credits exhausted.", which the singular marker missed outright (see
+  // HARD_CREDIT_MARKERS), and a wording change must not be able to silently
+  // downgrade "go top up" into "wait a bit" again.
+  //
+  // Ordered with the markers, i.e. BEFORE `model_busy`: a body carrying both an
+  // exhaustion code and a throttling code still resolves to the actionable,
+  // wallet-shaped answer.
+  if (body.includes(CREDITS_EXHAUSTED_CODE)) return 'hard_credit'
   for (const marker of SESSION_DEAD_MARKERS) {
     if (body.includes(marker)) return 'session_dead'
   }

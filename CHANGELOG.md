@@ -25,9 +25,32 @@
   - **守卫**：新增 `tests/issue56-model-scoped-throttle.spec.ts`（14 例），用报告者的原文报文当 fixture：分类正确（14003→`model-busy`，6004→`soft_rate` 不变）、不误伤（只有文案没有 code、或 requestId 恰好含 `14003`，都仍是普通限流）、与积分同时出现时仍判积分、冷却时长为分钟级且带 `'upstream-tips'` 来源、有真实时刻时以时刻为准、模型级账号在一分钟后回到池内而普通限流仍在池外。`tests/shim-failover.spec.ts` 新增 3 例：`model_busy` **不走**换号（池里明明有候选也不问）、失败仍上报且只报一次、用户看到的是「模型繁忙」而不是「账号被限流」。
   - **刻意保留的重复**：`MODEL_BUSY_COOLDOWN_MS` 在 `src/probe.ts` 与 `src/account-pool.ts` 各声明一次。两者不能互相 import（一个是 Host 侧探测、一个是纯排序规则，后者刻意不依赖前者），所以由一条测试断言两个声明**必须相等** —— 探测写一种冷却、排序读另一种，就会悄悄把这个缺陷重新打开。
 
+- **`14018`「积分耗尽」被判成普通限流：marker 表漏了复数形式，用户拿到的建议从「去充值」变成「等一等」。**（issue #56 的追加报告）
+  - **来源**：这条是报告者在回答「`14018` 是否与 `14003` 同族」时**顺手挖出来的**，不在原 issue 范围内。
+  - **现象**：上游对「这个账号在这些模型上没积分了」返回 `429` / `code 14018`，报文逐字为
+    `{"error":{"data":{"code":14018,"msg":"Credits exhausted. Please visit the link below to purchase add-on packs and get more credits: …"}}}`。
+  - **根因**：`HARD_CREDIT_MARKERS` 里写的是 **`'credit exhausted'`（单数）**，而上游发的是 **`"Credits exhausted."`（复数 + 大写 C）**。`'credits exhausted.'.includes('credit exhausted')` 是 **false** —— `s` 正好夹在两个词中间。**八条英文 marker 逐条试过，全部未命中**；中文 marker 也不在报文里，救不了。于是它落到通用 429 分支：`classifyUpstreamError → soft_rate`、`outcomeOfFailure → rate-limited`、`cooldownOf → {}`。
+  - **后果**：一条本该读成「**去充值**」的失败被降级成「**等一等**」，用户看到「稍后重试」而正确答案是「这个号的积分用完了」。这与 issue #56 那个「把一分钟放大成半小时」是**同一类放大，只是入口不同**。
+  - **报告者同时做了两条反证，都很关键**：① 特意在**网络层**确认真实 HTTP 状态是 **429 而不是 402** —— 因为 `classifyUpstreamError()` 第一行就是 `if (status === 402) return 'hard_credit'`，若上游真发 402 则这条 bug 根本不成立；② 用 **3 账号 × 4 模型** 的矩阵证明 `14018` 是**账号级**而非模型级（账号 B 余额 100 上 `hy4-preview` 0/2，而余额 379/350 的 A/C 服务同一模型 2/2；同号上免费模型 `hy3`/`deepseek-v4.1-flash` 均 2/2 而计费模型全挂）⇒ **`14018` 保持账号级路径，不与 `14003` 合并**。
+  - **修法**（两条都采用，因为它们防的是不同失效）：
+    1. 补 **`'credits exhausted'`** 复数形式，并**保留单数**（网关改过措辞，只认今天这一种的表就是同一个坑的下一轮）；
+    2. 新增按 **`"code":14018`** 的带引号 key 判定（`CREDITS_EXHAUSTED_CODE`），与既有的 `MODEL_BUSY_CODE` 同构 —— 措辞**完全改掉**的报文也能正确归类，且不受大小写与单复数影响。
+  - **顺序**：code 判定放在中文/英文 marker **之后**、`model_busy` **之前**，因此一条同时携带 `14018` 与 `14003` 的报文读作「去充值」（那是可执行的结论）。
+  - **未改动**：`exclusionOf` 对 `out-of-credit` 在**无时刻**时仍走 `POOL_UNKNOWN_COOLDOWN_MS` 通用兜底。这是**既有行为**，本版未动 —— 积分耗尽只能靠充值或周期刷新解除，与 `14003` 的秒级恢复性质不同。已在 issue 里如实说明并请报告者判断是否另案处理。
+  - **守卫**：新增 `tests/issue56-credits-exhausted-code.spec.ts`（9 例），**用报告者贴的报文原文当 fixture**（含尾随空格与 `{"error":{"data":…}}` 嵌套 —— 它和 `14003` 的扁平信封不同，本身就是「按散文做表很脆」的又一证据）。既钉住 `14018 → hard_credit → out-of-credit`，也钉住「两者必须分开」与「配额刷新点仍被采用」。变异验证：同时还原复数 marker 与 code 判定，**9 例中 5 例变红**，恢复后全绿。
+
+- **客户端注册后打印一行摘要，把「静默空白」变成一眼可诊断。**（issue #55 报告者的建议）
+  - **动机来自报告者的原话**：整片 UI 消失与一切正常在页面上**完全无法区分**，因为他（和后来的我们）定位耗时几乎全花在那个只打日志的静默 `try/catch` 上。
+  - 现在每个 rebind 结束都会打一行**成功路径**的 `console.info`：
+    `[dsh-connect-workbuddy] registered 5 slots (settings form: bound)` 或
+    `[dsh-connect-workbuddy] registered 5 slots (settings form: none — card is read-only)`。
+    后者正是「公网域名部署」那一类场景（客户端根本不发 `/api/settings/describe`，命名空间永不到达）会打出的样子：一眼看出「注册成功但表单只读」，而不是对着空白页猜。
+  - 刻意用 `console.info` 而非 `warn`/`error`：健康路径打警告会训练用户忽略真正出事的那条通道。
+  - **未采纳**「把 `apply()` 拆成多个 try/catch」：外层兜底的作用是「槽位 API 变更时降级为日志，而不是让宿主弹 `Failed to load plugins` 红条」，拆开会让部分 UI 失败时更难判断整体状态。加了摘要后日志已能定位到具体哪几个没上。
+
 ### Docs
 
-- 无。本版含上述两处修复与配套测试。
+- 无。本版含上述修复与配套测试。
 
 ## 4.4.2 (2026-10-13)
 
