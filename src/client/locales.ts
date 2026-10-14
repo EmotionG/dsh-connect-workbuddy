@@ -231,9 +231,12 @@ export const en = {
   // the model the user actually chats with was the one being refused.
   'row.poolProbeModel': 'model {model}',
   'row.poolProbeModelUnknown': 'model not recorded',
-  'row.poolRowModelHint': 'Which model this account\'s test uses. Leave it on "region target" to follow the pool\'s model; pick one when this account must be tested on the model you actually chat with.',
+  'row.poolRowModelHint': 'The model this row\'s TEST uses — it never changes which model the account chats with. Leave it on "same as pool" to follow the pool\'s target model; pick one when this account must be tested on the model you actually chat with.',
   'row.poolRowModelAria': 'Test model for {accountName}',
-  'row.poolRowModelInherit': 'region target',
+  // Named for what it DOES, not for where the value comes from: the first
+  // version said "region target", which a reader parsed as a region rather than
+  // as "follow the pool's test model" (issue #61 follow-up).
+  'row.poolRowModelInherit': 'same as pool',
   'row.poolSettingsTitle': 'Account pool settings',
   'row.poolSettingsHint': 'These are preferences: they take effect when you save (same as the model list). Test results are written automatically and are not affected by this button.',
   'row.poolEnabled': 'Enable the account pool',
@@ -542,9 +545,11 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // 只写「可用」会被读成账号级结论，而被拒的恰恰是用户真在用的那个模型。
   'row.poolProbeModel': '模型 {model}',
   'row.poolProbeModelUnknown': '未记录模型',
-  'row.poolRowModelHint': '这个账号测试用哪个模型。留「区域目标」就跟随账号池的目标模型；当某个号必须用你实际在聊的模型来测时，在这里单独指定。',
+  'row.poolRowModelHint': '这一行「测试」用哪个模型 —— 它不会改变这个账号平时聊天用哪个模型。留「同账号池」即跟随账号池的目标模型；当某个号必须用你实际在聊的模型来测时，在这里单独指定。',
   'row.poolRowModelAria': '{accountName} 的测试模型',
-  'row.poolRowModelInherit': '区域目标',
+  // 按「它做什么」命名，而不是按「值从哪来」：第一版叫「区域目标」，读者会把它当成
+  // 一个区域，而不是「跟随账号池的测试模型」（issue #61 的后续反馈）。
+  'row.poolRowModelInherit': '同账号池',
   'row.poolSettingsTitle': '账号池设置',
   'row.poolSettingsHint': '下面是偏好设置：点保存才生效（与「模型管理」一致）。测试结果由插件自动写入，不受这个保存按钮影响。',
   'row.poolEnabled': '启用账号池',

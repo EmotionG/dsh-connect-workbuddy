@@ -231,6 +231,28 @@ describe('card class names are styled', () => {
    */
   const components = ['OAuthSignIn.tsx', 'AccountTransfer.tsx', 'BusyOverlay.tsx', 'WorkBuddyCard.tsx', 'AccountPool.tsx'] as const
 
+  it('keeps the pool row wide enough for its per-row picker AND both buttons', () => {
+    // Issue #61 follow-up, reported with a screenshot: the per-row model picker
+    // was added BESIDE the row's two buttons inside the actions strip, and the
+    // grid track that holds them was sized for buttons alone — so the 测试 button
+    // wrapped onto one character per line ("测" / "试") on every row.
+    //
+    // Two rules keep that from returning, and both are needed:
+    //   1. the actions track supplies a MINIMUM width (the picker is a fixed
+    //      ~150px control and cannot shrink below its own content);
+    //   2. the buttons refuse to wrap, so a narrow window clips rather than
+    //      turning a two-character label into two lines.
+    const css = cardCss()
+    // The actions track must carry an explicit floor on both table shapes.
+    const tracks = css.match(/\.dsm-workbuddy-pool-row\{[^}]*grid-template-columns:([^;]*);/g) ?? []
+    expect(tracks.length).toBeGreaterThan(0)
+    expect(tracks.some(rule => rule.includes('minmax(260px'))).toBe(true)
+    expect(css).toContain('.dsm-workbuddy-pool-row-actions .dsm-workbuddy-pool-small-btn{white-space:nowrap}')
+    // The picker must not be allowed to shrink either — a flex item with
+    // `flex:1` would eat the buttons' width instead of the row growing.
+    expect(css).toContain('.dsm-workbuddy-pool-row-model{flex:none}')
+  })
+
   it('defines every class those components render', () => {
     const css = cardCss()
     const missing: string[] = []

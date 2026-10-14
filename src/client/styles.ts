@@ -199,9 +199,9 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-ghost-remove:disabled{cursor:default;opacity:.5}
 .dsm-workbuddy-pool-error{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-state-error-primary,#ef4444);white-space:pre-line}
 .dsm-workbuddy-pool-table{border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;overflow:hidden;background:var(--dsw-alias-bg-layer-2,#24262c)}
-.dsm-workbuddy-pool-row{display:grid;grid-template-columns:1.6fr 1fr 1.3fr .9fr .8fr;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--dsw-alias-border-l1,#2c2d31);font-size:13px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-pool-row{display:grid;grid-template-columns:1.6fr .9fr 1.3fr .8fr minmax(260px,1.4fr);gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--dsw-alias-border-l1,#2c2d31);font-size:13px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 /* No check-in column (the international region): the freed track goes to the actions. */
-.dsm-workbuddy-pool-table:not(.dsm-workbuddy-pool-table-checkin) .dsm-workbuddy-pool-row{grid-template-columns:1.6fr 1fr 1.3fr 1.7fr}
+.dsm-workbuddy-pool-table:not(.dsm-workbuddy-pool-table-checkin) .dsm-workbuddy-pool-row{grid-template-columns:1.6fr 1fr 1.5fr minmax(260px,1.4fr)}
 .dsm-workbuddy-pool-row:first-child{border-top:0}
 .dsm-workbuddy-pool-row-head{padding:8px 14px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-tertiary,#999);font-size:11px;font-weight:600;letter-spacing:.02em;text-transform:uppercase}
 .dsm-workbuddy-pool-row-current{background:rgba(86,134,254,.07)}
@@ -285,7 +285,14 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-log-info{color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-pool-log-empty{padding:14px;font-size:12px;color:var(--dsw-alias-label-tertiary,#999)}
 /* Per-row actions (test / remove), right side of each pool row. */
+/* The per-row actions track now holds a model picker BESIDE two buttons, so it
+   needs a floor of its own width (the grid track supplies minmax(260px, ...)) and
+   the buttons must never wrap: without white-space:nowrap the 测试 button broke
+   into one character per line once the picker took the space (issue #61 follow-up,
+   reported with a screenshot). */
 .dsm-workbuddy-pool-row-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex:none}
+.dsm-workbuddy-pool-row-actions .dsm-workbuddy-pool-small-btn{white-space:nowrap}
+.dsm-workbuddy-pool-row-model{flex:none}
 .dsm-workbuddy-pool-row-actions .dsm-workbuddy-pool-small-btn{padding:2px 10px;font-size:12px}
 /* This account's own test model (issue #61). Narrower than the section-level
    picker so a long model name cannot push the two buttons out of the row. */
