@@ -45,6 +45,11 @@
  *   node scripts/probe-region-token-accounting.mjs --region cn --model deepseek-v4.1-flash
  *   node scripts/probe-region-token-accounting.mjs --region global --model deepseek-v4.1-flash-sg
  *   node scripts/probe-region-token-accounting.mjs --region cn --model glm-5.2 --turns 4
+ *   node scripts/probe-region-token-accounting.mjs --region global --kind code --language en
+ *   node scripts/probe-region-token-accounting.mjs --region cn --kind json --language zh
+ *
+ * Run the SAME --language/--kind/--chars in both regions and compare
+ * `tokens_per_1k_chars`; that ratio is the cross-region comparability figure.
  */
 
 import { WorkBuddyCredentialStore, WorkBuddyUpstreamClient, prepareChatBody } from '../lib/index.js'
@@ -61,12 +66,37 @@ const CHARS = Number.parseInt(value('--chars', '12000'), 10)
 const TURNS = Number.parseInt(value('--turns', '2'), 10)
 const MAX_TOKENS = Number.parseInt(value('--max-tokens', '8'), 10)
 const MAX_ACCOUNTS = Number.parseInt(value('--max-accounts', '10'), 10)
+const LANGUAGE = value('--language', 'en')
+const KIND = value('--kind', 'prose')
 
 /**
- * Deterministic English filler, byte-identical between regions and turns. The
- * sameness is what makes the numbers comparable at all.
+ * Deterministic filler for one content class, byte-identical between regions and
+ * turns. The sameness is what makes the numbers comparable at all.
+ *
+ * `--language` and `--kind` exist because the reporter's own round of this
+ * experiment (2026-10-14) showed the two gateways agreeing PERFECTLY on prose —
+ * 224.3 vs 224.9 tokens/1k chars on English, 668.6 vs 669.2 on Chinese — while a
+ * real session's *history* was charged 1.94× apart. Prose is the one content
+ * class a long agentic session is mostly NOT made of: its bulk is tool results
+ * (source files, diffs, command output, JSON). So the remaining question is
+ * whether the two counters still agree on THOSE, and it can only be answered by
+ * measuring them instead of assuming.
+ *
+ * Chinese carries ~3× the tokens per character of English (measured: 0.669 vs
+ * 0.224 tokens/char), which is why `--language` matters too: a ratio computed
+ * against the wrong language is off by 3×.
  */
-const FILLER = 'The quick brown fox jumps over the lazy dog. Prometheus bound the cache key to the prefix. '
+const FILLERS = {
+  'en:prose': 'The quick brown fox jumps over the lazy dog. Prometheus bound the cache key to the prefix. ',
+  'zh:prose': '敏捷的棕色狐狸跳过了那只懒狗。缓存键被绑定在前缀之上，于是重发的请求命中了它。',
+  'en:code': 'export function scan(nodes: Node[], threshold: number): number {\n  let hits = 0\n  for (const node of nodes) if (node.weight > threshold) { hits += 1; emit(node.id, node.weight) }\n  return hits\n}\n',
+  'zh:code': 'export function 扫描(节点表: 节点[], 阈值: number): number {\n  let 命中 = 0\n  for (const 节点 of 节点表) if (节点.权重 > 阈值) { 命中 += 1; 输出(节点.id, 节点.权重) }\n  return 命中\n}\n',
+  'en:json': '{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"src/upstream.ts\\",\\"limit\\":400}"}}]}\n{"status":"ok","bytes":18244,"cached":true,"region":"ap-others"}\n',
+  'zh:json': '{"角色":"助手","工具调用":[{"编号":"调用_1","类型":"函数","函数":{"名称":"读取文件","参数":"{\\"路径\\":\\"src/upstream.ts\\",\\"上限\\":400}"}}]}\n{"状态":"成功","字节数":18244,"已缓存":true,"区域":"ap-others"}\n',
+}
+
+const fillerKey = `${LANGUAGE}:${KIND}`
+const FILLER = FILLERS[fillerKey] ?? FILLERS['en:prose']
 const PREFIX = FILLER.repeat(Math.ceil(CHARS / FILLER.length)).slice(0, CHARS)
 const SUFFIX = ' Reply with exactly: OK'
 
@@ -130,6 +160,7 @@ const store = new WorkBuddyCredentialStore({ refresh: c => client.refreshToken(c
 
 process.stdout.write(`region  : ${REGION}\n`)
 process.stdout.write(`prompt  : prefix ${PREFIX.length} chars, byte-identical across regions and turns\n`)
+process.stdout.write(`content : language=${LANGUAGE} kind=${KIND}${fillerKey in FILLERS ? '' : ' (UNKNOWN combination; fell back to en:prose)'}\n`)
 process.stdout.write(`turns   : ${TURNS} (turn 1 warms the cache, 2..N re-send the same prefix + suffix)\n`)
 process.stdout.write(`tokens  : max_tokens=${MAX_TOKENS}\n\n`)
 
@@ -201,7 +232,7 @@ if (accounts.length === 0) {
       const first = rows[0].usage
       const identical = rows.filter(row => !row.warming)
       process.stdout.write('\n===== result =====\n')
-      process.stdout.write(`region=${REGION} model=${modelId} chars=${PREFIX.length + SUFFIX.length}`)
+      process.stdout.write(`region=${REGION} model=${modelId} language=${LANGUAGE} kind=${KIND} chars=${PREFIX.length + SUFFIX.length}`)
       process.stdout.write(` prompt_tokens=${first['prompt_tokens']}`)
       process.stdout.write(` tokens_per_1k_chars=${(first['prompt_tokens'] / (PREFIX.length + SUFFIX.length) * 1000).toFixed(2)}\n`)
 
