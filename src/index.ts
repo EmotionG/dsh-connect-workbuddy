@@ -234,6 +234,7 @@ import {
   type WorkBuddyTransferImportAnswer,
   type WorkBuddyTransferPreview,
   type WorkBuddyTransferRecord,
+  type WorkBuddyCreditPosition,
 } from './status-paths.ts'
 export {
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
@@ -308,6 +309,25 @@ export interface WorkBuddyRegionState {
    * written before this switch existed keeps whatever the default was.
    */
   showCreditsInMainUi?: boolean
+  /**
+   * WHERE this region's credit readout sits (issue #62).
+   *
+   * Two seats, because the first one is not always available:
+   *
+   *   - `composer` — the composer tool row (`conversation.input.left`), shared
+   *     with the shell's own controls. It is the closer, more glanceable seat,
+   *     and it is the default so nothing moves for anyone who does not choose.
+   *   - `stats` — the ambient dock below the composer card
+   *     (`conversation.composer.dock`), where the shell renders its own
+   *     round/step/token pills. That row is a LIST seat whose shipped occupant
+   *     registers separately, so a third-party plugin that ALSO parks something
+   *     in the composer row cannot crowd this readout out of existence.
+   *
+   * The report behind this (issue #62) was exactly that: with another plugin
+   * installed, the readout vanished from the composer row. Making the seat a
+   * choice is what keeps one plugin's presence from deciding another's.
+   */
+  creditPosition?: WorkBuddyCreditPosition
   /** The last-refreshed directory for this region; what the card displays. */
   lastCatalog?: WorkBuddyModelInfo[]
   /** The user's selection in this region, as model ids. */
@@ -479,6 +499,7 @@ const regionStateConfig = z.object({
    * which is reachable exactly where the feature renders.
    */
   showCreditsInMainUi: z.boolean().default(true).description('Show this region\'s remaining credits at the DSH sidebar foot (opt-out; the line carries its own hide button)'),
+  creditPosition: z.union([z.const('composer'), z.const('stats')]).default('composer').description('Where the credit readout sits: "composer" = the composer tool row (default), "stats" = the ambient row below the composer card, next to the shell\'s own token pills. Choose "stats" if another plugin occupies the composer row.'),
   lastCatalog: z.array(modelConfig).default([]),
   enabledModelIds: z.array(z.string()).default([]),
   imageModelIds: z.array(z.string()).default([]),
@@ -1025,6 +1046,13 @@ export function apply(ctx: Context, config: Config): void {
      * which made the switch look unable to turn the line off ("关闭不了").
      */
     showCreditsInMainUi: region => regionStateOf(current(), region).showCreditsInMainUi !== false,
+    /**
+     * WHERE the readout sits, resolved here rather than read from the browser
+     * settings mirror, for the same measured reason as the flag above: on the
+     * affected 0.1.7 deployments that mirror never picks up this plugin's
+     * writes, and a control reading it would keep showing the old seat.
+     */
+    creditPosition: region => creditPositionOf(current(), region),
     /**
      * One minimal request per named model, through the region's own credential.
      *
@@ -1718,6 +1746,16 @@ export function apply(ctx: Context, config: Config): void {
   )
 
   /** One region's pool preferences, with the schema's defaults applied. */
+  /**
+   * WHERE this region's credit readout sits (issue #62).
+   *
+   * A local reader rather than a schema default so a config written before the
+   * setting existed reads as `composer` — the seat that was the only one, so an
+   * upgrade moves nothing on screen.
+   */
+  const creditPositionOf = (config: Config, region: WorkBuddyRegion): WorkBuddyCreditPosition =>
+    regionStateOf(config, region).creditPosition === 'stats' ? 'stats' : 'composer'
+
   const poolPreferencesOf = (config: Config, region: WorkBuddyRegion) => {
     const pool = regionStateOf(config, region).pool
     const probeInputTokens = pool?.probeInputTokens

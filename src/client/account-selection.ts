@@ -18,7 +18,7 @@
  */
 
 import { nextRegionModels, nextRegionPool, unwrapVolatileDeep } from '../status-paths.ts'
-import type { WorkBuddyWebRegion } from '../status-paths.ts'
+import type { WorkBuddyWebRegion, WorkBuddyCreditPosition } from '../status-paths.ts'
 
 /**
  * The slice of the bound settings scope this module writes through.
@@ -371,6 +371,26 @@ export async function writeRegionCreditsShown(
   await writeField(scope, 'regions', region, slot, readBack => {
     const stored = readBack as Record<string, unknown> | null | undefined
     return stored !== null && stored !== undefined && stored['showCreditsInMainUi'] === shown
+  })
+}
+
+/**
+ * Write one region's credit SEAT (issue #62), verifying it landed.
+ *
+ * Sibling of {@link writeRegionCreditsShown}: same whole-slot merge, same
+ * landed check, same reason for both. The seat decides only WHERE the readout
+ * renders, so a lost write would leave the user looking at the old position
+ * while the control claimed the new one.
+ */
+export async function writeRegionCreditPosition(
+  scope: WorkBuddyAccountScope,
+  region: WorkBuddyWebRegion,
+  position: WorkBuddyCreditPosition,
+  slot: Record<string, unknown>,
+): Promise<void> {
+  await writeField(scope, 'regions', region, slot, readBack => {
+    const stored = readBack as Record<string, unknown> | null | undefined
+    return stored !== null && stored !== undefined && stored['creditPosition'] === position
   })
 }
 

@@ -21,6 +21,17 @@
  * rows). The composer row is per-session and provider-scoped, so exactly one
  * plugin's credits are relevant at a time and nothing overlaps.
  *
+ * WHY THERE IS A SECOND SEAT (issue #62). The composer tool row is a LIST seat,
+ * so it is shared not only with the shell's own controls but with any other
+ * plugin that registers there — and one report is exactly that: with a
+ * third-party plugin installed the readout stopped appearing at all. A list seat
+ * cannot promise that every occupant is visible, so the seat is the USER's
+ * choice: `composer` (default, unchanged for anyone who does not choose) or
+ * `stats`, the ambient dock below the composer card where the shell renders its
+ * own round/token pills. The gate is registered in BOTH seats and renders in the
+ * one the setting names, which keeps the decision in one function instead of
+ * re-registering slots when the setting changes.
+ *
  * Kept separate from {@link ComposerCredits} (and from the browser-plugin
  * entry) so the decision can be unit-tested without a Host: the entry imports
  * browser-only DSH packages the test environment cannot load, while this module
@@ -28,8 +39,8 @@
  */
 import { useEffect, useState } from 'react'
 import { ComposerCredits, WORKBUDDY_COMPOSER_PROVIDERS } from './ComposerCredits.tsx'
-import { regionCreditsShownOf, regionEnabledOf, unwrapVolatileDeep } from '../status-paths.ts'
-import type { WorkBuddyWebRegion } from '../status-paths.ts'
+import { regionCreditPositionOf, regionCreditsShownOf, regionEnabledOf, unwrapVolatileDeep } from '../status-paths.ts'
+import type { WorkBuddyCreditPosition, WorkBuddyWebRegion } from '../status-paths.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 
@@ -72,6 +83,17 @@ export function selectedProviderOf(projection: ModelSelectionProjectionLike | un
  * the authority; the scope is the fallback for a Host line that predates the
  * field.
  */
+/**
+ * The settings tree this plugin writes, unwrapped to a plain object.
+ *
+ * `unwrapVolatileDeep` first: the scope's value is a live cosmokit reference on
+ * the 0.1.7 line, and reading fields off it without unwrapping yields proxies
+ * whose `===` comparisons against a string are false.
+ */
+function scopeValueOf(scope: WorkBuddyCardInjected['settingsScope']): unknown {
+  return scope === undefined ? undefined : unwrapVolatileDeep(scope.getSnapshot().value)
+}
+
 export function composerCreditsRegionOf(
   projection: ModelSelectionProjectionLike | undefined,
   scope: WorkBuddyCardInjected['settingsScope'],
@@ -99,6 +121,15 @@ export function composerCreditsRegionOf(
 
 export interface ComposerCreditsGateProps {
   t: (key: WorkBuddySettingsKey, params?: Record<string, unknown>) => string
+  /**
+   * WHICH seat this registration occupies (issue #62).
+   *
+   * The component is registered once per seat and renders only in the seat the
+   * setting names, so switching seats is a settings write rather than a slot
+   * re-registration. Absent means `composer` — the only seat before the setting
+   * existed, which keeps every existing caller and test on the old behaviour.
+   */
+  position?: WorkBuddyCreditPosition
   /** Settings scope from the configForms mirror; the card writes the same field. */
   settingsScope?: WorkBuddyCardInjected['settingsScope']
   /**
@@ -110,7 +141,7 @@ export interface ComposerCreditsGateProps {
 }
 
 export function ComposerCreditsGate(props: ComposerCreditsGateProps) {
-  const { t, settingsScope, useProjection } = props
+  const { t, position, settingsScope, useProjection } = props
   // Re-render when the settings change, so ticking the card's checkbox appears
   // without a remount. `settingsScope` is a stable injected reference, so the
   // subscription is set up once per scope.
@@ -137,6 +168,10 @@ export function ComposerCreditsGate(props: ComposerCreditsGateProps) {
   // wins one render later, on a document we were fetching anyway.
   const region = composerCreditsRegionOf(projection, settingsScope)
   if (region === undefined) return null
+  // The seat test comes AFTER ownership and the on/off switches, so a region
+  // that is switched off renders nothing in EITHER seat (rather than the
+  // inactive seat briefly drawing before the region test rejects it).
+  if (regionCreditPositionOf(scopeValueOf(settingsScope), region) !== (position ?? 'composer')) return null
 
   // `region` is non-undefined here and was derived from the provider, so the
   // provider is present too; the assertion states that rather than widening the

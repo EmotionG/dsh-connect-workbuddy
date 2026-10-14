@@ -59,6 +59,15 @@ export const WORKBUDDY_CARD_CSS = `
    render (no Host pool state), so there is no heading row to share. This is the
    spacing the control carried before it moved beside that heading. */
 .dsm-workbuddy-credits-switch-row{display:flex;align-items:center;margin:8px 0 2px}
+/* The credit readout's seat picker (issue #62). Narrower than the pool's model
+   select so the show/hide box and this control share one heading row, and it
+   wraps onto its own line rather than squashing the pool title. */
+/* Its OWN label class, deliberately not the switch's: a query for "the
+   sidebar-credit switch" must not be able to pick this control up, and the two
+   are different widgets (a checkbox and a two-way picker). */
+.dsm-workbuddy-credit-position-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-credit-position{max-width:150px;padding:2px 6px;font-size:12px}
+.dsm-workbuddy-credits-switch-row .dsm-workbuddy-credit-position-switch{margin-left:12px}
 .dsm-workbuddy-credits-switch input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
 .dsm-workbuddy-credits-switch input:disabled{opacity:.4;cursor:default}
 .dsm-workbuddy-tab-off{opacity:.55}

@@ -28,6 +28,7 @@ import { createElement as h } from 'react'
 import type { ReactElement } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import {
+  nextRegionCreditPosition,
   nextRegionCreditsShown,
   nextRegionEnabled,
   regionCreditsShownOf,
@@ -43,13 +44,14 @@ import {
   withWorkBuddyRegion,
 } from '../status-paths.ts'
 import type {
+  WorkBuddyCreditPosition,
   WorkBuddyWebModel,
   WorkBuddyWebProbeResult,
   WorkBuddyWebRegion,
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { isFileContentionWriteError, writeAccountSlot, writeRegionCreditsShown, writeRegionEnabled, writeRegionModels } from './account-selection.ts'
+import { isFileContentionWriteError, writeAccountSlot, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionModels } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -681,6 +683,49 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * hide never drops the directory, model picks, budgets or pool preferences
    * that live alongside it.
    */
+  /**
+   * WHERE the active region's credit readout sits (issue #62).
+   *
+   * Read off the Host's usage answer, like {@link creditsShownOn} and for the
+   * same measured reason: the browser's settings mirror for this namespace is
+   * documented as stale on the affected 0.1.7 deployments, so a control reading
+   * it would keep showing the previous seat after a successful write. Absent
+   * means `composer`, which is what the Host resolves for a profile written
+   * before the setting existed.
+   */
+  const creditPositionOn = (item: WorkBuddyWebRegion): WorkBuddyCreditPosition => {
+    const usage = statusByRegion[item] as { creditPosition?: unknown } | undefined
+    return usage?.creditPosition === 'stats' ? 'stats' : 'composer'
+  }
+
+  /**
+   * Move one region's credit readout between its two seats.
+   *
+   * Same shape as {@link toggleCredits}: whole region slot in, landed check,
+   * then a Host re-read. The re-read is load-bearing here for the same reason —
+   * the control renders the Host's answer, so without it the picker keeps
+   * showing the seat it had and the change looks like it did nothing.
+   */
+  const changeCreditPosition = async (item: WorkBuddyWebRegion, position: WorkBuddyCreditPosition): Promise<void> => {
+    if (settingsScope === undefined) return
+    setTogglingCredits(item)
+    try {
+      const regions = nextRegionCreditPosition(settingsScope.getSnapshot().value, item, position) as Record<string, unknown>
+      const slot = regions[item]
+      await writeRegionCreditPosition(
+        settingsScope,
+        item,
+        position,
+        typeof slot === 'object' && slot !== null ? slot as Record<string, unknown> : {},
+      )
+      await refreshUsage(item)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setTogglingCredits(undefined)
+    }
+  }
+
   const toggleCredits = async (item: WorkBuddyWebRegion, shown: boolean): Promise<void> => {
     if (settingsScope === undefined) return
     setTogglingCredits(item)
@@ -1094,6 +1139,41 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     </label>
   )
 
+  /**
+   * WHERE the readout sits — a two-way choice, active tab's region only
+   * (issue #62).
+   *
+   * It sits directly under the show/hide switch because the two answer one
+   * question together ("show it, and where"), and because a user only reaches
+   * for this when the default seat is unavailable — typically after installing
+   * another plugin that occupies the composer row. Rendered as a `<select>`
+   * rather than a pair of radios so it stays one compact row on the pool
+   * heading, matching the switch beside it.
+   *
+   * Disabled with the region, exactly like the switch: a region that is off has
+   * no readout to place.
+   */
+  const creditPositionPicker = (
+    <label
+      className="dsm-workbuddy-credit-position-switch"
+      title={t('row.creditPositionHint')}
+    >
+      <select
+        className="dsm-workbuddy-pool-select dsm-workbuddy-credit-position"
+        value={activeRegionOn ? creditPositionOn(activeRegion) : 'composer'}
+        disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+        aria-label={t('row.creditPositionAria', { region: activeRegion === 'cn' ? t('row.tabCn') : t('row.tabGlobal') })}
+        onChange={(event: { currentTarget: { value: string } }) => {
+          void changeCreditPosition(activeRegion, event.currentTarget.value === 'stats' ? 'stats' : 'composer')
+        }}
+      >
+        <option value="composer">{t('row.creditPositionComposer')}</option>
+        <option value="stats">{t('row.creditPositionStats')}</option>
+      </select>
+      <span>{t('row.creditPositionLabel')}</span>
+    </label>
+  )
+
   return (
     <li className={`dsm-plugin-card${open ? ' dsm-plugin-card-open' : ''}`}>
       <button
@@ -1269,7 +1349,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       // disabled, or the user cannot see why the line is missing
                       // (and the card's own off-notice points at the provider box
                       // rather than at a control that vanished).
-                      {...status.pool === undefined ? {} : { headerExtra: creditsSwitch }}
+                      {...status.pool === undefined ? {} : { headerExtra: <>{creditsSwitch}{creditPositionPicker}</> }}
                       siblingBusy={saving || togglingRegion !== undefined}
                       onBusyChange={setPoolBusy}
                       // Returns the promise so the pool section can AWAIT the
@@ -1300,7 +1380,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                         because there is no heading to share: this branch has no
                         "account pool" title at all. */}
                     {status.pool === undefined
-                      ? <div className="dsm-workbuddy-credits-switch-row">{creditsSwitch}</div>
+                      ? <div className="dsm-workbuddy-credits-switch-row">{creditsSwitch}{creditPositionPicker}</div>
                       : null}
 
                     <section className="dsm-workbuddy-models" aria-label={t('row.modelsTitle')}>

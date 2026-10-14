@@ -297,6 +297,14 @@ export const en = {
   'row.showCreditsCn': 'WB CN credits in composer',
   'row.showCreditsGlobal': 'WB AI credits in composer',
   'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
+  // WHERE the readout sits (issue #62). The composer row is a LIST seat shared
+  // with any other plugin that registers there — one report is the readout
+  // disappearing once another plugin was installed — so the seat is a choice.
+  'row.creditPositionLabel': 'position',
+  'row.creditPositionComposer': 'composer toolbar',
+  'row.creditPositionStats': 'below the input box',
+  'row.creditPositionAria': 'Credit readout position for {region}',
+  'row.creditPositionHint': 'Where the credit readout sits. "composer toolbar" is the default (the row with the model picker). Choose "below the input box" — the row carrying the round / step / token statistics — if another plugin occupies the composer toolbar and the readout does not appear.',
   'row.showCreditsGlobalHint': 'Show the international (WB AI) credit balance in the composer toolbar, but only while this session uses a WB AI model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
   'composer.pointsCn': 'WB CN',
   'composer.pointsGlobal': 'WB AI',
@@ -593,6 +601,14 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.showCreditsCn': '对话框显示 WB CN 积分',
   'row.showCreditsGlobal': '对话框显示 WB AI 积分',
   'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
+  // 积分显示在哪个位置（issue #62）。输入框工具栏是**共享**的 list 插槽，
+  // 别的插件也注册在那里时本插件读数会消失（报告者遇到的就是这个），
+  // 所以位置做成可选项。
+  'row.creditPositionLabel': '位置',
+  'row.creditPositionComposer': '输入框工具栏',
+  'row.creditPositionStats': '输入框下方',
+  'row.creditPositionAria': '{region} 的积分显示位置',
+  'row.creditPositionHint': '积分显示在哪里。「输入框工具栏」是默认位置（与模型选择同一行）。如果装了别的插件后读数不显示，改成「输入框下方」—— 那是「轮次 / 步数 / token」统计所在的那一行。',
   'row.showCreditsGlobalHint': '在对话输入框工具栏显示国际版（WB AI）剩余积分，仅当本会话使用 WB AI 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
   'composer.pointsCn': 'WB CN',
   'composer.pointsGlobal': 'WB AI',

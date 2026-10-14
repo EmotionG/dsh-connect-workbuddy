@@ -388,6 +388,40 @@ export function regionCreditsShownOf(value: unknown, region: WorkBuddyWebRegion)
 }
 
 /**
+ * The two seats the credit readout can occupy (issue #62).
+ *
+ * `composer` is the composer tool row (`conversation.input.left`); `stats` is
+ * the ambient dock below the composer card (`conversation.composer.dock`),
+ * beside the shell's own round/step/token pills. Named as a union rather than a
+ * boolean because a third seat is plausible and `showAtTop: boolean` would have
+ * to be migrated rather than extended.
+ */
+export type WorkBuddyCreditPosition = 'composer' | 'stats'
+
+/** The seat a region's readout uses, defaulting to the composer row. */
+export function regionCreditPositionOf(value: unknown, region: WorkBuddyWebRegion): WorkBuddyCreditPosition {
+  return regionSlotOf(value, region)['creditPosition'] === 'stats' ? 'stats' : 'composer'
+}
+
+/**
+ * Build the next `regions` settings value for one region's credit seat.
+ *
+ * Same merge rule as {@link nextRegionCreditsShown}: only the target region's
+ * field changes, so every other field of that slot and every other region's slot
+ * survive the write.
+ */
+export function nextRegionCreditPosition(
+  value: unknown,
+  region: WorkBuddyWebRegion,
+  position: WorkBuddyCreditPosition,
+): Record<string, unknown> {
+  return nextRegionSlots(regionsMapOf(value), region, {
+    ...regionSlotOf(value, region),
+    creditPosition: position,
+  })
+}
+
+/**
  * Build the next `regions` settings value for the sidebar-credit on/off toggle.
  *
  * Same merge rule as {@link nextRegionEnabled}: ONLY the target region's flag
@@ -630,6 +664,8 @@ export type WorkBuddyWebUsage =
      * "关闭不了" report.
      */
     showCreditsInMainUi?: boolean
+    /** WHERE this region's readout sits (issue #62); absent means `composer`. */
+    creditPosition?: WorkBuddyCreditPosition
     message?: string
     /** The persisted account id matches no local account. */
     selectionLost?: boolean
@@ -665,6 +701,8 @@ export type WorkBuddyWebUsage =
      * settings mirror.
      */
     showCreditsInMainUi?: boolean
+    /** WHERE this region's readout sits (issue #62); absent means `composer`. */
+    creditPosition?: WorkBuddyCreditPosition
     source?: 'desktop' | 'dsh'
     tokenExpiresAtMs: number
     /** A saved per-region choice is in effect (false = following the app). */

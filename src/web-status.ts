@@ -39,6 +39,7 @@ import type {
   WorkBuddyPoolTestRow,
 } from './account-pool-run.ts'
 import { regionOfStatusUrl, transferActionOf } from './status-paths.ts'
+import type { WorkBuddyCreditPosition } from './status-paths.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import {
   oauthActionOf,
@@ -123,6 +124,13 @@ export interface WorkBuddyStatusRouteOptions {
    * absent reads as ON, matching the schema's `default(true)`.
    */
   showCreditsInMainUi?(region: WorkBuddyRegion): boolean
+  /**
+   * WHERE this region's credit readout sits (issue #62).
+   *
+   * Optional, and absent reads as `composer` — the only seat before the setting
+   * existed, so a Host that predates it renders exactly as it used to.
+   */
+  creditPosition?(region: WorkBuddyRegion): WorkBuddyCreditPosition
   /**
    * Send one real-volume request to each named model of a region and report what
    * came back.
@@ -649,6 +657,7 @@ export async function workBuddyWebStatus(
   // after a successful write — the switch looked impossible to turn off
   // ("关闭不了"). Absent means ON, matching the schema's `default(true)`.
   const showCreditsInMainUi = deps.showCreditsInMainUi?.(region) ?? true
+  const creditPosition = deps.creditPosition?.(region) ?? 'composer'
   const authStatus = await store.status()
   // Whether a saved per-region choice is in effect, on every branch: the card
   // needs it to show that clearing really did return the region to the app's
@@ -680,6 +689,7 @@ export async function workBuddyWebStatus(
       selectionExplicit,
       enabled,
       showCreditsInMainUi,
+      creditPosition,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
       // sign-ins DO exist (the orphaned-saved-id case), the card already has
@@ -703,6 +713,7 @@ export async function workBuddyWebStatus(
     selectionExplicit,
     enabled,
     showCreditsInMainUi,
+    creditPosition,
     accounts: accounts.map(toWebAccount),
     models: deps.displayModels(region).map(model => toWebModel(model, deps.contextBudgets(region))),
     enabledModelIds: [...deps.enabledModelIds(region)],

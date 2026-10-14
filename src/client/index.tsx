@@ -170,11 +170,52 @@ export function apply(ctx: WorkBuddyClientContext): void {
           // `settingsScope` rides along so the gate can honor the card's
           // per-region switch without a second writer.
           inject: () => settingsScope === undefined
-            ? { t }
-            : { t, settingsScope },
+            ? { t, position: 'composer' as const }
+            : { t, position: 'composer' as const, settingsScope },
         }, ComposerCreditsGate))
       } catch (error: unknown) {
         console.error('[dsh-connect-workbuddy] composer credits slot failed to register (host provider unaffected):', error)
+        return undefined
+      }
+    }
+
+    /**
+     * The SAME readout in the ambient dock below the composer card (issue #62).
+     *
+     * Registered unconditionally, like the composer seat, because the CHOICE
+     * between the two seats lives in the gate: it renders in the seat the
+     * setting names and returns null in the other. Registering only the chosen
+     * seat would mean re-registering on every settings change, and the seat is
+     * exactly the kind of thing a user flips once while looking at the result.
+     *
+     * WHY THIS SEAT EXISTS: the composer tool row is a list seat shared with any
+     * other plugin that registers there, and issue #62 is one report of the
+     * readout disappearing when another plugin was installed. This row is where
+     * the shell renders its own round/step/token pills, so it is a place a user
+     * already reads session numbers from.
+     *
+     * `order` places it after the shell's own pills (`stats` registers at 0), so
+     * the shipped statistics stay leftmost and the readout reads as an addition
+     * rather than a replacement.
+     */
+    const registerStatsCredits = (): (() => void) | undefined => {
+      try {
+        return ctx.slots.inject('conversation.composer.dock' as never, () => (ctx.slots as unknown as {
+          register(
+            options: { name: string; id: string; order: number; locale: string; inject: () => WorkBuddyCardInjected },
+            component: unknown,
+          ): () => void
+        }).register({
+          name: 'conversation.composer.dock',
+          id: 'dsh-connect-workbuddy-stats-credits',
+          order: 10,
+          locale: namespace,
+          inject: () => settingsScope === undefined
+            ? { t, position: 'stats' as const }
+            : { t, position: 'stats' as const, settingsScope },
+        }, ComposerCreditsGate))
+      } catch (error: unknown) {
+        console.error('[dsh-connect-workbuddy] stats credits slot failed to register (host provider unaffected):', error)
         return undefined
       }
     }
@@ -198,6 +239,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
       ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.bundle.config', key)),
       ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.row.config', `${key}#${key}`)),
       registerComposerCredits(),
+      registerStatsCredits(),
     ].filter((disposer): disposer is () => void => disposer !== undefined)
 
     /**
