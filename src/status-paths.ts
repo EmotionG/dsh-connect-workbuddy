@@ -973,7 +973,6 @@ export interface WorkBuddyWebPool {
    * an id whose model has left the catalog must survive a save so the user's
    * record of what they chose is not silently destroyed.
    */
-  targetModelIdByAccount?: Readonly<Record<string, string>>
   /**
    * Where the target came from. `'stale'` means the SAVED id is no longer in
    * the catalog — a distinct state from `'none'` (no free model exists),

@@ -592,37 +592,6 @@ export interface WorkBuddyPoolTarget {
  * That is the safe direction: no credits are spent while the roster is unknown,
  * and the card offers to switch back to automatic.
  */
-/**
- * The model ONE account's test should target (issue #61).
- *
- * The region-wide `targetModelId` is one value, but `6004` is an ACCOUNT × MODEL
- * condition: the reporter measured two accounts where `hy4-preview-f` answered
- * `ok` and `step-5-preview` returned `429 / 6004` at the same moment. Testing
- * only the region's model therefore cannot answer "can this account serve the
- * model I actually use", which is the question the pool's test button is read as
- * answering.
- *
- * A per-account override is the smallest thing that makes the question
- * answerable, and it is additive: an account with no entry keeps using
- * `targetModelId`, so every existing profile behaves identically.
- *
- * Returns a PREFERENCE, not a resolved target — `resolveTargetModel` still
- * validates it against the catalog, so an override pointing at a model this
- * region no longer offers is reported as stale rather than silently swapped for
- * one the user did not choose.
- */
-export function targetModelPreference(
-  preferences: {
-    targetModelId?: string
-    targetModelIdByAccount?: Readonly<Record<string, string>>
-  },
-  accountId: string | undefined,
-): string | undefined {
-  const perAccount = accountId === undefined ? undefined : preferences.targetModelIdByAccount?.[accountId]
-  if (perAccount !== undefined && perAccount !== '') return perAccount
-  return preferences.targetModelId
-}
-
 export function resolveTargetModel(
   catalog: readonly WorkBuddyModelInfo[],
   preferredId: string | undefined,

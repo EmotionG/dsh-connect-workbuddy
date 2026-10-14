@@ -25,7 +25,6 @@ export interface PoolPreferencesLike {
    * Optional so an older host payload still satisfies this type; an absent map
    * means every account uses `targetModelId`, exactly as before.
    */
-  targetModelIdByAccount?: Readonly<Record<string, string>>
   /**
    * Tokens each test probe sends, or `undefined`/`0` for the host's default.
    *

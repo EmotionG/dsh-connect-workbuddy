@@ -32,7 +32,7 @@ import { Config, unwrapVolatileDeep } from './index.ts'
 import type { WorkBuddyRecoveryCandidate } from './credential-recovery.ts'
 import type { WorkBuddyCredits, WorkBuddyUpstreamClient } from './upstream.ts'
 import { isCredentialRejectedError } from './upstream.ts'
-import { effectiveMembersOf, rankPool, resolveTargetModel, targetModelPreference } from './account-pool.ts'
+import { effectiveMembersOf, rankPool, resolveTargetModel } from './account-pool.ts'
 import type { WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
 import type {
   WorkBuddyPoolCheckinRow,
@@ -276,7 +276,6 @@ export interface WorkBuddyPoolDeps {
     enabled: boolean
     targetModelId: string
     /** Per-account override of `targetModelId` (issue #61). */
-    targetModelIdByAccount?: Readonly<Record<string, string>>
     /**
      * Tokens each test probe sends as saved; `0` when the user never chose.
      *
@@ -372,13 +371,11 @@ export interface WorkBuddyPoolDeps {
   test?(
     region: WorkBuddyRegion,
     /**
-     * One model for the whole batch, or a per-account resolver (issue #61).
-     *
-     * The resolver form is what lets a batch honour a per-account test model; a
-     * resolver that names no model yields an `unavailable` row for that account
-     * rather than silently testing the region default.
+     * The model the whole batch is measured on — ONE value, by design: every
+     * member of the batch must be probed on the same model or a green batch
+     * stops meaning a single thing (see the removal note in `account-pool-run.ts`).
      */
-    modelId: string | ((accountId: string) => { modelId?: string, staleModelId?: string }),
+    modelId: string,
     onRow?: (row: WorkBuddyPoolTestRow) => void,
   ): Promise<readonly WorkBuddyPoolTestRow[]>
   /** The region's live catalog, used to resolve the free target model. */
@@ -885,7 +882,7 @@ async function workBuddyWebPool(
       // the card can show it next to the row it applies to instead of implying
       // one model for the whole table.
       ...(() => {
-        const perRow = resolveTargetModel(catalog, targetModelPreference(preferences, account.id))
+        const perRow = resolveTargetModel(catalog, preferences.targetModelId)
         return {
           ...perRow.modelId === undefined ? {} : { testModelId: perRow.modelId },
           testModelSource: perRow.source,
@@ -912,7 +909,6 @@ async function workBuddyWebPool(
     // rewritten to the effective value, for the same reason the member list is
     // not: a silently dropped id would destroy the user's record of what they
     // chose, and the model can come back in a later catalog.
-    targetModelIdByAccount: preferences.targetModelIdByAccount ?? {},
     // The SAVED list, verbatim. Deliberately not rewritten to the effective
     // set: silently dropping ids would destroy the user's record of what they
     // chose, and a login can come back (the desktop app re-adds it) in which
@@ -1243,20 +1239,14 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           /**
            * The model ONE member is tested on (issue #61).
            *
-           * Per account, because a test model is a per-account choice: `6004` is
-           * an account × model condition, so a batch that tested every member on
-           * one model would report "可用" for an account whose own model is the
-           * one that is limited. Resolution still runs through
-           * `resolveTargetModel`, so a stale override is reported, never
-           * silently swapped.
+           * ONE model for the whole batch, and it is also the gate: if the region
+           * cannot name a target model the card is told to pick one before any
+           * credits are spent. Every member is therefore measured on the SAME
+           * model, which is what makes a green batch mean one thing. Resolution
+           * runs through `resolveTargetModel`, so a stale target is reported,
+           * never silently swapped for another model.
            */
-          const targetFor = (accountId: string) => resolveTargetModel(
-            catalog,
-            targetModelPreference(preferences, accountId),
-          )
-          // The region-wide target still gates the batch: it decides whether the
-          // card should say "pick a model first" before any credits are spent.
-          const target = resolveTargetModel(catalog, targetModelPreference(preferences, undefined))
+          const target = resolveTargetModel(catalog, preferences.targetModelId)
           if (target.modelId === undefined) {
             // Two distinct causes, each with its own fix, and the card shows the
             // matching one. NOT a silent fallback to a paid model: the whole
@@ -1303,7 +1293,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           }
           writeLine({ action: 'test', modelId: target.modelId })
           try {
-            await pool.test(region, targetFor, row => { writeLine({ row }) })
+            await pool.test(region, target.modelId, row => { writeLine({ row }) })
             writeLine({ done: true })
           } catch (error: unknown) {
             writeLine({ reason: 'pool-failed', error: safeMessage(error) })

@@ -160,22 +160,18 @@ async function checkinOne(
 export async function testAllAccounts(
   targets: readonly WorkBuddyPoolTarget[],
   /*
-   * ONE model for the whole batch, or a resolver when each account has its own
-   * (issue #61).
+   * ONE model for the whole batch (issue #61 removed the per-account form).
    *
-   * The resolver form exists because a per-account test model is only meaningful
-   * if the BATCH honours it too: a user who sets account B to `step-5-preview`
-   * and then presses "test all" would otherwise watch B come back `ok` on a
-   * model B was never asked to serve — the exact false positive the per-account
-   * setting was added to remove.
-   *
-   * A resolver that resolves to NO model (a stale override, or a region with no
-   * free model) yields an `unavailable` row that names the model that could not
-   * be tested. It is deliberately NOT retargeted at the region's default: that
-   * would spend credits on a model nobody chose and report it as this account's
-   * verdict.
+   * The per-account override was adopted from the reporter's proposal and then
+   * REMOVED by the maintainer's decision: the region already has one test model,
+   * and pointing it at the model you actually chat with is what the report was
+   * about. Letting each row test a different model makes a green batch
+   * UNCOMPARABLE — one account's `ok` would be on model X and another's on model
+   * Y — which is the very reading ("all green") the report warned against. What
+   * stays from #61 is the half that needs no new setting: every measurement
+   * records the model it probed, and each row displays it.
    */
-  modelId: string | ((accountId: string) => { modelId?: string, staleModelId?: string }),
+  modelId: string,
   deps: WorkBuddyPoolRunnerDeps,
   /** Called after each account finishes, in the order they were tested. */
   onRow?: (row: WorkBuddyPoolTestRow) => void,
@@ -183,24 +179,7 @@ export async function testAllAccounts(
   const rows: WorkBuddyPoolTestRow[] = []
   for (const [index, target] of targets.entries()) {
     if (index > 0) await (deps.wait ?? defaultWait)(POOL_BATCH_GAP_MS)
-    const wanted = typeof modelId === 'function' ? modelId(target.accountId) : { modelId }
-    if (wanted.modelId === undefined) {
-      const row: WorkBuddyPoolTestRow = {
-        accountId: target.accountId,
-        accountName: target.accountName,
-        result: {
-          modelId: wanted.staleModelId ?? '',
-          outcome: 'unavailable',
-          message: wanted.staleModelId === undefined
-            ? 'this region offers no model to test'
-            : `the test model "${wanted.staleModelId}" is no longer offered in this region`,
-        },
-      }
-      rows.push(row)
-      onRow?.(row)
-      continue
-    }
-    const row = await testOne(target, wanted.modelId, deps)
+    const row = await testOne(target, modelId, deps)
     rows.push(row)
     // A throwing reporter must not lose the rows already collected, so it is
     // called outside any structure that would abort the loop.

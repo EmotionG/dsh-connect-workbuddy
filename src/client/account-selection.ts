@@ -425,14 +425,6 @@ export async function writePoolPreferences(
     enabled: boolean
     targetModelId: string
     /**
-     * Per-account test model, keyed by account id (issue #61).
-     *
-     * Optional so a caller that never learnt about the setting keeps working;
-     * omitting it writes an empty map, which behaves exactly like the old
-     * single-target pool.
-     */
-    targetModelIdByAccount?: Readonly<Record<string, string>>
-    /**
      * Tokens each probe sends, or `undefined` to leave the host's default.
      *
      * Optional on purpose: a caller that never learnt about this setting must
@@ -457,15 +449,6 @@ export async function writePoolPreferences(
     enabled: preferences.enabled,
     targetModelId: preferences.targetModelId,
     memberAccountIds: preferences.memberAccountIds,
-  }
-  // Written only when there IS one (issue #61). Same rule as `probeInputTokens`:
-  // a profile that never uses this setting must be byte-identical to one written
-  // before the setting existed, so an upgrade cannot look like a change the user
-  // made — and an empty map and an absent key mean the same thing to the host.
-  const overrides = Object.entries(preferences.targetModelIdByAccount ?? {})
-    .filter(([, modelId]) => modelId !== '')
-  if (overrides.length > 0) {
-    slot['targetModelIdByAccount'] = Object.fromEntries(overrides)
   }
   if (preferences.probeInputTokens !== undefined) {
     slot['probeInputTokens'] = preferences.probeInputTokens
@@ -495,23 +478,9 @@ export async function writePoolPreferences(
     if (!Array.isArray(stored) || stored.length !== preferences.memberAccountIds.length) return false
     const wanted = new Set(preferences.memberAccountIds)
     if (!stored.every(id => typeof id === 'string' && wanted.has(id))) return false
-    // The per-account test models (issue #61). Compared as a MAP, by content:
-    // an entry the user cleared must not read as "landed" just because the key
-    // is absent from both sides (that is the same value), and a partially
-    // landed write must not look like success — success is what discards the
-    // draft, so a false positive here loses the user's edit silently.
-    const storedModels = pool['targetModelIdByAccount']
-    if (overrides.length === 0) {
-      // Both spellings are the same state, and an untouched profile writes the
-      // absent one — requiring exactly `undefined` would report a landed write
-      // as failed and leave the draft on screen.
-      return storedModels === undefined
-        || (typeof storedModels === 'object' && storedModels !== null && !Array.isArray(storedModels)
-          && Object.keys(storedModels).length === 0)
-    }
-    if (typeof storedModels !== 'object' || storedModels === null || Array.isArray(storedModels)) return false
-    const storedMap = storedModels as Record<string, unknown>
-    return Object.keys(storedMap).length === overrides.length
-      && overrides.every(([accountId, modelId]) => storedMap[accountId] === modelId)
+    // Everything compared above matched. Returning `undefined` here (which is
+    // what a trailing `if` without a final `return` would do) reads as "did not
+    // land" and would leave the draft on screen after a successful save.
+    return true
   })
 }

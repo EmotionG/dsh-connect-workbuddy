@@ -60,7 +60,7 @@ import type {
 } from './account-pool-run.ts'
 import { exclusionOf } from './account-pool.ts'
 import type { WorkBuddyPoolCredits, WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
-import { resolveTargetModel, targetModelPreference } from './account-pool.ts'
+import { resolveTargetModel } from './account-pool.ts'
 import { oauthPoll, oauthStart } from './oauth.ts'
 import { mergeTransferRecords, parseTransferFile, previewTransferFile, transferRecordOf } from './transfer.ts'
 import {
@@ -382,7 +382,6 @@ export interface WorkBuddyPoolPreferences {
    * chatting with. An id that is no longer in the catalog is reported as stale
    * rather than replaced, so no credits are spent on a model nobody chose.
    */
-  targetModelIdByAccount?: Record<string, string>
   /**
    * How much input a probe sends, in tokens — the pool's biggest single knob.
    *
@@ -467,7 +466,6 @@ const modelConfig = z.object({
 const poolConfig = z.object({
   enabled: z.boolean().default(false).description('Whether this region\'s account pool is active (opt-in). While on, a failed chat request is retried against the other usable pool members before the error is reported.'),
   targetModelId: z.string().default('').description('Model id to test; empty means pick a zero-multiplier model from this region\'s catalog'),
-  targetModelIdByAccount: z.dict(z.string()).default({}).description('Per-account test model, keyed by account id; an account with no entry uses targetModelId. Use this when an account must be tested on the model you actually chat with, because 6004 is an account-by-model condition.'),
   /**
    * Sizing of the test probe, as a token count the user picks from a fixed set.
    *
@@ -1245,8 +1243,6 @@ export function apply(ctx: Context, config: Config): void {
         const rows = await testAllAccounts(
           await poolTargets(region),
           modelId,
-          // A resolver is forwarded as-is (issue #61): the batch asks the SAME
-          // per-account question the row route does.
           poolRunnerDeps(region),
           // Forwarded so the route can report each account as it lands. The
           // measurements are still persisted ONCE, after the whole batch: a
@@ -1273,7 +1269,7 @@ export function apply(ctx: Context, config: Config): void {
        * rather than pretending a test ran.
        */
       testOne: async (region, accountId) => {
-        const target = regionTargetModel(region, accountId)
+        const target = regionTargetModel(region)
         if (target === undefined) return undefined
         const store = stacks[region].store
         const credential = await store.credentialFor(accountId).catch(() => undefined)
@@ -1726,24 +1722,13 @@ export function apply(ctx: Context, config: Config): void {
    * issue #61), so a row test and a batch test never measure different models.
    * Undefined mirrors the route's 409 states.
    */
-  const regionTargetModel = (region: WorkBuddyRegion, accountId?: string): string | undefined => {
+  const regionTargetModel = (region: WorkBuddyRegion): string | undefined => {
     const target = resolveTargetModel(
       displayModels(current(), region),
-      targetModelPreference(poolPreferencesOf(current(), region), accountId),
+      poolPreferencesOf(current(), region).targetModelId,
     )
     return target.modelId
   }
-
-  /**
-   * The same resolution the routes perform, kept in one place so a batch test
-   * and a single-row test can never disagree (issue #61): with per-account
-   * overrides in play, "which model does account X get tested on" has one
-   * answer, and both routes ask THIS question.
-   */
-  const regionTargetFor = (region: WorkBuddyRegion, accountId: string) => resolveTargetModel(
-    displayModels(current(), region),
-    targetModelPreference(poolPreferencesOf(current(), region), accountId),
-  )
 
   /** One region's pool preferences, with the schema's defaults applied. */
   /**
@@ -1765,7 +1750,6 @@ export function apply(ctx: Context, config: Config): void {
       // Passed through as a plain copy: the config value is a live cosmokit
       // reference on the 0.1.7 line, and handing that to a route would let a
       // settings mutation change what a running request resolves against.
-      targetModelIdByAccount: { ...pool?.targetModelIdByAccount }, 
       // Passed through RAW (not coerced here): `resolveProbeInputTokens` owns
       // that decision and is the only place that knows the offered set. Coercing
       // in two places is how a menu and its validation drift apart.
