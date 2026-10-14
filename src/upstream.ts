@@ -678,6 +678,25 @@ function ensureSystemHead(obj: Record<string, unknown>): void {
  * `tool_choice` (the upstream's field is a string; object forms return 400),
  * and guarantee a leading system message.
  */
+/**
+ * The model id a prepared body asks for, when it carries one (issue #61).
+ *
+ * Lives beside {@link prepareChatBody} because it reads the same shape: the
+ * serialized OpenAI body, after this plugin's rewrites. Never throws — a
+ * malformed body is the upstream's to reject, not a reason to lose the failure
+ * measurement that this id is needed for.
+ */
+export function modelIdOfBody(bodyJson: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(bodyJson)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+    const model = (parsed as Record<string, unknown>)['model']
+    return typeof model === 'string' && model !== '' ? model : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function prepareChatBody(source: string): string {
   let body: unknown
   try {

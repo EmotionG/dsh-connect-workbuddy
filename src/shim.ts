@@ -25,6 +25,7 @@ import type { RecoveredToolCall, RecoveryGate } from './dsml-recovery.ts'
 import {
   declaredTools,
   prepareChatBody,
+  modelIdOfBody,
   WorkBuddyUpstreamClient,
   type UpstreamErrorKind,
   type WorkBuddyChatResult,
@@ -111,7 +112,29 @@ export interface WorkBuddyShimOptions {
     status: number
     kind: UpstreamErrorKind
     message: string
+    /**
+     * The model that request asked for (issue #61).
+     *
+     * Carried because the failure is remembered against the ACCOUNT, and `6004`
+     * is an account × model condition: without this the record cannot say which
+     * model the measurement belongs to, so the card has to present a
+     * single-model result as account-level availability.
+     */
+    modelId?: string
   }) => void
+  /**
+   * Called with the FINAL serialized body of every chat request, just before it
+   * goes upstream (issue #59).
+   *
+   * It exists so the plugin can record what was actually sent without the shim
+   * having to know where that record goes: the region belongs to whoever wires
+   * this up, and the report is a plugin concern. The body handed over is the
+   * post-`prepareChatBody` one, because THAT is what the upstream counts.
+   *
+   * Fired without awaiting: a request must never wait on a diagnostic. The
+   * callee must treat the string as read-only.
+   */
+  onRequestBody?: (bodyJson: string) => void
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -858,6 +881,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const failoverAccount = options.failoverAccount
   const prepareAccount = options.prepareAccount
   const onAccountFailure = options.onAccountFailure
+  const onRequestBody = options.onRequestBody
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -992,6 +1016,20 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
     const raw = (await readBody(req)).toString('utf8')
     const prepared = prepareChatBody(raw)
+    // The model this request is about, read from the body that goes upstream
+    // (issue #61). Read ONCE, so every attempt — the first and each failover
+    // retry — is remembered against the same model.
+    const requestModelId = modelIdOfBody(prepared)
+    // Record WHAT goes upstream (issue #59). Handed the prepared body on purpose:
+    // it is the one the upstream counts, and reading it must not change it.
+    if (onRequestBody !== undefined) {
+      try {
+        onRequestBody(prepared)
+      } catch (error: unknown) {
+        // A diagnostic must never fail a chat request.
+        logger?.warn('dsh-connect-workbuddy: body report failed', error)
+      }
+    }
 
     const controller = new AbortController()
     // Watch the RESPONSE, not the request.
@@ -1075,6 +1113,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
             status: entry.failure.status,
             kind: entry.failure.kind,
             message: entry.failure.message,
+            ...requestModelId === undefined ? {} : { modelId: requestModelId },
           })
         } catch (error: unknown) {
           // Reporting is bookkeeping; it must never take down a request.

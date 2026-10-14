@@ -827,7 +827,13 @@ export interface WorkBuddyWebPoolAccount {
   expiringSoon?: number
   /** When the nearest package expires, in ms. */
   nearestExpiryMs?: number
-  /** The last test of the target model, absent when never tested. */
+  /**
+   * The last test of this account's target model, absent when never tested.
+   *
+   * The model is recorded INSIDE the probe (issue #61) rather than assumed from
+   * the row's current setting: the setting can be changed after the test, and a
+   * result must keep naming what it actually measured.
+   */
   probe?: {
     outcome: WorkBuddyWebProbeOutcome
     atMs: number
@@ -839,6 +845,16 @@ export interface WorkBuddyWebPoolAccount {
      * guess which of the two it was.
      */
     source?: 'test-batch' | 'live-request'
+    /**
+     * WHICH model this measurement is about (issue #61).
+     *
+     * `6004` is an account × model condition, so an `ok` without a model reads as
+     * account-level availability — which is exactly the false positive the
+     * reporter hit: the card said 可用 for two accounts whose actual model
+     * returned `429 / 6004`. ABSENT for records written before the field existed;
+     * the card must then say the scope is unknown rather than assume it.
+     */
+    modelId?: string
     /** Only when the upstream named a time; never invented locally. */
     retryAtMs?: number
     /**
@@ -871,6 +887,17 @@ export interface WorkBuddyWebPoolAccount {
    * result the user just watched succeed.
    */
   checkedInToday?: boolean
+  /**
+   * The model a TEST of this row would use (issue #61).
+   *
+   * Per row, because a test model can be chosen per account: the card shows it
+   * beside the row it applies to rather than implying one model for the table.
+   */
+  testModelId?: string
+  /** Where this row's test target came from (see {@link WorkBuddyWebPool.targetModelSource}). */
+  testModelSource?: 'preferred' | 'free' | 'none' | 'stale'
+  /** This row's saved override that the region no longer offers. */
+  staleTestModelId?: string
 }
 
 /**
@@ -901,6 +928,14 @@ export interface WorkBuddyWebPool {
    * would run against a model the upstream does not offer.
    */
   staleTargetModelId?: string
+  /**
+   * The SAVED per-account test models, keyed by account id (issue #61).
+   *
+   * Sent verbatim rather than as the effective set: the card edits this map, and
+   * an id whose model has left the catalog must survive a save so the user's
+   * record of what they chose is not silently destroyed.
+   */
+  targetModelIdByAccount?: Readonly<Record<string, string>>
   /**
    * Where the target came from. `'stale'` means the SAVED id is no longer in
    * the catalog — a distinct state from `'none'` (no free model exists),

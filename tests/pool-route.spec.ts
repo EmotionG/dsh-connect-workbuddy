@@ -209,6 +209,18 @@ async function mountUsage(
   return usage.handler
 }
 
+/**
+ * The model id a fake batch was asked for (issue #61).
+ *
+ * The route may pass either one model or a per-account resolver, so a fake that
+ * only wants "what was asked for" has to narrow — doing it in one place keeps
+ * the assertions about the route rather than about the union.
+ */
+const askedModel = (
+  modelId: string | ((accountId: string) => { modelId?: string, staleModelId?: string }),
+  accountId = 'a',
+): string => typeof modelId === 'string' ? modelId : modelId(accountId).modelId ?? ''
+
 describe('the account-pool route', () => {
   it('streams one line per account, in order, so the card can report progress', async () => {
     // The defect: the route held the whole batch, and the batch is SERIAL, so the
@@ -218,9 +230,10 @@ describe('the account-pool route', () => {
     // completion line.
     const handler = await mountPoolHandler(deps(poolDeps({
       test: async (_region, modelId, onRow) => {
+        const id = askedModel(modelId)
         const rows = [
-          { accountId: 'a', accountName: 'Alpha', result: { modelId, outcome: 'ok' as const } },
-          { accountId: 'b', accountName: 'Beta', result: { modelId, outcome: 'rate-limited' as const } },
+          { accountId: 'a', accountName: 'Alpha', result: { modelId: id, outcome: 'ok' as const } },
+          { accountId: 'b', accountName: 'Beta', result: { modelId: id, outcome: 'rate-limited' as const } },
         ]
         for (const row of rows) onRow?.(row)
         return rows
@@ -240,6 +253,32 @@ describe('the account-pool route', () => {
     expect(lines()[3]?.['done']).toBe(true)
   })
 
+  it('hands the batch a PER-ACCOUNT resolver, so an override is honoured (issue #61)', async () => {
+    // The route must not collapse a per-account setting into one model for the
+    // table: 6004 is an account × model condition, so `b` set to another model
+    // has to be probed on THAT model or its row is a false positive.
+    let asked: Array<string | undefined> = []
+    const handler = await mountPoolHandler(deps(poolDeps({
+      preferences: () => ({
+        enabled: true,
+        targetModelId: 'deepseek-v4.1-flash',
+        targetModelIdByAccount: { b: 'glm-5.3' },
+        memberAccountIds: ['a', 'b'],
+      }),
+      test: async (_region, modelId) => {
+        asked = ['a', 'b'].map(accountId => typeof modelId === 'string'
+          ? modelId
+          : modelId(accountId).modelId)
+        return []
+      },
+    })))
+    const { res, status } = response()
+    await handler(request(), res)
+    expect(status()).toBe(200)
+    // 'a' follows the region target; 'b' uses its own.
+    expect(asked).toEqual(['deepseek-v4.1-flash', 'glm-5.3'])
+  })
+
   it('runs the check-in batch for the addressed region', async () => {
     const handler = await mountPoolHandler(deps(poolDeps()))
     const { res, status, body } = response()
@@ -255,8 +294,8 @@ describe('the account-pool route', () => {
     let asked: string | undefined
     const handler = await mountPoolHandler(deps(poolDeps({
       test: async (_region, modelId) => {
-        asked = modelId
-        return [{ accountId: 'a', accountName: 'Alpha', result: { modelId, outcome: 'ok' } }]
+        asked = askedModel(modelId)
+        return [{ accountId: 'a', accountName: 'Alpha', result: { modelId: asked, outcome: 'ok' } }]
       },
     })))
     const { res, status, lines } = response()
@@ -297,7 +336,7 @@ describe('the account-pool route', () => {
         memberAccountIds: ['a'],
       }),
       test: async (_region, modelId) => {
-        asked = modelId
+        asked = askedModel(modelId)
         return []
       },
     })))

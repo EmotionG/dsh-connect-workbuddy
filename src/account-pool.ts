@@ -108,6 +108,31 @@ export interface WorkBuddyPoolProbe {
    */
   message?: string
   /**
+   * WHICH MODEL this measurement is about (issue #61).
+   *
+   * The pool's "test all accounts" action probes ONE model — the region's
+   * `targetModelId` — while `6004` is an ACCOUNT × MODEL condition: the reporter
+   * measured two accounts where `hy4-preview-f` answered and `step-5-preview`
+   * returned `429 / 6004` at the same moment. A row rendered as plain "可用"
+   * therefore claims more than the measurement says, and the pool's own routing
+   * reads that `ok` as an account-level fact.
+   *
+   * Storing the model id is what makes the claim checkable: the card can say
+   * WHICH model an `ok` came from, and a reader can see that a different model
+   * was never tested at all. `probeModel()` has always returned this field; the
+   * write simply dropped it.
+   *
+   * Deliberately NOT inherited by {@link mergePoolProbe} when an update omits it
+   * — the opposite of `accountName` and `retryAtMs`. Those two describe the
+   * ACCOUNT (a name that a later writer could not see is still true, and a
+   * future refresh time is still in the future), whereas the model describes
+   * THIS measurement. Carrying an older model id forward would relabel a fresh
+   * measurement with a model it was not taken on, which is exactly the confusion
+   * this field exists to end. ABSENT therefore means "unknown scope", never a
+   * guess.
+   */
+  modelId?: string
+  /**
    * The account's display name AT THE MOMENT IT WAS MEASURED (issue #60).
    *
    * Stored because a saved pool member can outlive its sign-in. Once the
@@ -567,6 +592,37 @@ export interface WorkBuddyPoolTarget {
  * That is the safe direction: no credits are spent while the roster is unknown,
  * and the card offers to switch back to automatic.
  */
+/**
+ * The model ONE account's test should target (issue #61).
+ *
+ * The region-wide `targetModelId` is one value, but `6004` is an ACCOUNT × MODEL
+ * condition: the reporter measured two accounts where `hy4-preview-f` answered
+ * `ok` and `step-5-preview` returned `429 / 6004` at the same moment. Testing
+ * only the region's model therefore cannot answer "can this account serve the
+ * model I actually use", which is the question the pool's test button is read as
+ * answering.
+ *
+ * A per-account override is the smallest thing that makes the question
+ * answerable, and it is additive: an account with no entry keeps using
+ * `targetModelId`, so every existing profile behaves identically.
+ *
+ * Returns a PREFERENCE, not a resolved target — `resolveTargetModel` still
+ * validates it against the catalog, so an override pointing at a model this
+ * region no longer offers is reported as stale rather than silently swapped for
+ * one the user did not choose.
+ */
+export function targetModelPreference(
+  preferences: {
+    targetModelId?: string
+    targetModelIdByAccount?: Readonly<Record<string, string>>
+  },
+  accountId: string | undefined,
+): string | undefined {
+  const perAccount = accountId === undefined ? undefined : preferences.targetModelIdByAccount?.[accountId]
+  if (perAccount !== undefined && perAccount !== '') return perAccount
+  return preferences.targetModelId
+}
+
 export function resolveTargetModel(
   catalog: readonly WorkBuddyModelInfo[],
   preferredId: string | undefined,

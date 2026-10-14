@@ -159,7 +159,23 @@ async function checkinOne(
  */
 export async function testAllAccounts(
   targets: readonly WorkBuddyPoolTarget[],
-  modelId: string,
+  /*
+   * ONE model for the whole batch, or a resolver when each account has its own
+   * (issue #61).
+   *
+   * The resolver form exists because a per-account test model is only meaningful
+   * if the BATCH honours it too: a user who sets account B to `step-5-preview`
+   * and then presses "test all" would otherwise watch B come back `ok` on a
+   * model B was never asked to serve — the exact false positive the per-account
+   * setting was added to remove.
+   *
+   * A resolver that resolves to NO model (a stale override, or a region with no
+   * free model) yields an `unavailable` row that names the model that could not
+   * be tested. It is deliberately NOT retargeted at the region's default: that
+   * would spend credits on a model nobody chose and report it as this account's
+   * verdict.
+   */
+  modelId: string | ((accountId: string) => { modelId?: string, staleModelId?: string }),
   deps: WorkBuddyPoolRunnerDeps,
   /** Called after each account finishes, in the order they were tested. */
   onRow?: (row: WorkBuddyPoolTestRow) => void,
@@ -167,7 +183,24 @@ export async function testAllAccounts(
   const rows: WorkBuddyPoolTestRow[] = []
   for (const [index, target] of targets.entries()) {
     if (index > 0) await (deps.wait ?? defaultWait)(POOL_BATCH_GAP_MS)
-    const row = await testOne(target, modelId, deps)
+    const wanted = typeof modelId === 'function' ? modelId(target.accountId) : { modelId }
+    if (wanted.modelId === undefined) {
+      const row: WorkBuddyPoolTestRow = {
+        accountId: target.accountId,
+        accountName: target.accountName,
+        result: {
+          modelId: wanted.staleModelId ?? '',
+          outcome: 'unavailable',
+          message: wanted.staleModelId === undefined
+            ? 'this region offers no model to test'
+            : `the test model "${wanted.staleModelId}" is no longer offered in this region`,
+        },
+      }
+      rows.push(row)
+      onRow?.(row)
+      continue
+    }
+    const row = await testOne(target, wanted.modelId, deps)
     rows.push(row)
     // A throwing reporter must not lose the rows already collected, so it is
     // called outside any structure that would abort the loop.
@@ -236,6 +269,9 @@ export function probeUpdatesOf(
       // subsequent `live-request` entry is explainable rather than looking
       // like the file rolled back to an older value.
       source: 'test-batch',
+      // The model this batch probed (issue #61). Every row of one batch shares
+      // it, and without it the record cannot say what the `ok` was about.
+      modelId: row.result.modelId,
       // The name is written HERE, at the one moment it is certainly available
       // (issue #60): the batch holds the account because it just resolved it.
       // A member whose sign-in later disappears can then still be named in the

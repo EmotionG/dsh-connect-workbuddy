@@ -31,6 +31,7 @@ import {
 } from '../status-paths.ts'
 import type {
   WorkBuddyWebPool,
+  WorkBuddyWebPoolModel,
   WorkBuddyWebPoolAccount,
   WorkBuddyWebPoolCheckinRow,
   WorkBuddyWebPoolTestRow,
@@ -87,6 +88,15 @@ export interface PoolPreferences {
    * account is listed but never touched.
    */
   memberAccountIds: readonly string[]
+  /**
+   * Per-account test model, keyed by account id (issue #61).
+   *
+   * A MAP rather than a scalar because `6004` is an account × model condition:
+   * the model a test must use is the one the user actually chats with on THAT
+   * account. An absent entry means "follow `targetModelId`", so a profile that
+   * never uses this setting behaves exactly as before.
+   */
+  targetModelIdByAccount: Readonly<Record<string, string>>
 }
 
 export interface AccountPoolProps {
@@ -228,6 +238,25 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.every(id => wanted.has(id))
 }
 
+/**
+ * Whether two per-account test-model maps are equal (issue #61).
+ *
+ * By CONTENT, not by size: moving an account from one model to another keeps the
+ * count and changes the meaning, and clearing an entry is a change a size
+ * comparison would miss entirely when another account was added at the same
+ * time. Order is irrelevant for the same reason it is in {@link sameIds} — the
+ * map is written by key, not by click sequence.
+ */
+function sameModelOverrides(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every(key => left[key] === right[key])
+}
+
 /** Whether a probe outcome means the model answered. */
 function outcomeOk(outcome: WorkBuddyWebProbeOutcome): boolean {
   return outcome === 'ok'
@@ -350,6 +379,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // touched this" into "I chose this".
     probeInputTokens: pool?.probeInputTokens ?? 0,
     memberAccountIds: pool?.memberAccountIds ?? [],
+    // Copied verbatim (issue #61), including entries whose model has left the
+    // catalog: the host keeps them for the same reason, and dropping one here
+    // would make the next Save delete the user's choice.
+    targetModelIdByAccount: { ...pool?.targetModelIdByAccount },
   }
   // The draft only applies to the tab it was made on.
   const active: PoolPreferences = draftRegion === region && draft !== null ? draft : saved
@@ -375,6 +408,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     draft.enabled !== saved.enabled
     || draft.targetModelId !== saved.targetModelId
     || draft.probeInputTokens !== saved.probeInputTokens
+    // By content, key-sorted: a re-picked model is a change, and so is a
+    // cleared one — the latter is an ABSENT key on both sides only if the user
+    // never set it, which is why this compares entries rather than sizes.
+    || !sameModelOverrides(draft.targetModelIdByAccount, saved.targetModelIdByAccount)
     // Order-insensitive: the user's clicks decide the set, not its ordering,
     // so re-checking the same accounts in a different order is not a change.
     || !sameIds(draft.memberAccountIds, saved.memberAccountIds)
@@ -571,6 +608,23 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       if (next) set.add(accountId)
       else set.delete(accountId)
       return { ...current, memberAccountIds: [...set] }
+    })
+  }, [editDraft])
+
+  /**
+   * Set ONE account's test model (issue #61).
+   *
+   * `''` REMOVES the entry rather than storing an empty string: "follow the
+   * region target" is the absence of a choice, which is the same shape the host
+   * reads and the same shape an untouched profile has — so nothing about an
+   * older profile changes when this setting is never used.
+   */
+  const setRowModel = useCallback((accountId: string, modelId: string): void => {
+    editDraft(current => {
+      const next = { ...current.targetModelIdByAccount }
+      if (modelId === '') delete next[accountId]
+      else next[accountId] = modelId
+      return { ...current, targetModelIdByAccount: next }
     })
   }, [editDraft])
 
@@ -1138,6 +1192,12 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
             : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
           onTest: () => { void runRowTest(account.accountId) },
           onRemove: () => { void runRowRemove(account.accountId, account.accountName) },
+          // Its own draft entry (issue #61). Clearing the select stores nothing
+          // rather than an empty string, so "follow the region target" is the
+          // ABSENCE of a choice — the same shape the host reads.
+          modelOverride: active.targetModelIdByAccount[account.accountId] ?? '',
+          catalog: pool.catalog ?? [],
+          onModelChange: modelId => setRowModel(account.accountId, modelId),
         })),
       ),
       effectiveMembers.length === 0
@@ -1237,12 +1297,32 @@ function renderAccountRow(input: {
   /** The region cannot name a target model; the test button says why. */
   testDisabled: boolean
   targetHint: string | undefined
-  /** Run a single-account test against the region's target model. */
+  /** Run a single-account test against THIS account's target model. */
   onTest: () => void
+  /**
+   * This account's saved test-model override, or `''` to follow the region
+   * target (issue #61).
+   *
+   * Per account because `6004` is an account × model condition: the model a
+   * test must use is the one the user actually chats with on that account, and
+   * one region-wide answer cannot express that.
+   */
+  modelOverride: string
+  /**
+   * The models this region offers, for the override picker.
+   *
+   * The POOL payload's own model shape rather than the catalog record: the card
+   * only needs an id and a label, and the pool route deliberately sends the
+   * lighter form (`catalog` would otherwise duplicate every model twice).
+   */
+  catalog: readonly WorkBuddyWebPoolModel[]
+  /** Change this account's test model (draft edit, saved by the Save button). */
+  onModelChange: (modelId: string) => void
   /** Forget this account's plugin-stored credential. */
   onRemove: () => void
 }): ReturnType<typeof h> {
   const { t, account, checked, canEdit, checkinSupported, onToggle, busy, testDisabled, targetHint, onTest, onRemove } = input
+  const { modelOverride, catalog, onModelChange } = input
   const name = account.accountName === '' ? t('row.accountUnnamed') : account.accountName
   const excluded = exclusionText(t, account.excludedBy)
   const probe = account.probe
@@ -1383,6 +1463,17 @@ function renderAccountRow(input: {
           ? null
           : h('span', { className: 'dsm-workbuddy-pool-prov-sep' }, '·'),
         age === undefined ? null : h('span', { className: 'dsm-workbuddy-pool-prov-age' }, age),
+        // WHICH MODEL the verdict above is about (issue #61). Printed on every
+        // measured row, because an `ok` with no scope is the false positive the
+        // reporter hit: the table said 可用 for accounts whose actual model was
+        // returning `429 / 6004`. A record written before the field existed says
+        // the scope is unknown instead of implying the row's current setting.
+        probe === undefined
+          ? null
+          : h('span', { className: 'dsm-workbuddy-pool-prov-model' },
+              probe.modelId === undefined
+                ? t('row.poolProbeModelUnknown')
+                : t('row.poolProbeModel', { model: probe.modelId })),
       ),
     ),
     checkinSupported
@@ -1406,6 +1497,25 @@ function renderAccountRow(input: {
     // vault entry — a desktop sign-in reappears on the next rescan, which the
     // log message states instead of a silent no-op.
     h('span', { className: 'dsm-workbuddy-pool-row-actions' },
+      // This account's own test model (issue #61), editable per row. It is a
+      // DRAFT edit like every other control here — the Save button commits it —
+      // and it never changes which model the account CHATS with, only which one
+      // the test measures.
+      h('select', {
+        className: 'dsm-workbuddy-pool-select dsm-workbuddy-pool-row-model',
+        value: modelOverride,
+        disabled: !canEdit,
+        title: t('row.poolRowModelHint'),
+        'aria-label': t('row.poolRowModelAria', { accountName: name }),
+        onChange: (event: { currentTarget: { value: string } }) => onModelChange(event.currentTarget.value),
+      },
+        h('option', { value: '' }, t('row.poolRowModelInherit')),
+        modelOverride !== '' && !catalog.some(model => model.id === modelOverride)
+          ? h('option', { value: modelOverride, disabled: true },
+              t('row.poolTargetStaleOption', { model: modelOverride }))
+          : null,
+        ...catalog.map(model => h('option', { value: model.id, key: model.id }, model.name)),
+      ),
       h('button', {
         type: 'button',
         className: 'dsm-btn dsm-btn-outline dsm-workbuddy-pool-small-btn',

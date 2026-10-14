@@ -226,6 +226,14 @@ export const en = {
   'row.poolProbeSourceTest': 'tested',
   'row.poolProbeSourceLive': 'hit by a live request',
   'row.poolProbeSourceUnknown': 'source unknown',
+  // WHICH model a verdict is about (issue #61). 6004 is an account × model
+  // condition, so a bare "available" was readable as account-level truth while
+  // the model the user actually chats with was the one being refused.
+  'row.poolProbeModel': 'model {model}',
+  'row.poolProbeModelUnknown': 'model not recorded',
+  'row.poolRowModelHint': 'Which model this account\'s test uses. Leave it on "region target" to follow the pool\'s model; pick one when this account must be tested on the model you actually chat with.',
+  'row.poolRowModelAria': 'Test model for {accountName}',
+  'row.poolRowModelInherit': 'region target',
   'row.poolSettingsTitle': 'Account pool settings',
   'row.poolSettingsHint': 'These are preferences: they take effect when you save (same as the model list). Test results are written automatically and are not affected by this button.',
   'row.poolEnabled': 'Enable the account pool',
@@ -515,6 +523,13 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolProbeSourceTest': '测得',
   'row.poolProbeSourceLive': '聊天撞上',
   'row.poolProbeSourceUnknown': '来源未知',
+  // 结论是针对**哪个模型**的（issue #61）。6004 是「账号 × 模型」维度的条件，
+  // 只写「可用」会被读成账号级结论，而被拒的恰恰是用户真在用的那个模型。
+  'row.poolProbeModel': '模型 {model}',
+  'row.poolProbeModelUnknown': '未记录模型',
+  'row.poolRowModelHint': '这个账号测试用哪个模型。留「区域目标」就跟随账号池的目标模型；当某个号必须用你实际在聊的模型来测时，在这里单独指定。',
+  'row.poolRowModelAria': '{accountName} 的测试模型',
+  'row.poolRowModelInherit': '区域目标',
   'row.poolSettingsTitle': '账号池设置',
   'row.poolSettingsHint': '下面是偏好设置：点保存才生效（与「模型管理」一致）。测试结果由插件自动写入，不受这个保存按钮影响。',
   'row.poolEnabled': '启用账号池',

@@ -1,0 +1,316 @@
+/**
+ * Body-composition report: WHAT was sent upstream, in counts (issue #59).
+ *
+ * WHY THIS EXISTS. Issue #59's reporter measured the SAME conversation charged
+ * ~708K tokens by the CN gateway and ~1.374M by the international one (1.94×),
+ * which turns a region switch into an instant `code 11115 prompt is too long`.
+ * Two worlds explain that, and they have opposite owners:
+ *
+ *   - the gateways count identical bytes differently (upstream's business); or
+ *   - the two requests did not carry the same messages (ours to fix).
+ *
+ * The second world was left standing by two independent measurements. The
+ * reporter ran this project's `--kind`/`--language` probe on BOTH regions and
+ * got the same tokens-per-1000-chars on byte-identical prose, code and JSON
+ * (ratios 0.98–1.06 across six cells), so identical bytes really do bill
+ * identically. And a code trace showed historical `reasoning` never reaches the
+ * wire at all: pi-ai only forwards `thinking` blocks as text when
+ * `compat.requiresThinkingAsText` is set — this plugin never sets it — and the
+ * `reasoning_details` route needs a signature the stream parser never writes.
+ * With the counting difference excluded and reasoning excluded, the remaining
+ * candidate is that the two bodies differ in the first place.
+ *
+ * This module exists to settle exactly that, and it can do it WITHOUT either
+ * region having credit: the body is assembled locally, before the upstream ever
+ * gets a chance to answer `14018 Credits exhausted`. Capture one composition per
+ * region in the same session and diff them.
+ *
+ * It records COUNTS ONLY — never a byte of message text, no account name, no
+ * token. That is a hard rule, not a default: the point is to compare shape
+ * (`messages.length`, per-block type, CJK vs non-CJK characters, total bytes),
+ * and every one of those is answerable arithmetically. `tests/issue59-body-report.spec.ts`
+ * asserts the report cannot leak a fixture's text.
+ */
+
+import { appendFile, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { resolveDshHome, withFileLock } from './host-peers.ts'
+import type { WorkBuddyRegion } from './upstream.ts'
+
+/**
+ * Environment variable that enables the report.
+ *
+ * Unset or blank means OFF — a diagnostic that writes files must be opt-in.
+ * `1`/`true` writes to `<DSH home>/body-reports/`; anything else is read as a
+ * directory path, so a user can point it at an existing folder (and, on
+ * Windows, one with spaces).
+ */
+export const WORKBUDDY_BODY_REPORT_ENV = 'WORKBUDDY_BODY_REPORT'
+
+/** One block inside one message, counted by kind. */
+export interface WorkBuddyBodyBlockReport {
+  /**
+   * What kind of block this is on the wire.
+   *
+   * `system` / `text` / `tool-call` / `tool-result` / `reasoning` / `image` cover
+   * everything an OpenAI chat-completions body can carry here, and they map onto
+   * the concepts the question is asked in: whether a `reasoning` block exists at
+   * all is the direct, empirical check on the code trace that says it should not.
+   */
+  type: string
+  /** Characters (code points), so a CJK character counts once. */
+  chars: number
+  /** Of {@link chars}, how many are CJK — they bill ~3× an ASCII character. */
+  cjkChars: number
+}
+
+/** One message, counted by kind. */
+export interface WorkBuddyBodyMessageReport {
+  role: string
+  chars: number
+  cjkChars: number
+  blocks: WorkBuddyBodyBlockReport[]
+}
+
+/** What one request body was made of. Counts only — never content. */
+export interface WorkBuddyBodyReport {
+  /** ISO timestamp, so two captures can be lined up in time. */
+  at: string
+  region: WorkBuddyRegion
+  /** The model id the body asked for, when the body carries one. */
+  model?: string
+  /** Total bytes of the serialized body, as sent. */
+  bodyBytes: number
+  messageCount: number
+  /** Characters (code points) across every message block. */
+  chars: number
+  cjkChars: number
+  /**
+   * The `tools` array, which is re-sent with every request and is easy to forget
+   * when accounting for a prompt. Counted the same way as a message.
+   */
+  tools: WorkBuddyBodyBlockReport
+  messages: WorkBuddyBodyMessageReport[]
+}
+
+/**
+ * Character ranges that tokenize (and therefore bill) like CJK.
+ *
+ * Deliberately generous: the caller's question is "how much of this is the ~3×
+ * kind", and the measured spread is 0.669 vs 0.224 tokens/char, so a character
+ * class that is borderline costs far less than mis-attributing a whole bucket.
+ * Ranges follow Unicode blocks, plus the compatibility forms and the two
+ * extension planes where rare Han characters live.
+ */
+const CJK_RANGES: readonly (readonly [number, number])[] = [
+  [0x2e80, 0x2eff], // radicals
+  [0x3000, 0x303f], // CJK punctuation
+  [0x3040, 0x30ff], // kana
+  [0x3400, 0x4dbf], // extension A
+  [0x4e00, 0x9fff], // unified ideographs
+  [0xf900, 0xfaff], // compatibility ideographs
+  [0xfe30, 0xfe4f], // compatibility forms
+  [0xff00, 0xffef], // fullwidth / halfwidth forms
+  [0x20000, 0x2fa1f], // extensions B–F
+]
+
+/** Whether one code point bills like CJK. */
+function isCjkCodePoint(code: number): boolean {
+  return CJK_RANGES.some(([low, high]) => code >= low && code <= high)
+}
+
+/** Count characters (code points) and how many of them are CJK. */
+export function countChars(text: string): { chars: number, cjkChars: number } {
+  let chars = 0
+  let cjkChars = 0
+  // `for…of` iterates code points, so a character outside the BMP counts once
+  // rather than as its two surrogate halves — the difference matters for the
+  // emoji and rare-Han cases that would otherwise inflate the ASCII bucket.
+  for (const character of text) {
+    chars += 1
+    const code = character.codePointAt(0)
+    if (code !== undefined && isCjkCodePoint(code)) cjkChars += 1
+  }
+  return { chars, cjkChars }
+}
+
+/** Build one block report from already-extracted text. */
+function block(type: string, text: string): WorkBuddyBodyBlockReport {
+  return { type, ...countChars(text) }
+}
+
+/** Whether a value is a plain object (not null, not an array). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Describe one message's blocks.
+ *
+ * The role decides what a content string IS, and that is not cosmetic: a
+ * `tool` message's payload is a tool result, so counting it as `text` would hide
+ * the very bucket a long agentic session is mostly made of.
+ */
+function describeMessage(message: Record<string, unknown>): WorkBuddyBodyMessageReport {
+  const role = typeof message['role'] === 'string' ? message['role'] : 'unknown'
+  const blocks: WorkBuddyBodyBlockReport[] = []
+  const content = message['content']
+
+  /**
+   * The block type a plain string carries, by the ROLE carrying it.
+   *
+   * A `tool` message's string is a tool RESULT and a `system` one is the system
+   * prompt; calling both `text` would fold the biggest bucket of a long agentic
+   * session into the smallest one, which is the opposite of what a composition
+   * report is for.
+   */
+  const stringType = role === 'tool' ? 'tool-result' : role === 'system' || role === 'developer' ? 'system' : 'text'
+
+  if (typeof content === 'string') {
+    if (content !== '') blocks.push(block(stringType, content))
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (!isRecord(part)) continue
+      const type = typeof part['type'] === 'string' ? part['type'] : 'unknown'
+      if (type === 'text') {
+        const text = part['text']
+        if (typeof text === 'string' && text !== '') blocks.push(block(stringType, text))
+        continue
+      }
+      // Structured parts (image_url, input_audio, …) carry no prose to count,
+      // but their PRESENCE is the fact worth recording: they are billed too, and
+      // an image part is invisible in any character-based accounting.
+      blocks.push({ type: type === 'image_url' ? 'image' : type, chars: 0, cjkChars: 0 })
+    }
+  }
+
+  // Tool calls the assistant made: the name plus the argument JSON is what the
+  // upstream sees, so it is what the count must include.
+  const toolCalls = message['tool_calls']
+  if (Array.isArray(toolCalls)) {
+    for (const call of toolCalls) {
+      if (!isRecord(call)) continue
+      const fn = call['function']
+      const name = isRecord(fn) && typeof fn['name'] === 'string' ? fn['name'] : ''
+      const args = isRecord(fn) && typeof fn['arguments'] === 'string' ? fn['arguments'] : ''
+      blocks.push(block('tool-call', `${name}${args}`))
+    }
+  }
+
+  // A reasoning-carrying field on an ASSISTANT message. This plugin's trace says
+  // it should never appear (pi-ai drops `thinking` blocks and writes an empty
+  // `reasoning_content` only on the deepseek compat path), and this report is
+  // what turns that claim into something a reporter can check on their machine.
+  for (const field of ['reasoning_content', 'reasoning', 'reasoning_text']) {
+    const value = message[field]
+    if (typeof value === 'string' && value !== '') blocks.push(block('reasoning', value))
+  }
+
+  const chars = blocks.reduce((sum, entry) => sum + entry.chars, 0)
+  const cjkChars = blocks.reduce((sum, entry) => sum + entry.cjkChars, 0)
+  return { role, chars, cjkChars, blocks }
+}
+
+/**
+ * Describe one serialized request body.
+ *
+ * Returns `undefined` when the body is not a JSON object — a diagnostic must
+ * never be the reason a chat request fails, so every caller treats `undefined`
+ * as "nothing to report" rather than an error.
+ */
+export function describeBody(bodyJson: string, region: WorkBuddyRegion, nowMs: number): WorkBuddyBodyReport | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(parsed)) return undefined
+
+  const rawMessages = parsed['messages']
+  const messages = Array.isArray(rawMessages)
+    ? rawMessages.filter(isRecord).map(describeMessage)
+    : []
+
+  const rawTools = parsed['tools']
+  const tools = Array.isArray(rawTools)
+    ? block('tools', rawTools.map(tool => (isRecord(tool) ? JSON.stringify(tool) : '')).join(''))
+    : { type: 'tools', chars: 0, cjkChars: 0 }
+
+  const chars = messages.reduce((sum, message) => sum + message.chars, 0) + tools.chars
+  const cjkChars = messages.reduce((sum, message) => sum + message.cjkChars, 0) + tools.cjkChars
+
+  return {
+    at: new Date(nowMs).toISOString(),
+    region,
+    ...typeof parsed['model'] === 'string' ? { model: parsed['model'] } : {},
+    bodyBytes: Buffer.byteLength(bodyJson, 'utf8'),
+    messageCount: messages.length,
+    chars,
+    cjkChars,
+    tools,
+    messages,
+  }
+}
+
+/**
+ * Resolve the directory the report writes to, or `undefined` when disabled.
+ *
+ * Exported for the same reason the other env-var resolvers in this plugin are:
+ * the behaviour is worth a unit test, and the test must not have to set a real
+ * process-wide variable to get one.
+ */
+export function bodyReportDirectory(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const configured = env[WORKBUDDY_BODY_REPORT_ENV]
+  if (configured === undefined) return undefined
+  const trimmed = configured.trim()
+  if (trimmed === '') return undefined
+  if (trimmed === '1' || trimmed.toLowerCase() === 'true') return join(resolveDshHome(), 'body-reports')
+  return trimmed
+}
+
+/**
+ * Append one composition to `<dir>/<region>.jsonl`.
+ *
+ * One file per region is the whole point: the reporter captures a session, then
+ * diffs `cn.jsonl`'s last line against `global.jsonl`'s. JSON Lines rather than
+ * one file per request because a single turn makes many upstream calls (one per
+ * tool step) and the LAST one is the interesting one.
+ *
+ * Read-modify-write is avoided on purpose — a long session would rewrite a
+ * growing file on every step. The lock keeps two concurrent requests from
+ * interleaving a line.
+ */
+export async function appendBodyReport(directory: string, report: WorkBuddyBodyReport): Promise<void> {
+  const file = join(directory, `${report.region}.jsonl`)
+  await mkdir(directory, { recursive: true })
+  const line = `${JSON.stringify(report)}\n`
+  await withFileLock(file, () => appendFile(file, line, 'utf8'))
+}
+
+/**
+ * Record one outgoing body, if the report is enabled.
+ *
+ * NEVER THROWS and never awaits long: this is called on the request path, and a
+ * chat request must not fail (or stall) because a diagnostic could not write a
+ * file. A failure is reported through `onError` so the caller can log it.
+ */
+export async function recordBodyReport(
+  region: WorkBuddyRegion,
+  bodyJson: string,
+  options: {
+    env?: NodeJS.ProcessEnv
+    nowMs?: number
+    onError?: (error: unknown) => void
+  } = {},
+): Promise<void> {
+  const directory = bodyReportDirectory(options.env)
+  if (directory === undefined) return
+  try {
+    const report = describeBody(bodyJson, region, options.nowMs ?? Date.now())
+    if (report === undefined) return
+    await appendBodyReport(directory, report)
+  } catch (error: unknown) {
+    options.onError?.(error)
+  }
+}

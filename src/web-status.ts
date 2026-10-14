@@ -32,7 +32,7 @@ import { Config, unwrapVolatileDeep } from './index.ts'
 import type { WorkBuddyRecoveryCandidate } from './credential-recovery.ts'
 import type { WorkBuddyCredits, WorkBuddyUpstreamClient } from './upstream.ts'
 import { isCredentialRejectedError } from './upstream.ts'
-import { effectiveMembersOf, rankPool, resolveTargetModel } from './account-pool.ts'
+import { effectiveMembersOf, rankPool, resolveTargetModel, targetModelPreference } from './account-pool.ts'
 import type { WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
 import type {
   WorkBuddyPoolCheckinRow,
@@ -267,6 +267,8 @@ export interface WorkBuddyPoolDeps {
   preferences(region: WorkBuddyRegion): {
     enabled: boolean
     targetModelId: string
+    /** Per-account override of `targetModelId` (issue #61). */
+    targetModelIdByAccount?: Readonly<Record<string, string>>
     /**
      * Tokens each test probe sends as saved; `0` when the user never chose.
      *
@@ -361,7 +363,14 @@ export interface WorkBuddyPoolDeps {
    */
   test?(
     region: WorkBuddyRegion,
-    modelId: string,
+    /**
+     * One model for the whole batch, or a per-account resolver (issue #61).
+     *
+     * The resolver form is what lets a batch honour a per-account test model; a
+     * resolver that names no model yields an `unavailable` row for that account
+     * rather than silently testing the region default.
+     */
+    modelId: string | ((accountId: string) => { modelId?: string, staleModelId?: string }),
     onRow?: (row: WorkBuddyPoolTestRow) => void,
   ): Promise<readonly WorkBuddyPoolTestRow[]>
   /** The region's live catalog, used to resolve the free target model. */
@@ -854,8 +863,24 @@ async function workBuddyWebPool(
           ...measured.probe.source === undefined ? {} : { source: measured.probe.source },
           ...measured.probe.retryAtMs === undefined ? {} : { retryAtMs: measured.probe.retryAtMs },
           ...measured.probe.message === undefined ? {} : { message: measured.probe.message },
+          // WHICH model this measurement is about (issue #61). Without it the
+          // row reads as account-level availability, which is exactly how a
+          // single-model probe gets mistaken for "this account works".
+          ...measured.probe.modelId === undefined ? {} : { modelId: measured.probe.modelId },
         },
       },
+      // The model a test of THIS row would use (issue #61) — the per-account
+      // override when there is one, otherwise the region target. Sent per row so
+      // the card can show it next to the row it applies to instead of implying
+      // one model for the whole table.
+      ...(() => {
+        const perRow = resolveTargetModel(catalog, targetModelPreference(preferences, account.id))
+        return {
+          ...perRow.modelId === undefined ? {} : { testModelId: perRow.modelId },
+          testModelSource: perRow.source,
+          ...perRow.staleModelId === undefined ? {} : { staleTestModelId: perRow.staleModelId },
+        }
+      })(),
       ...row?.excludedBy === undefined ? {} : { excludedBy: row.excludedBy },
       current: account.id === currentAccountId,
       member,
@@ -872,6 +897,11 @@ async function workBuddyWebPool(
     ...target.modelId === undefined ? {} : { targetModelId: target.modelId },
     ...target.staleModelId === undefined ? {} : { staleTargetModelId: target.staleModelId },
     targetModelSource: target.source,
+    // The SAVED per-account overrides, verbatim (issue #61) — deliberately not
+    // rewritten to the effective value, for the same reason the member list is
+    // not: a silently dropped id would destroy the user's record of what they
+    // chose, and the model can come back in a later catalog.
+    targetModelIdByAccount: preferences.targetModelIdByAccount ?? {},
     // The SAVED list, verbatim. Deliberately not rewritten to the effective
     // set: silently dropping ids would destroy the user's record of what they
     // chose, and a login can come back (the desktop app re-adds it) in which
@@ -1197,10 +1227,25 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           if (pool.test === undefined) {
             return json(res, 503, { reason: 'pool-unavailable', error: 'pool test unavailable' })
           }
-          const target = resolveTargetModel(
-            pool.catalog?.(region) ?? [],
-            pool.preferences(region).targetModelId,
+          const preferences = pool.preferences(region)
+          const catalog = pool.catalog?.(region) ?? []
+          /**
+           * The model ONE member is tested on (issue #61).
+           *
+           * Per account, because a test model is a per-account choice: `6004` is
+           * an account × model condition, so a batch that tested every member on
+           * one model would report "可用" for an account whose own model is the
+           * one that is limited. Resolution still runs through
+           * `resolveTargetModel`, so a stale override is reported, never
+           * silently swapped.
+           */
+          const targetFor = (accountId: string) => resolveTargetModel(
+            catalog,
+            targetModelPreference(preferences, accountId),
           )
+          // The region-wide target still gates the batch: it decides whether the
+          // card should say "pick a model first" before any credits are spent.
+          const target = resolveTargetModel(catalog, targetModelPreference(preferences, undefined))
           if (target.modelId === undefined) {
             // Two distinct causes, each with its own fix, and the card shows the
             // matching one. NOT a silent fallback to a paid model: the whole
@@ -1247,7 +1292,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           }
           writeLine({ action: 'test', modelId: target.modelId })
           try {
-            await pool.test(region, target.modelId, row => { writeLine({ row }) })
+            await pool.test(region, targetFor, row => { writeLine({ row }) })
             writeLine({ done: true })
           } catch (error: unknown) {
             writeLine({ reason: 'pool-failed', error: safeMessage(error) })

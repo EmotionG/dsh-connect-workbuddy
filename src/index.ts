@@ -46,6 +46,7 @@ import {
 } from './adapter.ts'
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
+import { recordBodyReport } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
 import type { UpstreamErrorKind } from './upstream.ts'
 import {
@@ -59,7 +60,7 @@ import type {
 } from './account-pool-run.ts'
 import { exclusionOf } from './account-pool.ts'
 import type { WorkBuddyPoolCredits, WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
-import { resolveTargetModel } from './account-pool.ts'
+import { resolveTargetModel, targetModelPreference } from './account-pool.ts'
 import { oauthPoll, oauthStart } from './oauth.ts'
 import { mergeTransferRecords, parseTransferFile, previewTransferFile, transferRecordOf } from './transfer.ts'
 import {
@@ -149,6 +150,7 @@ export {
   parseReasoning,
   parseUpstreamModel,
   prepareChatBody,
+  modelIdOfBody,
   knownRegionOf,
   regionOf,
   WorkBuddyCredentialRejectedError,
@@ -350,6 +352,18 @@ export interface WorkBuddyPoolPreferences {
   /** Model id to test; `''` means auto-pick a free model from this region. */
   targetModelId?: string
   /**
+   * Per-account override of {@link targetModelId}, keyed by account id (#61).
+   *
+   * `6004` is an ACCOUNT × MODEL condition, so "can this account serve" has no
+   * single answer: the reporter measured two accounts where one model answered
+   * and another returned `429 / 6004` in the same second. The region-wide target
+   * stays the default — this map only says "for THIS account, test THAT model",
+   * which is what makes the pool's verdict match the model the user is actually
+   * chatting with. An id that is no longer in the catalog is reported as stale
+   * rather than replaced, so no credits are spent on a model nobody chose.
+   */
+  targetModelIdByAccount?: Record<string, string>
+  /**
    * How much input a probe sends, in tokens — the pool's biggest single knob.
    *
    * The upstream's rate limit (6004) fires on request SIZE, and the threshold
@@ -433,6 +447,7 @@ const modelConfig = z.object({
 const poolConfig = z.object({
   enabled: z.boolean().default(false).description('Whether this region\'s account pool is active (opt-in). While on, a failed chat request is retried against the other usable pool members before the error is reported.'),
   targetModelId: z.string().default('').description('Model id to test; empty means pick a zero-multiplier model from this region\'s catalog'),
+  targetModelIdByAccount: z.dict(z.string()).default({}).description('Per-account test model, keyed by account id; an account with no entry uses targetModelId. Use this when an account must be tested on the model you actually chat with, because 6004 is an account-by-model condition.'),
   /**
    * Sizing of the test probe, as a token count the user picks from a fixed set.
    *
@@ -753,6 +768,12 @@ export function apply(ctx: Context, config: Config): void {
        * traffic once the provider is registered, which happens after this whole
        * setup completes.
        */
+      // What went upstream, in counts (issue #59). Off unless
+      // `WORKBUDDY_BODY_REPORT` is set; the region is captured here because the
+      // shim deliberately does not know about regions.
+      onRequestBody: body => {
+        void recordBodyReport(region, body, { onError: error => ctx.logger.warn('dsh-connect-workbuddy: body report failed', error) })
+      },
       prepareAccount: () => applyPoolSelection(region),
       failoverAccount: triedAccountIds => failoverAccountFor(region, triedAccountIds),
       // Record what a live request learned, so the NEXT one starts from an
@@ -1196,6 +1217,8 @@ export function apply(ctx: Context, config: Config): void {
         const rows = await testAllAccounts(
           await poolTargets(region),
           modelId,
+          // A resolver is forwarded as-is (issue #61): the batch asks the SAME
+          // per-account question the row route does.
           poolRunnerDeps(region),
           // Forwarded so the route can report each account as it lands. The
           // measurements are still persisted ONCE, after the whole batch: a
@@ -1222,7 +1245,7 @@ export function apply(ctx: Context, config: Config): void {
        * rather than pretending a test ran.
        */
       testOne: async (region, accountId) => {
-        const target = regionTargetModel(region)
+        const target = regionTargetModel(region, accountId)
         if (target === undefined) return undefined
         const store = stacks[region].store
         const credential = await store.credentialFor(accountId).catch(() => undefined)
@@ -1513,7 +1536,7 @@ export function apply(ctx: Context, config: Config): void {
   const recordAccountFailure = async (
     region: WorkBuddyRegion,
     accountId: string,
-    failure: { status: number, kind: UpstreamErrorKind, message: string },
+    failure: { status: number, kind: UpstreamErrorKind, message: string, modelId?: string },
   ): Promise<void> => {
     if (!poolPreferencesOf(current(), region).enabled) return
     if (failure.kind === 'client') return
@@ -1549,6 +1572,10 @@ export function apply(ctx: Context, config: Config): void {
         // request really hit the limit just now" from "the file went back to
         // an older value" — and the record kept no history to check.
         source: 'live-request',
+        // WHICH model failed (issue #61). `6004` is account × model, so a live
+        // failure on model A must not read as a statement about model B — nor
+        // erase the fact that a different model once answered.
+        ...failure.modelId === undefined ? {} : { modelId: failure.modelId },
         ...retryAtMs === undefined ? {} : { retryAtMs },
         ...message === '' ? {} : { message },
       },
@@ -1667,16 +1694,28 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * The model a per-row test would use right now: the SAME resolution the
    * batch route performs (`resolveTargetModel` over the region's displayed
-   * catalog and the saved preference), so a row test and a batch test never
-   * measure different models. Undefined mirrors the route's 409 states.
+   * catalog and the saved preference — including a per-account override,
+   * issue #61), so a row test and a batch test never measure different models.
+   * Undefined mirrors the route's 409 states.
    */
-  const regionTargetModel = (region: WorkBuddyRegion): string | undefined => {
+  const regionTargetModel = (region: WorkBuddyRegion, accountId?: string): string | undefined => {
     const target = resolveTargetModel(
       displayModels(current(), region),
-      poolPreferencesOf(current(), region).targetModelId,
+      targetModelPreference(poolPreferencesOf(current(), region), accountId),
     )
     return target.modelId
   }
+
+  /**
+   * The same resolution the routes perform, kept in one place so a batch test
+   * and a single-row test can never disagree (issue #61): with per-account
+   * overrides in play, "which model does account X get tested on" has one
+   * answer, and both routes ask THIS question.
+   */
+  const regionTargetFor = (region: WorkBuddyRegion, accountId: string) => resolveTargetModel(
+    displayModels(current(), region),
+    targetModelPreference(poolPreferencesOf(current(), region), accountId),
+  )
 
   /** One region's pool preferences, with the schema's defaults applied. */
   const poolPreferencesOf = (config: Config, region: WorkBuddyRegion) => {
@@ -1685,6 +1724,10 @@ export function apply(ctx: Context, config: Config): void {
     return {
       enabled: pool?.enabled === true,
       targetModelId: pool?.targetModelId ?? '',
+      // Passed through as a plain copy: the config value is a live cosmokit
+      // reference on the 0.1.7 line, and handing that to a route would let a
+      // settings mutation change what a running request resolves against.
+      targetModelIdByAccount: { ...pool?.targetModelIdByAccount }, 
       // Passed through RAW (not coerced here): `resolveProbeInputTokens` owns
       // that decision and is the only place that knows the offered set. Coercing
       // in two places is how a menu and its validation drift apart.

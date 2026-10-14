@@ -214,6 +214,10 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-prov-unknown{background:var(--dsw-alias-bg-layer-3,#2a2c33);border:1px solid var(--dsw-alias-border-l1,#2c2d31);color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-pool-prov-sep{color:var(--dsw-alias-label-dimmed,#9aa0a6);opacity:.7}
 .dsm-workbuddy-pool-prov-age{color:var(--dsw-alias-label-tertiary,#999);white-space:nowrap}
+/* WHICH model a verdict is about (issue #61). Deliberately quiet: it is scope
+   information on the provenance line, not a status of its own, so an ok row and
+   a rate-limited row must not look different because of it. */
+.dsm-workbuddy-pool-prov-model{color:var(--dsw-alias-label-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
 .dsm-workbuddy-pool-members{display:flex;flex-direction:column;gap:10px}
 .dsm-workbuddy-pool-members-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dsm-workbuddy-pool-members-title{margin:0 0 3px;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
@@ -267,6 +271,9 @@ export const WORKBUDDY_CARD_CSS = `
 /* Per-row actions (test / remove), right side of each pool row. */
 .dsm-workbuddy-pool-row-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex:none}
 .dsm-workbuddy-pool-row-actions .dsm-workbuddy-pool-small-btn{padding:2px 10px;font-size:12px}
+/* This account's own test model (issue #61). Narrower than the section-level
+   picker so a long model name cannot push the two buttons out of the row. */
+.dsm-workbuddy-pool-row-model{max-width:150px;padding:2px 6px;font-size:12px}
 @media (max-width:760px){.dsm-workbuddy-pool-row{grid-template-columns:1fr 1fr;row-gap:6px}.dsm-workbuddy-pool-select{max-width:180px}}
 /* Pool switch, namespaced under .dsm-workbuddy-pool so it cannot collide with host styles. */
 .dsm-workbuddy-pool .sw{position:relative;display:inline-block;width:38px;height:22px;flex:none;cursor:pointer}

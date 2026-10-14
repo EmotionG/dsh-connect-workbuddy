@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.4.6 (2026-10-14)
+
+### Fixes
+
+- **面板的「测试」只测一个模型，却把结果当成账号级结论：账号池说「可用」，一切到实际在用的模型就撞 `429 / 6004`。**（issue #61 报告者报告，维护者在 issue 下确认「测试的是某一个模型……不能换其他模型」）
+  - **现象与证据**：报告者同一时刻、同一脚本测两个国内账号 —— `hy4-preview-f`（当时的 `pool.targetModelId`，面板测的就是它）两个号都可用，而 `step-5-preview`（当时实际在用的模型）两个号都 `429 / 6004`。池文件里这两个号还被更早的一次批量测试记成 `outcome=ok source=test-batch`，而池开着时那份「ok」正是选号依据。**`6004` 是「账号 × 模型」维度的条件**（本项目 10-13 也在三个国际账号上量到 `deepseek-v4.1-flash` 挂、其余模型全通），所以单一模型探测在结构上无法回答「这个账号能不能服务」。
+  - **根因（报告者给出代码位置，本地逐条复核属实）**：`resolveTargetModel()` 只解析出**一个** `modelId`（来自区域级 `pool.targetModelId`），一条路径同时服务批量与逐行测试；而 `probeModel()` 的三个返回分支**早就带着 `modelId`**，落盘时被丢掉了 —— 记录里只有 `outcome/atMs/source/retryAtMs/message`，没有任何字段说明这条 `ok` 是**哪个模型**上的。
+  - **修法（三处，各自成立）**：
+    1. **测量记录记住模型**：`WorkBuddyPoolProbe` 新增可选 `modelId`，两个写入方（批量测试、实时聊天失败）在拿到模型的那一刻写下它。
+    2. **每个账号可单独指定测试模型**：新增设置 `pool.targetModelIdByAccount`（账号 id → 模型 id），读取时先查 map、查不到回落 `targetModelId`。**批量测试与逐行测试走同一条解析**（报告者指出这正是「改一处两处同时生效」的地方），所以「测试所有账号」也会按每个号自己的模型去测。解析仍然过 `resolveTargetModel`：指向本区域已下架模型时**报 `stale`、绝不静默换成另一个模型**（换一个等于花积分测一个用户没选的模型，还把它当作这个号的结论）。
+    3. **卡片显示适用范围**：池表每行的测量结论旁写上「模型 {model}」（记录里没有该字段的旧数据写「未记录模型」，不猜）；每行新增一个测试模型下拉框（留空 = 跟随区域目标），随「保存」一起写入。
+  - **为什么 `modelId` 落盘时不继承**：`accountName` 与 `retryAtMs` 描述的是**账号**（后来者看不到的名字仍然是真的，未来的刷新时刻仍然在未来），而模型描述的是**这一次测量**。把旧的 model id 继承到一次新测量上，等于用不是它的模型给它贴标签 —— 正是这个字段要终结的那种混淆。所以**缺失即「范围未知」，不是猜测**。
+  - **配置向后兼容**：`targetModelIdByAccount` 默认空对象，且**只有非空时才写入** settings（与 `probeInputTokens` 同一条规则）—— 从未用过这个设置的 profile 写出来的槽位与升级前逐字节相同，升级不会看起来像用户改过设置。
+  - **守卫**：`tests/issue61-probe-model-scope.spec.ts`（9 例）覆盖：逐账号优先/回落、空串视为「跟随区域目标」、override 下架时解析为 `stale` 且不带 `modelId`、批量按各账号自己的模型探测、单一模型的旧调用形态不变、解析不出模型时产出 `unavailable` 行并指名那个模型（**没有**回退到别的模型）、批量写入 `modelId`、**不继承**、新测量覆盖旧模型。`tests/pool-route.spec.ts` 新增一条路由级断言：批量路由交给 Host 的是**逐账号解析器**（`a` 用区域目标、`b` 用 `b` 自己的）。**变异验证**：记录不再写 `modelId` → 1 例红；合并改成继承 → 1 例红；批量改回「整批一个模型」→ 1 例红；路由改回传单一 modelId → 路由断言红。
+
+### Features
+
+- **新增「上游请求体构成」诊断（`WORKBUDDY_BODY_REPORT`），用于定案 issue #59：两份请求体到底是不是同一份历史。**（issue #59）
+  - **为什么需要**：报告里同一份历史被国内网关算约 70.8 万 token、国际网关算约 137.4 万（1.94 倍），切区域即 `code 11115 prompt is too long`。两条独立测量已经把范围压到唯一一个问题：报告者在**两个区域**跑本仓库的内容类别探针，逐字节相同的散文/代码/JSON 六格比值全在 **0.98~1.06**（同一段字节两边计价一致）；代码链路核对又表明**历史 reasoning 根本没进请求体**（pi-ai 只在 `compat.requiresThinkingAsText` 为真时把 `thinking` 当文本转发，本插件从未设置；`reasoning_details` 那条路需要流式解析从不写出的签名）。**剩下唯一可能是两份请求体不同**，而这件事**不需要任何区域有积分**就能查：请求体是本地拼好的，`14018 Credits exhausted` 是发出去之后才可能发生的。
+  - **做法**：`src/body-report.ts` 在 shim 把 body 交给上游**之前**记录它的**构成** —— 每条消息的 `role`、逐块的类型（`system`/`text`/`tool-call`/`tool-result`/`reasoning`/`image`）、字符数与其中**中日韩字符**数（实测中文 0.669、英文 0.224 token/字符，差 3 倍，混在一起看不出来）、`tools` 数组、`messages.length` 与 body 总字节数。按区域写 `<dir>/<region>.jsonl`，一次请求一行（一轮对话有很多次上游调用，**最后一次**才是要比的那份）。
+  - **只记计数、不记文本**：不写任何消息内容、账号名或令牌 —— 一个要被贴进公开 issue 的诊断不能有泄漏用户会话的能力。`tests/issue59-body-report.spec.ts` 里有一条专门的断言：用带特征串的 body 生成报告后，序列化结果**不含**该特征串（变异验证：让 `block()` 把 `text` 一起带上 → 该例与 reasoning 那例同时变红）。
+  - **开关**：环境变量 `WORKBUDDY_BODY_REPORT` 未设置或为空白即**关闭**；`1`/`true` 写到 `<DSH home>/body-reports/`；其他值按**目录路径**解释。写文件失败只走日志，**绝不影响聊天请求**（有专门断言）。
+  - **守卫**：`tests/issue59-body-report.spec.ts`（16 例）。
+  - **配套**：`scripts/probe-region-token-accounting.mjs` 新增 `--language en|zh` 与 `--kind prose|code|json`（六种组合确定性填充、跨区域逐字节相同），并补上国内侧实测基线：prose 214.0 / code 287.0 / json 288.3（en），prose 671.0 / code 480.7 / json 397.3（zh），单位 tokens/1k chars。
+
 ## 4.4.5 (2026-10-14)
 
 ### Fixes
