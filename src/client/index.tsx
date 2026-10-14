@@ -36,6 +36,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
+import { claimsQuotaNotice, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 
@@ -221,6 +222,57 @@ export function apply(ctx: WorkBuddyClientContext): void {
     }
 
     /**
+     * The frame-wide quota notice, claimed so the supplement can be shown
+     * (issue #63).
+     *
+     * The host renders ONE fixed sentence for a `QUOTA` failure — 「当前请求的
+     * 额度已用尽」 — and discards the provider's message while doing it. For
+     * `6004` that sentence is wrong (the upstream's own words say 「频率限制」,
+     * with a reset time, and the reporting account still held thousands of
+     * credits), but re-classifying is NOT the fix: measured against the shipped
+     * classifier, every spelling that stops reading as `QUOTA` lands in
+     * `RATE_LIMIT`, which is IN the host's retry set — 5 in-place retries and
+     * ~15.5s of backoff on a limit that resets hours later. So the behaviour
+     * (no retry) stays and the sentence gets a SUPPLEMENT.
+     *
+     * `select` claims `QUOTA` only, and the chain is the host's own designed
+     * extension point for this ("a shell.quota-notice entry may replace the
+     * generic Toast for codes it claims") — every other code keeps the host's
+     * fallback Toast untouched.
+     */
+    const registerQuotaNotice = (): (() => void) | undefined => {
+      try {
+        return ctx.slots.inject('shell.quota-notice' as never, () => (ctx.slots as unknown as {
+          register(
+            options: {
+              name: string
+              locale: string
+              select: (owner: unknown) => unknown
+              inject: () => { t: WorkBuddyCardInjected['t'] }
+            },
+            component: unknown,
+          ): () => void
+        }).register({
+          name: 'shell.quota-notice',
+          locale: namespace,
+          // The chain calls this with the host's owner object and renders the
+          // entry only for a non-null answer. Returning the owner itself (as the
+          // shipped account plugin does) passes its message/dismiss through.
+          select: (owner: unknown) => {
+            const code = typeof owner === 'object' && owner !== null
+              ? (owner as { code?: unknown }).code
+              : undefined
+            return claimsQuotaNotice(code) ? owner : null
+          },
+          inject: () => ({ t }),
+        }, WorkBuddyQuotaNotice))
+      } catch (error: unknown) {
+        console.error('[dsh-connect-workbuddy] quota notice slot failed to register (host provider unaffected):', error)
+        return undefined
+      }
+    }
+
+    /**
      * Every slot this plugin contributes, and how to (re)create them.
      *
      * Kept as one list because the binding of `settingsScope` and the slot
@@ -240,6 +292,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
       ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.row.config', `${key}#${key}`)),
       registerComposerCredits(),
       registerStatsCredits(),
+      registerQuotaNotice(),
     ].filter((disposer): disposer is () => void => disposer !== undefined)
 
     /**

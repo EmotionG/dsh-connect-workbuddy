@@ -33,6 +33,7 @@
     "tests/oauth-wording.spec.tsx",
     "tests/oauth-auto-open.spec.tsx",
     "tests/issue51-sync-veil.spec.tsx",
-    "tests/issue62-credit-position.spec.tsx"
+    "tests/issue62-credit-position.spec.tsx",
+    "tests/issue63-quota-notice.spec.tsx"
   ]
 }

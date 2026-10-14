@@ -304,6 +304,13 @@ export const en = {
   'row.creditPositionComposer': 'composer toolbar',
   'row.creditPositionStats': 'below the input box',
   'row.creditPositionAria': 'Credit readout position for {region}',
+  // The supplement to the host's fixed quota sentence (issue #63). Written to be
+  // TRUE FOR BOTH cases the QUOTA code covers — a model's own daily quota that has
+  // nothing to do with credits, and a genuinely empty balance — because the upstream
+  // says which it is in Chinese prose the plugin must not parse to make policy.
+  'quotaNotice.fallbackHead': 'The quota for this request is exhausted',
+  'quotaNotice.supplement': 'Some models have their own daily limit that is unrelated to your credit balance — check the account pool row for the stated reset time, or switch account or model to continue.',
+  'quotaNotice.dismiss': 'Got it',
   'row.creditPositionHint': 'Where the credit readout sits. "composer toolbar" is the default (the row with the model picker). Choose "below the input box" — the row carrying the round / step / token statistics — if another plugin occupies the composer toolbar and the readout does not appear.',
   'row.showCreditsGlobalHint': 'Show the international (WB AI) credit balance in the composer toolbar, but only while this session uses a WB AI model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
   'composer.pointsCn': 'WB CN',
@@ -608,6 +615,12 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.creditPositionComposer': '输入框工具栏',
   'row.creditPositionStats': '输入框下方',
   'row.creditPositionAria': '{region} 的积分显示位置',
+  // 宿主那句固定文案的补充（issue #63）。措辞对 QUOTA 覆盖的**两种**情况都成立
+  // —— 模型自己的每日额度（与积分无关）与真的积分耗尽 —— 因为上游说的是中文散文，
+  // 插件不允许解析它来下政策判断。
+  'quotaNotice.fallbackHead': '当前请求的额度已用尽',
+  'quotaNotice.supplement': '部分模型另有每日额度限制，与积分余额无关 —— 也可能确实是本账号积分耗尽。账号池那一行会写明上游给出的恢复时刻；也可以先换个账号或换个模型继续。',
+  'quotaNotice.dismiss': '知道了',
   'row.creditPositionHint': '积分显示在哪里。「输入框工具栏」是默认位置（与模型选择同一行）。如果装了别的插件后读数不显示，改成「输入框下方」—— 那是「轮次 / 步数 / token」统计所在的那一行。',
   'row.showCreditsGlobalHint': '在对话输入框工具栏显示国际版（WB AI）剩余积分，仅当本会话使用 WB AI 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
   'composer.pointsCn': 'WB CN',

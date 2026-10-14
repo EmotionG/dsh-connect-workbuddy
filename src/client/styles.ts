@@ -65,6 +65,13 @@ export const WORKBUDDY_CARD_CSS = `
 /* Its OWN label class, deliberately not the switch's: a query for "the
    sidebar-credit switch" must not be able to pick this control up, and the two
    are different widgets (a checkbox and a two-way picker). */
+/* The supplement to the host's fixed quota sentence (issue #63). It sits in the
+   frame-wide overlay seat, so it must read on its own and stay narrow: a column
+   with the host's sentence first (verbatim) and the supplement under it. */
+.dsm-workbuddy-quota-notice{display:flex;flex-direction:column;gap:4px;max-width:420px;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#23242a);border:1px solid var(--dsw-alias-border-l1,#2c2d31);font-size:12px;line-height:17px}
+.dsm-workbuddy-quota-notice-head{font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-quota-notice-body{color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-quota-notice-dismiss{align-self:flex-start;margin-top:2px;padding:2px 10px;font-size:12px}
 .dsm-workbuddy-credit-position-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-credit-position{max-width:150px;padding:2px 6px;font-size:12px}
 .dsm-workbuddy-credits-switch-row .dsm-workbuddy-credit-position-switch{margin-left:12px}

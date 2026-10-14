@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.5.1 (2026-10-14)
+
+### Fixes
+
+- **`6004`（账号频率超限）在对话里被显示成「当前请求的额度已用尽」，而账号余额还剩 6,788 —— 现在那句话下面补了一句说明。**（issue #63；维护者判定：**保持不进重试**，只补文案）
+  - **根因（实测，不是读代码猜的）**：宿主对失败按**码**路由，而插件这条链是 —— shim 的错误响应 → pi-ai 抛出的 message → `classifyPiAiError(message)` → 宿主码 → 客户端文案。三个环节的出货代码取出来直接跑之后：`quota_exceeded` 这个拼写里的下划线**恰好命中** `@deepseek-ai/dsh-llm` 的 `isQuotaExceededError` 正则（`quota[\s_-]+exceeded` 的 `[\s_-]+` 能匹配 `_`），于是归成 `QUOTA`；而 `@deepseek-ai/dsh-client-ui-chat` 对 `QUOTA`/`ACCOUNT_QUOTA` **硬编码**成那句固定文案、并**丢弃**插件自己的 message。**这一版之前我在 #56/#61 里把它说成「插件挑了宿主认识的词」，那个解释是错的。**
+  - **为什么不改分类（维护者的决定，也是实测支持的）**：把拼写换成任何一个不再被 quota 正则命中的值，都会落进 `RATE_LIMIT` —— 而它在 `DEFAULT_RETRYABLE_CODES` 里（`EMPTY_RESPONSE`/`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`）。按出货默认（`initialDelayMs=500`、指数退避、封顶 10s、`maxRetries=5`）这是**5 次原地重试、标称 15.5 秒退避**，而 `6004` 的恢复点在报文里明写了是**几小时后** —— 退避窗口内不可能恢复。所以「不进重试」保留，「那句话不够准确」用**补充**解决。
+  - **修法**：用宿主**专门为此留的扩展点** `shell.quota-notice`（链式插槽，其自有文档写着「the first entry whose selector claims its code takes over the surface」）。本插件注册一条 `select: owner => code === 'QUOTA' ? owner : null` 的链项：
+    - **只 claim `QUOTA`** —— 其余码（`AUTH`、`ACCOUNT_SIGNED_OUT`、`ACCOUNT_QUOTA` 等）继续走宿主自己的兜底 Toast，本插件不接管自己说不清的提示；
+    - **宿主那句话原样保留**（`matched.message`），补充是**第二行**而不是改写 —— 那句话在别处也显示，重写会让插件与 shell 的用词互相矛盾；
+    - 补充文案：**「部分模型另有每日额度限制，与积分余额无关 —— 也可能确实是本账号积分耗尽。账号池那一行会写明上游给出的恢复时刻；也可以先换个账号或换个模型继续。」** 措辞对 `QUOTA` 覆盖的**两种**情况都成立，因为上游是用中文散文区分的，而插件不允许解析它来下政策判断；中英双语都写。
+    - 带一个「知道了」按钮，调用宿主自己的 `dismiss`；宿主没给 `dismiss` 时只渲染文字而不崩 —— 这是**全窗口**的提示，在这里抛错会连别的插件的提示一起带走。
+  - **组件用本插件自己的 DOM 与样式类**，不引 `@deepseek-ai/dsh-client-ui-primitives`：客户端刻意不依赖它（那条 stale 的 `inject` 曾让整张卡片的到达依赖上宿主最易变的包，见 `tests/client-host-contract.spec.ts` 的说明），所以这里沿用本插件其它组件的做法。
+  - **实机核对**：构建后用 Slot 检查器读运行中的插槽树，`shell.quota-notice` 的 occupants 已包含 `dsh-connect-workbuddy-client`（`active: true`），与宿主自己的 `mf` 并列；插槽目录给出的 `ownerProps`（`code`/`message`/`dismiss`/`keepOpen`）与组件读取的字段一致。
+  - **守卫**：`tests/issue63-quota-notice.spec.tsx`（7 例）覆盖：claim 恰好是 `QUOTA`、其余码（含 `QUOTA_EXCEEDED`、空串、数字、对象）一律不 claim、宿主句子原样保留且补充可见、dismiss 按钮调用宿主回调、无 `dismiss` 时不崩、宿主没给 message 时回退到自己的标题。**变异验证**：把 claim 扩到 `AUTH`/`ACCOUNT_QUOTA` → 2 例红；删掉补充那一行 → 2 例红。
+  - **未做**：没有改任何分类/HTTP 状态，也没有动 `KIND_HOST_CODE` 里 `soft_rate`/`model_busy` → `quota_exceeded` 的翻译（那正是 #56 修复的核心）。
+
 ## 4.5.0 (2026-10-14)
 
 > 版本号是 **minor** 而不是 patch：这一版新增了一个**用户可见的设置**（积分读数的位置）和一个**新的渲染席位**，而且配置 schema 多了一个字段 —— 按语义化版本这是特性，不是修错。`4.4.6` 之后没有任何以 4.4.7 发布过的产物或 Release（tag 已撤回重打）。
