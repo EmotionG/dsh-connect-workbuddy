@@ -388,6 +388,19 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const [probing, setProbing] = useState<Record<string, boolean>>({})
   /** Probe failure that is not attributable to one model (a dead route, say). */
   const [probeError, setProbeError] = useState<string | undefined>(undefined)
+  /**
+   * The active region's probe results, mirrored into a ref.
+   *
+   * The sweep loop reads each verdict as soon as it lands, and state read inside
+   * an async loop is the value captured when the loop STARTED — so counting from
+   * `probes` would tally the previous run's answers. The ref is updated in the
+   * same place the state is, so the two cannot drift.
+   */
+  const probesRef = useRef<Record<string, WorkBuddyWebProbeResult>>({})
+  /** Progress of an in-flight sweep, or undefined when none is running. */
+  const [sweeping, setSweeping] = useState<{ done: number, total: number } | undefined>(undefined)
+  /** The last sweep's tally, cleared when the next one starts. */
+  const [sweepSummary, setSweepSummary] = useState<string | undefined>(undefined)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -914,13 +927,16 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   }
 
   /**
-   * Probe one or more models with a single minimal request each.
+   * Probe ONE model (the route refuses more than one — see `web-status.ts`,
+   * where the cap is the gate that keeps a whole-roster sweep from becoming a
+   * single unaccounted spend). The HOST owns the request: the browser half sends
+   * only a model id and gets an outcome back, because the credential must never
+   * cross to the page.
    *
-   * The Host owns the request: the browser half sends only model ids and gets
-   * outcomes back, because the credential must never cross to the page. The
-   * route runs the batch sequentially and this waits for the whole answer, which
-   * is what lets the card report every row at once — a per-row response would
-   * race the shared `probing` map and make the batch button's state unknowable.
+   * The plural name is historical: this used to post a whole list in one request
+   * before 3.0.0 removed the batch button. It is kept because callers that
+   * already hold a list (the two sweep buttons below) can still express "test
+   * these" without a second code path — it just sends them one at a time.
    *
    * Probing is deliberately independent of `dirty`: a test answers "does this
    * model work right now", which is true of the SAVED selection and the draft
@@ -949,9 +965,14 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
         throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
       }
       if (!mounted.current) return
+      const landedResults = body.results as WorkBuddyWebProbeResult[]
+      // Mirror into the ref FIRST: the sweep loop reads verdicts from it, and a
+      // state update is not observable until React re-renders.
+      probesRef.current = { ...probesRef.current }
+      for (const result of landedResults) probesRef.current[result.modelId] = result
       setProbes(previous => {
         const regionResults = { ...(previous[activeRegion] ?? {}) }
-        for (const result of body.results as WorkBuddyWebProbeResult[]) {
+        for (const result of landedResults) {
           regionResults[result.modelId] = result
         }
         return { ...previous, [activeRegion]: regionResults }
@@ -969,6 +990,82 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
         })
       }
     }
+  }
+
+  /**
+   * ONE-CLICK availability sweep over several models (issue #61 follow-up, by
+   * request of the maintainer after comparing with the sibling `trae` plugin).
+   *
+   * WHY IT IS A CLIENT-SIDE LOOP. The route accepts exactly ONE model id and
+   * refuses more, and that cap is deliberate: it is what stops a stale bundle or
+   * a hand-rolled client from turning one click into an unaccounted spend over a
+   * whole roster (3.0.0's reason for deleting the original batch button). A
+   * sweep is therefore expressed the way trae expresses it — one model per
+   * request, from here — which keeps that gate intact and has a second benefit
+   * the host-side batch never had: each row's verdict appears the moment it is
+   * known, instead of the card sitting blank until the slowest model answers.
+   *
+   * COST is stated in the button's own hint rather than in a confirmation
+   * dialog: a probe sends a real-volume request, so a sweep over a whole catalog
+   * spends real credit (measured 0.01 per probe at the current default size, on
+   * this machine — see the hint text). The user asked for the hint form, and it
+   * matches the sibling plugin.
+   *
+   * SEQUENTIAL, not parallel: a probe exists to discover rate limits, and firing
+   * a roster's worth of requests at once is the surest way to create one — the
+   * same reason the host's own loop was serial.
+   *
+   * STOPS ON THE FIRST AUTH FAILURE: a rejected credential answers identically
+   * for every remaining model, so continuing would only spend credit to collect
+   * the same answer again. Other failures (a rate limit on one model) do NOT
+   * stop the sweep — that is information about that model, and stopping would
+   * hide it.
+   *
+   * The summary counts what the run actually established, so a stopped or
+   * failed sweep cannot read as a complete green roster.
+   */
+  const sweepModels = async (modelIds: readonly string[]): Promise<void> => {
+    if (modelIds.length === 0) return
+    setProbeError(undefined)
+    setSweepSummary(undefined)
+    setSweeping({ done: 0, total: modelIds.length })
+    let available = 0
+    let measured = 0
+    try {
+      for (const [index, modelId] of modelIds.entries()) {
+        if (!mounted.current) return
+        await probeModels([modelId])
+        const result = probesRef.current[modelId]
+        measured += 1
+        if (result?.outcome === 'ok') available += 1
+        if (result?.outcome === 'credential-rejected') {
+          // Every remaining model would answer the same way; the summary below
+          // says "N of M measured" so the shortfall is visible, not silent.
+          if (mounted.current) setProbeError(t('row.modelsTestAuth'))
+          break
+        }
+        if (mounted.current) setSweeping({ done: index + 1, total: modelIds.length })
+      }
+      if (mounted.current) setSweepSummary(t('row.modelsTestDone', { available, total: measured }))
+    } finally {
+      if (mounted.current) setSweeping(undefined)
+    }
+  }
+
+  /** Sweep the models this region has ENABLED (the current draft's selection). */
+  const sweepEnabledModels = (): void => {
+    void sweepModels(visibleModels.filter(model => activeEnabledIds.has(model.id)).map(model => model.id))
+  }
+
+  /**
+   * Sweep EVERY model in the region's live catalog, enabled or not.
+   *
+   * Deliberately the whole VISIBLE catalog and nothing else: those are the ids
+   * the host can validate against its own catalog, so this cannot spend credit
+   * on an id that only exists in a config file.
+   */
+  const sweepAllModels = (): void => {
+    void sweepModels(visibleModels.map(model => model.id))
   }
 
   const saveModels = async (): Promise<void> => {
@@ -1405,10 +1502,6 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                             <p className="dsm-workbuddy-models-summary">{t('row.modelsSummary', { count: activeEnabledIds.size })}</p>
                           </div>
                           <div className="dsm-workbuddy-models-head-actions">
-                            {/* No "test selected" batch: every probe now sends a
-                                real-volume request and therefore costs real
-                                credits, so a whole-roster sweep would be a large
-                                spend from one click. Testing is per model only. */}
                             <button
                               type="button"
                               className="dsm-btn dsm-btn-outline"
@@ -1417,12 +1510,48 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                             >
                               {busy ? t('row.modelsRefreshing') : t('row.modelsRefresh')}
                             </button>
+                            {/* Two sweeps, by request of the maintainer after
+                                comparing with the sibling `trae` plugin — which
+                                ships the same pair. Both stay ONE model per
+                                request (the route refuses more, and that cap is
+                                what keeps a sweep from being an unaccounted
+                                spend), so the loop lives here rather than in the
+                                Host. The "all" button carries the cost hint: it
+                                covers the models you did NOT enable as well, so
+                                it spends more than the enabled-only run. */}
+                            <button
+                              type="button"
+                              className="dsm-btn dsm-btn-outline dsm-workbuddy-models-sweep"
+                              disabled={busy || sweeping !== undefined || activeEnabledIds.size === 0}
+                              title={t('row.modelsTestEnabledHint')}
+                              onClick={sweepEnabledModels}
+                            >
+                              {sweeping === undefined
+                                ? t('row.modelsTestEnabled')
+                                : t('row.modelsTesting', { done: sweeping.done, total: sweeping.total })}
+                            </button>
+                            <button
+                              type="button"
+                              className="dsm-btn dsm-btn-outline dsm-workbuddy-models-sweep"
+                              disabled={busy || sweeping !== undefined || visibleModels.length === 0}
+                              title={t('row.modelsTestAllHint')}
+                              onClick={sweepAllModels}
+                            >
+                              {sweeping === undefined
+                                ? t('row.modelsTestAll')
+                                : t('row.modelsTesting', { done: sweeping.done, total: sweeping.total })}
+                            </button>
                           </div>
                         </div>
                       {probeError === undefined ? null
                         : <p className="dsm-workbuddy-model-probe-result dsm-workbuddy-model-probe-result-bad" role="alert">
                             {t('row.probeError', { message: probeError })}
                           </p>}
+                      {/* The sweep's tally, under the buttons. Absent until a
+                          sweep runs, so the section does not grow a line that
+                          says nothing. */}
+                      {sweepSummary === undefined ? null
+                        : <p className="dsm-workbuddy-models-sweep-summary" role="status">{sweepSummary}</p>}
                       <div className="dsm-workbuddy-model-list">
                         {visibleModels.map(model => (
                           <div className={`dsm-workbuddy-model${activeEnabledIds.has(model.id) ? '' : ' dsm-workbuddy-model-disabled'}`} key={model.id}>

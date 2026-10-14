@@ -97,6 +97,17 @@ export const en = {
   'row.modelReasoning': 'Reasoning: {efforts}',
   'row.modelUnknown': 'Unknown',
   'row.modelCapabilityPending': 'Only capabilities advertised by WorkBuddy are shown.',
+  // The two one-click sweeps (issue #61 follow-up, mirroring the sibling `trae`
+  // plugin). Cost is stated in the HINT rather than a confirm dialog, per the
+  // maintainer's choice: the "all" run covers models the user did not enable, so
+  // it spends more than the enabled-only run.
+  'row.modelsTestEnabled': 'Test enabled models',
+  'row.modelsTestAll': 'Test all models',
+  'row.modelsTesting': 'Testing {done}/{total}…',
+  'row.modelsTestEnabledHint': 'Tests every model you have ENABLED, one request each — each probe sends a real-volume request, so this spends real credit (about 0.01 per model at the default 25000-token size). Rows show their verdict as it lands. Stops early if the credential is rejected.',
+  'row.modelsTestAllHint': 'Tests EVERY model in this region\'s catalog, including the ones you have NOT enabled — so it costs noticeably more than "test enabled models". Same per-probe cost, same early stop on a rejected credential.',
+  'row.modelsTestDone': 'Done: {available} of {total} available',
+  'row.modelsTestAuth': 'Stopped: the credential was rejected, so every remaining model would answer the same way. Sign in again, then re-run.',
   'row.probe': 'Test',
   'row.probing': 'Testing…',
   'row.probeHint': 'Send a real-volume request (~25k input tokens) to this model and report whether it answers right now. The upstream rate limit fires on request SIZE — measured: about 20k tokens pass, about 30k are refused — so a small request can look fine while every long-conversation request is refused. This is why every test costs real credits (about 0.7) and runs one model at a time.',
@@ -416,6 +427,15 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.modelReasoning': '推理强度：{efforts}',
   'row.modelUnknown': '未知',
   'row.modelCapabilityPending': '仅展示 WorkBuddy 接口明确公布的模型能力。',
+  // 两个一键遍历按钮（issue #61 的后续，与同族 trae 插件对齐）。成本写在 title 提示里
+  // 而不是二次确认，按维护者的选择：「所有模型」含未启用的，所以比「仅启用」花得多。
+  'row.modelsTestEnabled': '一键测试启用模型',
+  'row.modelsTestAll': '一键测试所有模型',
+  'row.modelsTesting': '测试中 {done}/{total}…',
+  'row.modelsTestEnabledHint': '逐个测试你**已启用**的模型，一个模型一次请求 —— 每次探测都发真实体积的请求，真花积分（默认 25000 token 体积下约 0.01/个）。每行的结果一出来就显示。凭据被拒时提前停止。',
+  'row.modelsTestAllHint': '测试本区域目录里的**每一个**模型，含**未启用**的 —— 所以比「仅测试启用模型」明显更贵。单次探测成本相同，凭据被拒时同样提前停止。',
+  'row.modelsTestDone': '完成：{total} 个里 {available} 个可用',
+  'row.modelsTestAuth': '已停止：凭据被拒，剩下的模型都会得到同一个答案。请重新登录后再跑一次。',
   'row.probe': '测试',
   'row.probing': '测试中…',
   'row.probeHint': '对该模型发一条真实体积的请求（约 25k 输入 token），报告它现在能不能用。上游的限流按请求体积触发——实测约 20k 能过、约 30k 被拒——所以小请求看着正常、长对话里却可能每次都被拒。这也是为什么每次测试都会消耗真实积分（约 0.7），且一次只测一个模型。',
