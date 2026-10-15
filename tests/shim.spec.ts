@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Server } from 'node:http'
+import { createServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { WorkBuddyCatalog } from '../src/catalog.ts'
-import { createWorkBuddyShim } from '../src/shim.ts'
+import { clientRefusesPort, createWorkBuddyShim, isBadPortRefusal, listenOnClientReachablePort, PORT_ROLL_LIMIT } from '../src/shim.ts'
 import type { WorkBuddyShim } from '../src/shim.ts'
 import type { WorkBuddyCredential } from '../src/auth.ts'
 import { parseUpstreamErrorDetail } from '../src/upstream.ts'
@@ -404,6 +405,169 @@ describe('shim lifecycle', () => {
     expect(a.token()).not.toBe(b.token())
     await a.close()
     await b.close()
+  })
+
+  it('settles ready and close when disposed before the listener is up', async () => {
+    // The port-roll change made `ready` an async chain over repeated binds,
+    // which widened the window in which a dispose can land mid-startup. That
+    // window has teeth: measured on Node 24, a `close()` during a pending
+    // `listen()` fires NEITHER `listening` nor `error` — so a `ready` that only
+    // watched those two would stay pending forever, and plugin unload awaits it.
+    const local = makeShim({ chatStream: async () => ({ ok: true, response: new Response('') }) })
+    await local.close()
+    await expect(local.ready).resolves.toBeUndefined()
+  })
+
+  it('tolerates concurrent close calls', async () => {
+    const local = makeShim({ chatStream: async () => ({ ok: true, response: new Response('') }) })
+    await local.ready
+    await Promise.all([local.close(), local.close(), local.close()])
+  })
+})
+
+/**
+ * The port the kernel hands `listen(0)` is not always one the HTTP client will
+ * talk to.
+ *
+ * The Fetch standard bans a list of ports that `fetch` must refuse BEFORE it
+ * opens a socket (`fetch.spec.whatwg.org#block-bad-port`), and every client of
+ * this shim reaches it through that same `fetch` — pi-ai drives the OpenAI SDK,
+ * whose `getDefaultFetch()` returns `globalThis.fetch`. A shim that lands on a
+ * banned port is therefore unreachable to its own client while remaining
+ * perfectly healthy on the wire.
+ *
+ * Whether that is possible depends on the machine's dynamic port range, since
+ * that is the set `listen(0)` draws from. On the platform defaults every banned
+ * port (the list currently ends at 10080) sits BELOW the range, so the
+ * intersection is empty and nothing can go wrong. It stops being empty when the
+ * range is lowered to reach under 10080 — the legacy `MaxUserPort` registry
+ * value is one way, and at 15000 it yields 1024-15000, which contains 19 banned
+ * ports (~0.14% per bind, ~0.27% per plugin load with two regions).
+ *
+ * These tests run everywhere, including on the machines that cannot be
+ * affected, because the behaviour they pin is exactly what keeps a machine that
+ * CAN be affected from silently failing.
+ */
+describe('client-reachable port binding', () => {
+  /**
+   * Whether this runtime's client refuses `port`, asked the same way the shim
+   * asks it. Asserted rather than assumed so this file fails loudly if a future
+   * Node renames the error instead of quietly losing the guard.
+   */
+  const refusedDirectly = (port: number): Promise<boolean> => clientRefusesPort(port)
+
+  it('detects a banned port as refused, through the real client', async () => {
+    // 6000 is on the banned list; 10080 is its highest entry. Both are asserted
+    // because a check that only ever sees low numbers would still pass if the
+    // rule it relies on silently stopped covering the top of the range.
+    expect(await refusedDirectly(6000)).toBe(true)
+    expect(await refusedDirectly(10080)).toBe(true)
+  })
+
+  it('does not mistake a healthy listener port for a refused one', async () => {
+    // The load-bearing half: without it, a stub that always answered "refused"
+    // would make the re-roll test below pass while breaking every normal start.
+    const local = makeShim({ chatStream: async () => ({ ok: true, response: new Response('') }) })
+    await local.ready
+    const port = Number(new URL(local.baseUrl()).port)
+    expect(await refusedDirectly(port)).toBe(false)
+    await local.close()
+  })
+
+  it('recognises the refusal only when the client refused the port', async () => {
+    // Distinguishing the two is the whole point of the classifier: a refused
+    // port is worth re-rolling, whereas a genuine transport error is not, and
+    // re-rolling on one would mask a real failure.
+    const listener = createServer()
+    await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', () => resolve()))
+    const port = (listener.address() as AddressInfo).port
+    await new Promise<void>(resolve => listener.close(() => resolve()))
+
+    let transportError: unknown
+    try {
+      await fetch(`http://127.0.0.1:${port}/healthz`)
+    } catch (error: unknown) {
+      transportError = error
+    }
+    expect(transportError).toBeDefined()
+    // A closed port is a real connection failure, not the client's port refusal.
+    expect(isBadPortRefusal(transportError)).toBe(false)
+
+    // And the shape the classifier keys on is pinned here, so a Node change
+    // that renames it turns this red rather than silently disabling the guard.
+    let bannedError: unknown
+    try {
+      await fetch('http://127.0.0.1:6000/healthz')
+    } catch (error: unknown) {
+      bannedError = error
+    }
+    expect((bannedError as { cause?: { message?: string } }).cause?.message).toBe('bad port')
+    expect(isBadPortRefusal(bannedError)).toBe(true)
+  })
+
+  it('re-rolls off a refused port and serves on the next one', async () => {
+    // The regression this whole change exists for. `listen(0)` cannot be made
+    // to return a banned port on demand, so the client's answer is injected:
+    // the first settled port is reported refused, and binding must continue
+    // until a port is accepted. Without the re-roll, `ready` resolves on the
+    // refused port and every request through the shim fails.
+    const server = createServer((_req, res) => { res.writeHead(200); res.end('ok') })
+    const seen: number[] = []
+    await listenOnClientReachablePort({
+      server,
+      clientRefuses: async port => {
+        seen.push(port)
+        // Refuse only the first port, whatever it happens to be.
+        return seen.length === 1
+      },
+    })
+
+    const address = server.address() as AddressInfo
+    expect(seen.length).toBe(2)
+    expect(seen[0]).not.toBe(seen[1])
+    expect(address.port).toBe(seen[1])
+    // Serving for real, not merely bound.
+    const response = await fetch(`http://127.0.0.1:${address.port}/healthz`)
+    expect(response.status).toBe(200)
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+
+  it('stops re-rolling instead of spinning when no port satisfies the client', async () => {
+    // A machine whose whole range were refused must still come up: serving on a
+    // refused port fails in ONE region-scoped way, while no shim at all takes
+    // the region down outright. The bound is what keeps that from being an
+    // infinite loop.
+    const server = createServer((_req, res) => { res.writeHead(200); res.end('ok') })
+    const warnings: string[] = []
+    let rolls = 0
+    await listenOnClientReachablePort({
+      server,
+      clientRefuses: async () => { rolls++; return true },
+      logger: { warn: (...args: unknown[]) => { warnings.push(String(args[0])) }, error: () => {} },
+    })
+
+    expect(rolls).toBe(PORT_ROLL_LIMIT)
+    expect(warnings.some(line => line.includes('serving on it anyway'))).toBe(true)
+    // Still listening, so the region degrades rather than disappearing.
+    expect(server.address()).not.toBeNull()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+
+  it('does not re-roll at all when the first port is accepted', async () => {
+    // The common path on every platform default: one bind, one probe, no
+    // warning. Guards against a re-roll that fires unconditionally.
+    const server = createServer()
+    const warnings: string[] = []
+    let rolls = 0
+    await listenOnClientReachablePort({
+      server,
+      clientRefuses: async () => { rolls++; return false },
+      logger: { warn: (...args: unknown[]) => { warnings.push(String(args[0])) }, error: () => {} },
+    })
+
+    expect(rolls).toBe(1)
+    expect(warnings).toEqual([])
+    await new Promise<void>(resolve => server.close(() => resolve()))
   })
 })
 
