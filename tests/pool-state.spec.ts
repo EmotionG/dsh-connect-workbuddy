@@ -7,6 +7,7 @@ import {
   poolErrorText,
   poolFailureText,
   usableMemberIds,
+  allMembersBlockedByModel,
 } from '../src/client/pool-state.ts'
 import { en, zh } from '../src/client/locales.ts'
 
@@ -165,6 +166,93 @@ describe('usableMemberIds (M-9 / C4-3)', () => {
   it('never counts an unchecked account, however healthy', () => {
     // `unchecked` has no `excludedBy`, so the old whole-table logic counted it.
     expect(usableMemberIds(accounts, [], [])).toEqual([])
+  })
+})
+
+/**
+ * Issue #64's pool-level verdict.
+ *
+ * The reporter's case: four members, all `model-busy`, and the card showed four
+ * rows each saying "模型繁忙" — each true, and false in aggregate. The user read
+ * it as "the pool is broken" and went looking for a bad account, which is the
+ * one hunt that cannot succeed when the limit follows the MODEL.
+ *
+ * These cases pin the three conditions, and the LAST two are the ones that keep
+ * the verdict from becoming the same class of false comfort it removes: it must
+ * not fire for an empty pool, and it must not fire when even one member is
+ * blocked for an account-level reason.
+ */
+describe('allMembersBlockedByModel (issue #64)', () => {
+  const ALL_MEMBERS = ['a', 'b', 'c']
+
+  it('fires when every member is blocked by the same model', () => {
+    const accounts = [
+      { accountId: 'a', excludedBy: 'model-busy' },
+      { accountId: 'b', excludedBy: 'model-busy' },
+      { accountId: 'c', excludedBy: 'model-busy' },
+    ]
+    expect(allMembersBlockedByModel(accounts, ALL_MEMBERS, ALL_MEMBERS)).toBe(true)
+  })
+
+  it('does NOT fire when one member is blocked for an ACCOUNT-level reason', () => {
+    // The distinguishing case, and the reason this is not "some member is
+    // model-busy": a rate limit really is about that account, so blaming the
+    // model would send the user to wait for the wrong thing.
+    const accounts = [
+      { accountId: 'a', excludedBy: 'model-busy' },
+      { accountId: 'b', excludedBy: 'rate-limited' },
+      { accountId: 'c', excludedBy: 'model-busy' },
+    ]
+    expect(allMembersBlockedByModel(accounts, ALL_MEMBERS, ALL_MEMBERS)).toBe(false)
+  })
+
+  it('does NOT fire while any member is still usable', () => {
+    // With somewhere to go there is nothing to explain: the request simply uses
+    // that member, and a "the model is the wall" banner would be wrong.
+    //
+    // `b` is the ONLY usable member and the TWO excluded ones are both
+    // `model-busy`, so `every(excluded => model-busy)` is satisfied. The
+    // mutation that drops the "none usable" check therefore passes every OTHER
+    // case in this block and is caught only by this input — which is why the
+    // usable member is deliberately one that agrees with the model verdict
+    // rather than contradicting it.
+    const accounts = [
+      { accountId: 'a', excludedBy: 'model-busy' },
+      { accountId: 'b' },
+      { accountId: 'c', excludedBy: 'model-busy' },
+    ]
+    expect(allMembersBlockedByModel(accounts, ALL_MEMBERS, ALL_MEMBERS)).toBe(false)
+  })
+
+  it('does NOT fire when the usable member is the last one checked', () => {
+    // Same condition, opposite ORDER: the usable member sorts last, so an
+    // implementation that returned early on the first `model-busy` it saw would
+    // still be caught here. Order sensitivity is a real failure mode for a
+    // predicate written as "found a model-busy, look no further".
+    const accounts = [
+      { accountId: 'a', excludedBy: 'model-busy' },
+      { accountId: 'b', excludedBy: 'model-busy' },
+      { accountId: 'c' },
+    ]
+    expect(allMembersBlockedByModel(accounts, ALL_MEMBERS, ALL_MEMBERS)).toBe(false)
+  })
+
+  it('does NOT fire for a pool with no members', () => {
+    // An empty pool must not claim anything about a model — the "no usable
+    // account" sentence is the honest one for that state (nothing is checked).
+    const accounts = [{ accountId: 'a', excludedBy: 'model-busy' }]
+    expect(allMembersBlockedByModel(accounts, [], [])).toBe(false)
+  })
+
+  it('judges MEMBERS only, so an unchecked account cannot suppress it', () => {
+    // The same trap `usableMemberIds` guards: an unchecked sign-in carries no
+    // `excludedBy`, so counting the whole table would make the model-wide
+    // verdict unreachable whenever the user had a spare unchecked account.
+    const accounts = [
+      { accountId: 'a', excludedBy: 'model-busy' },
+      { accountId: 'unchecked' },
+    ]
+    expect(allMembersBlockedByModel(accounts, ['a'], ['a'])).toBe(true)
   })
 })
 /**

@@ -184,6 +184,14 @@ export const en = {
   'row.poolTitle': 'Account pool',
   'row.poolNoCandidate': 'No account in this pool can be used right now.',
   'row.poolNoCandidateHint': 'Members are rate-limited, out of credits, rejected, or unreachable. Rate limits, drained quotas and transient failures return to the pool on their own — at the time the upstream states, or after a 30-minute fallback. Only a rejected credential needs a new sign-in.',
+  // The POOL-level verdict for "every member is blocked by the SAME model"
+  // (issue #64). Distinct from `poolNoCandidate` above, which blames the
+  // ACCOUNTS; here the accounts are fine and the model is the wall. Without this
+  // the card's own per-row labels ("model busy") add up to a claim that is
+  // false in aggregate, and the user goes looking for a bad account — the exact
+  // hunt issue #56 reported.
+  'row.poolModelWideBusy': 'Every member is blocked on the same model — this is the model, not your accounts.',
+  'row.poolModelWideBusyHint': 'Switching accounts cannot help: the limit follows the model, so a different account hits the same wall. Wait about a minute, or switch to a less busy model in this session.',
   'row.poolCheckinAll': 'Check in all accounts',
   'row.poolCheckingIn': 'Checking in…',
   'row.poolTestAll': 'Test all accounts',
@@ -510,6 +518,12 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolTitle': '账号池',
   'row.poolNoCandidate': '账号池里目前没有可用的账号。',
   'row.poolNoCandidateHint': '成员要么在限流冷却中、要么积分耗尽、要么凭据被拒、要么上游无响应。限流、积分耗尽与瞬时故障都会自动回池——按上游给出的恢复时间，没给时间就按 30 分钟兜底，不需要你操作；只有「凭据被拒」需要重新登录。',
+  // 「所有成员都撞在同一个模型上」的池级结论（issue #64）。与上面那条刻意分开：
+  // 那条说的是**账号**不行，这条说的是**账号没问题、模型才是那堵墙**。没有它，
+  // 卡片上每行「模型繁忙」加起来就成了一个整体上错误的结论，用户会去找一个不存
+  // 在的坏账号 —— 正是 issue #56 报告的那场搜寻。
+  'row.poolModelWideBusy': '所有成员都卡在同一个模型上 —— 这是模型的问题，不是你的账号。',
+  'row.poolModelWideBusyHint': '换账号解决不了：限制跟随模型，换一个账号撞的是同一堵墙。等大约 1 分钟，或把这个会话切到负载较低的模型。',
   'row.poolCheckinAll': '一键签到所有账号',
   'row.poolCheckingIn': '签到中…',
   'row.poolTestAll': '一键测试所有账号',

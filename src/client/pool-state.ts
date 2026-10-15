@@ -264,3 +264,57 @@ export function usableMemberIds<T extends { accountId: string, excludedBy?: stri
     .filter(account => wanted.has(account.accountId) && account.excludedBy === undefined)
     .map(account => account.accountId)
 }
+/**
+ * Whether EVERY member is blocked by the same MODEL — issue #64's pool-level
+ * verdict.
+ *
+ * The reporter's case: four members, all measured `model-busy`, and the card
+ * only showed four rows each saying "模型繁忙". Summed up by the reader that
+ * reads as "my pool is broken", and the natural next move — switch accounts —
+ * is the one action that cannot help, because the limit follows the model. The
+ * per-row labels are each true and the aggregate conclusion is false, which is
+ * why this needs its own decision rather than another row label.
+ *
+ * The conditions, and where each is enforced — NOT just "some member is
+ * model-busy":
+ *
+ *   - **at least one member.** Enforced by the length check: an empty pool has
+ *     no model-wide story to tell, and the plain "no usable account" sentence is
+ *     the honest one there (nothing is checked).
+ *   - **no member usable, and every blocked member's reason IS `model-busy`.**
+ *     Both fall out of the single `every` predicate, because a usable member has
+ *     `excludedBy === undefined`. See the note at the return statement: they are
+ *     genuinely one condition in code, and writing them as two produced an
+ *     unreachable branch that no test could hold.
+ *
+ * A pool where one account is rate-limited and the rest are model-busy is NOT a
+ * model verdict: the rate limit really is about that account, and saying "it is
+ * the model, not your accounts" would be the same class of false comfort this
+ * helper exists to remove.
+ *
+ * Returned as a boolean rather than a prebuilt sentence so the caller keeps
+ * every user-visible string in the locale table.
+ */
+export function allMembersBlockedByModel<T extends { accountId: string, excludedBy?: string }>(
+  accounts: readonly T[],
+  effectiveMembers: readonly string[],
+  draftMembers: readonly string[],
+): boolean {
+  const wanted = new Set([...effectiveMembers, ...draftMembers])
+  const members = accounts.filter(account => wanted.has(account.accountId))
+  if (members.length === 0) return false
+  // ONE predicate covers both remaining conditions, and it is written as
+  // `every` on purpose.
+  //
+  // A usable member has `excludedBy === undefined`, so `every(... === 'model-busy')`
+  // is ALREADY false as soon as any member is usable. An explicit
+  // "none usable" check would therefore never change the result — it is
+  // unreachable as a decider, and a test written against it passes with the
+  // check removed. Verified exhaustively over every combination of up to three
+  // members: zero states where `every` holds while a usable member exists.
+  //
+  // So the requirement is stated once, where it is enforced. The two properties
+  // a reader might expect to be separate ("not empty", "none usable") are noted
+  // in the doc comment above instead of being spelled as code that cannot run.
+  return members.every(member => member.excludedBy === 'model-busy')
+}

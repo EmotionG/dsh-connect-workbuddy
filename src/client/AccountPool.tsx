@@ -55,6 +55,7 @@ import {
   ghostNameList,
   poolFailureText,
   usableMemberIds,
+  allMembersBlockedByModel,
 } from './pool-state.ts'
 import { isFileContentionWriteError, writePoolPreferences } from './account-selection.ts'
 import type { WorkBuddyAccountScope } from './account-selection.ts'
@@ -1095,9 +1096,19 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // Failover needs somewhere to go. With every member measured unusable (or
     // none checked at all) a failure is reported instead of retried, so say so
     // rather than leaving the user to infer it from a failed request.
+    //
+    // TWO verdicts, and the difference is the whole point of issue #64. When
+    // every member is blocked by the SAME model, the generic "no usable account"
+    // sentence names the wrong suspect: the accounts are healthy, and the user's
+    // first instinct — switch accounts — is the one action that cannot help.
+    // The model-wide branch is checked FIRST so it wins; the generic one stays
+    // for the mixed and account-level cases it describes correctly.
     poolRunning && usable.length === 0
-      ? h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
-          `${t('row.poolNoCandidate')} ${t('row.poolNoCandidateHint')}`)
+      ? allMembersBlockedByModel(pool?.accounts ?? [], effectiveMembers, active.memberAccountIds)
+        ? h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
+            `${t('row.poolModelWideBusy')} ${t('row.poolModelWideBusyHint')}`)
+        : h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
+            `${t('row.poolNoCandidate')} ${t('row.poolNoCandidateHint')}`)
       : null,
 
     // Membership is chosen here, explicitly. The header carries the select-all
