@@ -61,6 +61,31 @@ describe('readPoolProbes', () => {
     expect((await readPoolProbes('cn'))['alpha']?.message).toBe('transport error: AbortError')
   })
 
+  it('round-trips the model id, so a measurement keeps its scope', async () => {
+    // ISSUE #61, second occurrence, and the reason this is a CORRUPTION bug
+    // rather than a display one: `modelId` was written but not read back, and
+    // `writePoolProbes` does read-merge-write. So the field was not merely
+    // invisible — it was ERASED by the next write, and by every write after
+    // that. On the old code this fails with `undefined`, which is the silent
+    // data loss itself; the card rendering "未记录模型" was only the symptom.
+    await writePoolProbes('cn', {
+      alpha: { outcome: 'model-busy', atMs: 7, modelId: 'deepseek-v4.1-flash' },
+    })
+    expect((await readPoolProbes('cn'))['alpha']?.modelId).toBe('deepseek-v4.1-flash')
+  })
+
+  it('does not erase a stored model id when a LATER write touches another account', async () => {
+    // The erasure needed a SECOND write to show itself, which is why a
+    // single-write round-trip test alone would not have caught the bug in the
+    // field: the first write does reach the file intact. The second write reads
+    // the document back — minus the dropped field — and persists the loss.
+    await writePoolProbes('cn', {
+      beta: { outcome: 'model-busy', atMs: 9, modelId: 'step-5-preview' },
+    })
+    await writePoolProbes('cn', { gamma: { outcome: 'ok', atMs: 10 } })
+    expect((await readPoolProbes('cn'))['beta']?.modelId).toBe('step-5-preview')
+  })
+
   it('treats a missing message as a complete record, not a corrupt one', async () => {
     // Measurements written before the field existed must stay readable: reading
     // them as corrupt would silently erase a real observation.

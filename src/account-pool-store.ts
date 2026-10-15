@@ -53,6 +53,12 @@ function isProbe(value: unknown): value is WorkBuddyPoolProbe {
     // non-string (a number id, an object) must not survive into the UI as
     // `[object Object]`.
     && (candidate['accountName'] === undefined || typeof candidate['accountName'] === 'string')
+    // WHICH MODEL the measurement was taken on (issue #61). Validated as a
+    // string for the same reason as `accountName`: it reaches the card as a
+    // label, so a non-string must not survive into the UI. Its READ-BACK was
+    // missing, which turned every subsequent write into an erasure — see the
+    // note at the field in `readPoolProbes`.
+    && (candidate['modelId'] === undefined || typeof candidate['modelId'] === 'string')
     // A source this build does not recognise is DROPPED, not rejected: refusing
     // the whole record would silently discard a real measurement written by a
     // newer build, whereas dropping only the label leaves the measurement
@@ -112,6 +118,14 @@ export async function readPoolProbes(
       ...probe.retryAtMs === undefined ? {} : { retryAtMs: probe.retryAtMs },
       ...probe.message === undefined ? {} : { message: probe.message },
       ...probe.accountName === undefined ? {} : { accountName: probe.accountName },
+      // `modelId` MUST be read back, and its absence here was a data-CORRUPTION
+      // bug rather than a missing display field: `writePoolProbes` reads the
+      // document, merges, and writes the whole thing, so a field dropped on READ
+      // is erased on the NEXT WRITE — and on every write after that. The card
+      // then rendered "未记录模型" for measurements that HAD recorded one, and
+      // the pool's own reading of an `ok` as an account-level fact lost the
+      // scope caveat this field exists to carry (issue #61).
+      ...probe.modelId === undefined ? {} : { modelId: probe.modelId },
     }
   }
   return probes
