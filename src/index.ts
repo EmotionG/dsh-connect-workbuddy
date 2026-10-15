@@ -59,7 +59,7 @@ import type {
   WorkBuddyPoolTarget,
 } from './account-pool-run.ts'
 import { exclusionOf } from './account-pool.ts'
-import type { WorkBuddyPoolCredits, WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
+import type { WorkBuddyPoolCredits, WorkBuddyPoolExclusion, WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
 import { resolveTargetModel } from './account-pool.ts'
 import { oauthPoll, oauthStart } from './oauth.ts'
 import { mergeTransferRecords, parseTransferFile, previewTransferFile, transferRecordOf } from './transfer.ts'
@@ -795,6 +795,14 @@ export function apply(ctx: Context, config: Config): void {
       },
       prepareAccount: () => applyPoolSelection(region),
       failoverAccount: triedAccountIds => failoverAccountFor(region, triedAccountIds),
+      // Asked only after a request has ALREADY failed and the pool found nowhere
+      // to go, so the reply can say why instead of only that it tried. It runs at
+      // most once per failed request — never on a request that succeeded.
+      //
+      // Deliberately takes no argument from the shim: the explanation describes
+      // the POOL's state, which the host can read directly, and threading the
+      // tried ids through would duplicate a fact the host already holds.
+      failoverShortfall: () => explainPoolShortfall(region),
       // Record what a live request learned, so the NEXT one starts from an
       // account that works instead of re-discovering this failure.
       onAccountFailure: (accountId, failure) => {
@@ -1472,6 +1480,68 @@ export function apply(ctx: Context, config: Config): void {
       if (credential !== undefined) return credential
     }
     return undefined
+  }
+
+  /**
+   * Why the pool left a failed request with nowhere to go, in one short clause.
+   *
+   * Runs ONLY after a request has already failed, so it may afford work the hot
+   * path cannot — but it still reads local state only (the probe store and the
+   * member list), because spending a network call to explain a failure would add
+   * a second delay to a request the user is already waiting on.
+   *
+   * It counts rather than lists. The reply is one line inside an error message,
+   * and enumerating accounts there would bury the advice; the card is where a
+   * per-account breakdown belongs, and it already shows one.
+   *
+   * Returns `undefined` when the pool is OFF or has no members — in which case
+   * there is no pool story to tell, and the shim renders its own sentence
+   * without one. That is a real state, not a failure: the plugin supports
+   * running with no pool at all.
+   */
+  const explainPoolShortfall = async (region: WorkBuddyRegion): Promise<string | undefined> => {
+    if (!poolPreferencesOf(current(), region).enabled) return undefined
+    const members = await localPoolMembers(region)
+    if (members.length === 0) return undefined
+    const nowMs = Date.now()
+    // The SAME verdict the ranking uses, asked the same way, so this explanation
+    // cannot contradict the decision that produced the empty search.
+    const excluded = members
+      .map(member => ({ id: member.account.id, excludedBy: exclusionOf(member.probe, nowMs) }))
+      .filter((entry): entry is { id: string, excludedBy: WorkBuddyPoolExclusion } => entry.excludedBy !== undefined)
+    if (excluded.length === 0) {
+      // Nothing is excluded, yet failover found no candidate: every member was
+      // either already tried this request or has no resolvable credential. The
+      // first is the common case and the honest one to report.
+      return '池中其余账号本次请求都已尝试过'
+    }
+    // One clause per DISTINCT reason, with a count, so "三个账号都在冷却" reads
+    // as one fact rather than three repetitions of the same sentence.
+    const counts = new Map<WorkBuddyPoolExclusion, number>()
+    for (const entry of excluded) counts.set(entry.excludedBy, (counts.get(entry.excludedBy) ?? 0) + 1)
+    const parts = [...counts.entries()].map(([reason, count]) => `${String(count)} 个${poolExclusionClause(reason)}`)
+    return `池中已无可用账号（${parts.join('、')}）`
+  }
+
+  /**
+   * One exclusion reason as a short Chinese clause for
+   * {@link explainPoolShortfall}.
+   *
+   * Separate from the card's own labels (`exclusion-text.ts` in the client half)
+   * on purpose: those are standalone table cells ("被限流"), where these are
+   * glued into a sentence and must read after a count ("1 个账号被限流"). Sharing
+   * one string would force one of the two to read wrong.
+   */
+  function poolExclusionClause(reason: WorkBuddyPoolExclusion): string {
+    switch (reason) {
+      case 'rate-limited': return '账号被限流'
+      case 'out-of-credit': return '账号积分耗尽'
+      case 'model-busy': return '账号撞上模型繁忙'
+      case 'credential-rejected': return '账号登录已失效'
+      case 'not-found': return '账号已不存在'
+      case 'unusable': return '账号不可用'
+      default: return '账号不可用'
+    }
   }
 
   /**

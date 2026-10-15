@@ -70,6 +70,21 @@ export type WorkBuddyFailoverAccount = (
   triedAccountIds: readonly string[],
 ) => Promise<WorkBuddyCredential | undefined>
 
+/**
+ * Why the pool had no candidate, asked only after failover came up empty.
+ *
+ * A separate callback rather than a richer return type on
+ * {@link WorkBuddyFailoverAccount}: the loop calls that one on the HOT PATH of
+ * every retry, and a policy that had to explain its refusal on every call would
+ * make the common case pay for the rare one. This runs at most once per failed
+ * request, and only when the answer is already going to be an error.
+ *
+ * Returns a short Chinese clause naming the reason (e.g. "池中其余账号都在冷却"),
+ * or undefined when the host has nothing to add — in which case the reply says
+ * only that no other account was available.
+ */
+export type WorkBuddyFailoverShortfall = () => Promise<string | undefined>
+
 /** Constructor dependencies. */
 export interface WorkBuddyShimOptions {
   store: WorkBuddyCredentialStore
@@ -82,6 +97,19 @@ export interface WorkBuddyShimOptions {
    * reported as-is.
    */
   failoverAccount?: WorkBuddyFailoverAccount
+  /**
+   * Why the pool had no usable candidate, asked after failover found none.
+   *
+   * The failure path uses this to answer the question the user is actually left
+   * with — "why did nothing else work?" — instead of only reporting that every
+   * attempt failed. Without it the pool's own reasoning is invisible at exactly
+   * the moment it matters, and "换个模型" reads as a guess rather than as the
+   * conclusion of a search the plugin already performed.
+   *
+   * Optional, and its absence is a supported state: a host that does not supply
+   * it produces the same reply as before this option existed.
+   */
+  failoverShortfall?: WorkBuddyFailoverShortfall
   /**
    * Called before the FIRST attempt of every chat request, so the plugin can
    * point the store at the account the pool's ranking says should serve.
@@ -804,42 +832,47 @@ function describeAccount(credential: WorkBuddyCredential): string {
  * One short phrase for why an account was abandoned, for the in-reply notice.
  *
  * Kept to the distinction the user can act on rather than the internal kind
- * name: "rate limited" says wait or add an account, "rejected" says the sign-in
+ * name: "账号被限流" says wait or add an account, "登录已失效" says the sign-in
  * is the problem. The numeric kind would only send them to the log.
+ *
+ * The wording is what `failoverNoticeText` interpolates into a Chinese sentence,
+ * so these are Chinese phrases rather than English ones — the reader of a failed
+ * turn in this product reads Chinese, and an English clause inside Chinese prose
+ * was the previous build's most visible rough edge.
  */
 function failoverReasonText(failure: WorkBuddyChatResult): string {
   // The union is discriminated by `ok`; only a failure carries a kind, and this
   // is only ever called on the failed attempt that triggered a switch.
-  if (failure.ok) return 'unusable'
+  if (failure.ok) return '不可用'
   switch (failure.kind) {
     // The 6004 volume limit: the account serves this request again once the
     // stated reset passes.
     case 'soft_rate':
-      return 'rate limited'
+      return '被限流'
     // NOT the same sentence as `soft_rate`, though both leave the pool. The
     // remedy differs in kind: an exhausted account cannot pay for this model AT
-    // ALL until it is topped up or its quota cycle rolls over, so "rate limited"
+    // ALL until it is topped up or its quota cycle rolls over, so "被限流"
     // sends the user to wait for something that will not arrive. Kept
     // failover-worthy — another ACCOUNT may well have credits, which is exactly
     // why the notice has to name the real reason.
     case 'hard_credit':
-      return 'out of credits'
+      return '积分已耗尽'
     case 'model_busy':
-      // NOT "rate limited": that phrasing is what sent issue #56's reporter to
-      // the account pool. The failure belongs to the model, and the notice this
+      // NOT "被限流": that phrasing is what sent issue #56's reporter to the
+      // account pool. The failure belongs to the model, and the notice this
       // text feeds only ever appears when the plugin DID switch accounts — which
       // it no longer does for this kind.
-      return 'throttled on this model (not the account)'
+      return '该模型当前繁忙（不是账号问题）'
     case 'session_dead':
-      return 'signed out'
+      return '登录已失效'
     case 'policy_reject':
-      return 'rejected by policy'
+      return '被服务端策略拒绝'
     case 'not_found':
-      return 'model unavailable'
+      return '模型不可用'
     case 'server':
-      return 'erroring upstream'
+      return '上游异常'
     default:
-      return `unusable (http ${failure.status})`
+      return `不可用（http ${failure.status}）`
   }
 }
 
@@ -855,9 +888,13 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
  * over is the one the user is about to keep talking to, and naming it invites
  * the reading that they must now manage it. What they need is to know the one
  * they chose did not answer, and why.
+ *
+ * Chinese, matching the rest of a failed turn's copy: the host renders its own
+ * quota sentence in Chinese, the pool rows are Chinese, and an English clause
+ * here was the one line of the reply a Chinese reader had to decode.
  */
 function failoverNoticeText(from: string, reason: string): string {
-  return `\n\n> [dsh-connect-workbuddy] 「${from}」was ${reason} — this answer came from another account\n\n`
+  return `\n\n> [dsh-connect-workbuddy] 「${from}」${reason}，已改用池中另一个账号回答\n\n`
 }
 
 /** One frame carrying replacement text for a frame whose content was consumed. */
@@ -879,6 +916,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const { store, client, catalog } = options
   const logger = options.logger
   const failoverAccount = options.failoverAccount
+  const failoverShortfall = options.failoverShortfall
   const prepareAccount = options.prepareAccount
   const onAccountFailure = options.onAccountFailure
   const onRequestBody = options.onRequestBody
@@ -1180,7 +1218,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // the loop pushes each one before asking for the next — so its length IS
       // the attempt count. Adding one here reported a phantom extra account.
       const attempts = triedAccountIds.length
-      const note = attempts > 1 ? ` (after trying ${attempts} accounts)` : ''
+      const note = attempts > 1 ? `（已尝试 ${attempts} 个账号）` : ''
+      // WHY THERE WAS NOWHERE ELSE TO GO. Asked only when the request actually
+      // failed, so the success path never pays for it, and only when the pool
+      // was even in play (a shortfall callback implies a configured pool).
+      //
+      // A rejected callback must not replace the real upstream failure with a
+      // bookkeeping one, so a throw degrades to "no explanation" — the reply the
+      // user gets is then exactly the one this option was added to improve, not
+      // a worse one.
+      const shortfall = failoverShortfall === undefined
+        ? undefined
+        : await failoverShortfall().catch(() => undefined)
+      const why = shortfall === undefined ? '' : `：${shortfall}`
       if (result.kind === 'policy_reject') {
         // A content-policy refusal is the one upstream failure whose own words
         // the user needs: the server tells them WHAT to change ("内容未通过安全
@@ -1225,11 +1275,24 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }
+      // The generic path, and the one a quota failure takes. It now names WHY
+      // every account was refused (the pool's own verdict, from
+      // `failoverShortfall`) and points at the model as the remaining move.
+      //
+      // "换一个模型" is the honest advice rather than a suggestion to add
+      // accounts: the pool has just searched every member, so the user's next
+      // action should be the one the search could not take for them. Saying only
+      // "the request failed" left them to guess between four remedies, three of
+      // which the plugin had already ruled out.
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],
         result.kind,
-        `workbuddy upstream ${result.kind} (http ${result.status})${note}: ${result.message.slice(0, 400)}`,
+        `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${why}。` +
+        `${result.message.slice(0, 400)}` +
+        (failoverShortfall === undefined
+          ? ''
+          : '。池中没有其他可用账号，建议换一个模型继续，或稍后等待该账号的额度恢复'),
         hostErrorCode(result.kind),
       )
       return

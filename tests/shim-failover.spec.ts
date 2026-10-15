@@ -58,6 +58,7 @@ function mount(options: {
   chatStream: (credential: WorkBuddyCredential, body: string) => Promise<WorkBuddyChatResult>
   failover?: Failover
   others?: readonly WorkBuddyCredential[]
+  shortfall?: () => Promise<string | undefined>
   logger?: { warn: (...args: unknown[]) => void, error: (...args: unknown[]) => void }
 }): WorkBuddyShim {
   const client = {
@@ -72,6 +73,7 @@ function mount(options: {
     catalog: new WorkBuddyCatalog(),
     ...options.logger === undefined ? {} : { logger: options.logger },
     ...options.failover === undefined ? {} : { failoverAccount: options.failover },
+    ...options.shortfall === undefined ? {} : { failoverShortfall: options.shortfall },
   })
 }
 
@@ -218,7 +220,7 @@ describe('pool failover: retrying a failed chat on another account', () => {
     expect(response.body).toContain('等待约 1 分钟')
     expect(response.body).toContain('请求过于频繁，请稍后重试。')
     // The count of accounts tried is absent because nobody else was tried.
-    expect(response.body).not.toContain('after trying')
+    expect(response.body).not.toContain('已尝试')
   })
 
   it('reports the failure unchanged when the pool offers nobody else', async () => {
@@ -255,7 +257,7 @@ describe('pool failover: retrying a failed chat on another account', () => {
     expect(response.status).toBe(429)
     // Without the count, a pool that failed over and still lost is
     // indistinguishable from the single account the user selected failing.
-    expect(response.body).toContain('after trying 3 accounts')
+    expect(response.body).toContain('已尝试 3 个账号')
     expect(attemptsOf()).toHaveLength(3)
   })
 
@@ -730,7 +732,7 @@ describe('a failover says so in the answer', () => {
     // the pool table shows) and gives the reason a person can act on.
     expect(text).toContain('dsh-connect-workbuddy')
     expect(text).toContain('selected')
-    expect(text).toContain('rate limited')
+    expect(text).toContain('被限流')
     // And it comes FIRST: an answer that opened with the model's prose and then
     // mentioned the switch would read as the model talking about itself.
     expect(text.indexOf('dsh-connect-workbuddy')).toBeLessThan(text.indexOf('Hello from the fallback.'))
@@ -760,8 +762,8 @@ describe('a failover says so in the answer', () => {
     const response = await chat(shim)
     expect(response.status).toBe(200)
     const text = contentOf(response.body)
-    expect(text).toContain('out of credits')
-    expect(text).not.toContain('rate limited')
+    expect(text).toContain('积分已耗尽')
+    expect(text).not.toContain('被限流')
     // Still failover-worthy: another ACCOUNT may well have a balance, which is
     // the whole reason the notice has to name the real reason.
     expect(seen).toEqual(['selected', 'other'])
@@ -781,7 +783,7 @@ describe('a failover says so in the answer', () => {
     const response = await chat(shim)
     const text = contentOf(response.body)
     expect(text).toContain('Straight answer.')
-    expect(text).not.toContain('came from another account')
+    expect(text).not.toContain('已改用池中另一个账号')
     expect(attemptsOf()).toEqual([SELECTED_ID])
   })
 
@@ -798,7 +800,7 @@ describe('a failover says so in the answer', () => {
 
     const response = await chat(shim)
     expect(response.status).toBe(429)
-    expect(response.body).not.toContain('came from another account')
+    expect(response.body).not.toContain('已改用池中另一个账号')
   })
 
   it('reports ONE reason even when several accounts fail before one answers', async () => {
@@ -827,7 +829,7 @@ describe('a failover says so in the answer', () => {
     const text = contentOf(response.body)
     expect(text).toContain('Third time lucky.')
     // Exactly one notice, naming the account the request STARTED on.
-    expect(text.split('came from another account').length - 1).toBe(1)
+    expect(text.split('已改用池中另一个账号').length - 1).toBe(1)
     expect(text).toContain('selected')
   })
 
@@ -850,7 +852,119 @@ describe('a failover says so in the answer', () => {
     await shim.ready
 
     const text = contentOf((await chat(shim)).body)
-    expect(text).toContain('signed out')
-    expect(text).not.toContain('rate limited')
+    expect(text).toContain('登录已失效')
+    expect(text).not.toContain('被限流')
+  })
+})
+
+/**
+ * WHY THERE WAS NOWHERE ELSE TO GO.
+ *
+ * A failed request that already searched the pool left the user with the one
+ * question the error itself could not answer: "why did nothing else work?".
+ * Without an explanation the remaining advice reads as a guess, and the pool's
+ * own reasoning — which the card shows per row — is invisible at the exact
+ * moment it would have been acted on.
+ *
+ * The host supplies the reason through `failoverShortfall`; these tests pin how
+ * the shim treats that reply, including the states where it must NOT let the
+ * explanation make things worse.
+ */
+describe('a failed request explains why the pool had nowhere to go', () => {
+  it('includes the pool\'s reason and points at the model', async () => {
+    shim = mount({
+      chatStream: async () => RATE_LIMITED,
+      failover: async () => undefined,
+      shortfall: async () => '池中已无可用账号（2 个账号被限流）',
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(response.status).toBe(429)
+    // The pool's own verdict, present verbatim rather than paraphrased, so the
+    // sentence the user reads is the one the routing decision was made on.
+    expect(response.body).toContain('池中已无可用账号（2 个账号被限流）')
+    // And the remaining move, stated as advice rather than left to inference.
+    expect(response.body).toContain('建议换一个模型继续')
+    // The upstream's own words survive: they carry the reset time, which is the
+    // one actionable fact a generic sentence would destroy.
+    expect(response.body).toContain('2026-10-02 05:23:27')
+  })
+
+  it('still names the failure class, so the reason is not only "the pool is full"', async () => {
+    // The shortfall explains the POOL; the class explains THIS request. Both are
+    // needed: "no accounts available" alone does not say the account was limited
+    // rather than signed out.
+    shim = mount({
+      chatStream: async () => RATE_LIMITED,
+      failover: async () => undefined,
+      shortfall: async () => '池中已无可用账号',
+    })
+    await shim.ready
+
+    expect((await chat(shim)).body).toContain('被限流')
+  })
+
+  it('reports the upstream failure unchanged when the host offers no reason', async () => {
+    // `failoverShortfall` is optional and its absence is a supported state: an
+    // older host must produce the failure it always produced. This is the
+    // regression guard for making it required by accident.
+    shim = mount({
+      chatStream: async () => RATE_LIMITED,
+      failover: async () => undefined,
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(response.status).toBe(429)
+    expect(response.body).toContain('2026-10-02 05:23:27')
+    // No dangling punctuation where the explanation would have gone, and no
+    // advice about a pool the host never described.
+    expect(response.body).not.toContain('池中已无可用账号')
+    expect(response.body).not.toContain('建议换一个模型继续')
+  })
+
+  it('reports the real upstream failure when the explanation itself fails', async () => {
+    // A bookkeeping callback must never replace the failure it was asked to
+    // explain. A throw here degrades to "no explanation" — the same reply as an
+    // absent callback — rather than turning a 429 into a plugin error.
+    shim = mount({
+      chatStream: async () => RATE_LIMITED,
+      failover: async () => undefined,
+      shortfall: async () => { throw new Error('pool state unreadable') },
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(response.status).toBe(429)
+    expect(response.body).toContain('2026-10-02 05:23:27')
+    expect(response.body).not.toContain('pool state unreadable')
+  })
+
+  it('does not ask for an explanation when the request SUCCEEDED', async () => {
+    // The callback answers "why did nothing work", which is meaningless on a
+    // reply that worked. Asking anyway would spend the pool's work on every
+    // single request and, worse, would invite a future edit to render an
+    // explanation beside a successful answer.
+    let asked = 0
+    shim = mount({
+      others: [credentialFor('other')],
+      chatStream: async () => ({
+        ok: true,
+        response: new Response(
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'Straight answer.' }, finish_reason: '' }] })}\n\n`
+          + `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
+          { status: 200 },
+        ),
+      }),
+      shortfall: async () => { asked += 1; return 'should never be read' },
+    })
+    await shim.ready
+
+    const response = await chat(shim)
+    expect(response.status).toBe(200)
+    expect(asked).toBe(0)
+    expect(response.body).toContain('Straight answer.')
+    expect(response.body).not.toContain('should never be read')
   })
 })

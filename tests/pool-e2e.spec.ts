@@ -1090,6 +1090,43 @@ describe('the pool section and the card share one refresh path (M-4 / L-5)', () 
       .toContain('await applyPoolSelection(region).catch(() => undefined)')
   })
 
+  it('wires the shortfall explanation into the shim', async () => {
+    // The seam is the same shape as the failover policy above, and it fails the
+    // same silent way: without this option the shim still reports the upstream
+    // failure correctly, so every test that only checks the failure stays green
+    // while the user is left without the answer to "why was there nowhere else
+    // to go?".
+    const host = stripLiterals(await sourceOf('index.ts'))
+
+    expect(host, 'the shim is not given a shortfall explainer').toContain('failoverShortfall:')
+    expect(host, 'the explainer is not bound to its region').toContain('explainPoolShortfall(region)')
+
+    const at = host.indexOf('const explainPoolShortfall =')
+    expect(at, 'explainPoolShortfall moved — update this guard').toBeGreaterThan(-1)
+    // Slice to the function's own closing brace rather than to the next comment:
+    // a `/**` slice runs past the helper below it and into unrelated code, which
+    // is how the first version of this guard picked up `retryAtMs` from a
+    // neighbouring function and failed for the wrong reason.
+    const explainer = host.slice(at, host.indexOf('\n  }', at))
+
+    // Off means OFF, exactly as for failover: with no pool there is no pool story
+    // to tell, and inventing one would describe a feature the user turned off.
+    expect(explainer, 'the pool switch does not gate the explanation')
+      .toContain('poolPreferencesOf(current(), region).enabled')
+    // The explanation must share the ROUTER's verdict, not re-derive one. A
+    // second definition of "excluded" would let the reply blame a reason the
+    // ranking never used — the card and the traffic disagreeing, but in prose.
+    expect(explainer, 'the explanation re-derives the verdict instead of asking the pool')
+      .toContain('exclusionOf(')
+    expect(explainer, 'the explanation duplicates the cooldown rule')
+      .not.toContain('retryAtMs')
+    // No network on the failure path: the user is waiting on a request that just
+    // failed, and an upstream call to explain it would add a second delay.
+    expect(explainer, 'the explanation fetches credits').not.toContain('fetchCredits')
+    expect(explainer, 'the explanation uses the expensive member builder')
+      .not.toContain('poolMembersOf')
+  })
+
 })
 
 describe('a live failure becomes a measurement the next request reads', () => {
