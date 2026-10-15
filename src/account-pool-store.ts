@@ -24,6 +24,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 // Host-first with a local fallback; see `src/host-peers.ts` and issue #47.
 import { resolveDshHome, withFileLock, writeFileAtomic } from './host-peers.ts'
+import { parseUpstreamResetAt } from './probe.ts'
 import type { WorkBuddyPoolProbe, WorkBuddyPoolProbeSource } from './account-pool.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 
@@ -77,6 +78,50 @@ export function workbuddyPoolStorePath(region: WorkBuddyRegion): string {
 }
 
 /**
+ * The recovery time a stored record implies — declared, or recoverable from its
+ * own body.
+ *
+ * The field itself wins when present: it is what the writer computed with the
+ * full input set (`Retry-After` header, quota-refresh point, body), and
+ * re-deriving it could only lose information.
+ *
+ * The fallback exists because a record can state a time in its `message` and
+ * still have no `retryAtMs`. That is not a hypothetical — it is what the English
+ * `6004` body produced, since the parser that ran at write time matched only the
+ * Chinese 「… 重置」 sentence:
+ *
+ *   `{"code":6004,"msg":"usage exceeds frequency limit, but don't worry, your
+ *     usage will reset at 2026-10-16 11:34:04 UTC+8, …"}`
+ *
+ * leaving a record that names the exact minute it will serve again while
+ * `retryDue` falls back to {@link POOL_UNKNOWN_COOLDOWN_MS}. The row then told the
+ * user 「上游未给出何时恢复」 about a body that had just said when, and the pool
+ * put the account back ~18 hours early to rediscover the same limit.
+ *
+ * Read-time healing is the only place this can be repaired for EXISTING records:
+ * every consumer receives probes through {@link readPoolProbes} —
+ * `accountExclusions` (the composer panel), `poolMembersOf` /
+ * `localPoolMembers` (the card AND failover routing), `memberNames` — so healing
+ * here fixes all of them at once. Re-deriving at each consumer instead would be
+ * three copies of one rule, and the next consumer added would silently miss it.
+ *
+ * Not a permanent second derivation: `writePoolProbes` reads through this
+ * function before it writes, so the very next write persists the healed value.
+ *
+ * Scoped to the two outcomes whose vocabulary HAS a stated time, matching
+ * {@link WorkBuddyPoolProbe.retryAtMs}. Widening it would let an incidental
+ * sentence in an `ok` body attach a countdown to a healthy account —
+ * `AccountPool.tsx` prints any present `retryAtMs` beside the outcome, so that
+ * would render a waiting time on an account that is not waiting for anything.
+ */
+function retryAtMsOf(probe: WorkBuddyPoolProbe): number | undefined {
+  if (probe.retryAtMs !== undefined) return probe.retryAtMs
+  if (probe.outcome !== 'rate-limited' && probe.outcome !== 'out-of-credit') return undefined
+  if (probe.message === undefined) return undefined
+  return parseUpstreamResetAt(probe.message)
+}
+
+/**
  * Read one region's measured facts.
  *
  * Contains NO credentials. The one free-text field is `message`, and it is
@@ -111,11 +156,12 @@ export async function readPoolProbes(
   const probes: Record<string, WorkBuddyPoolProbe> = {}
   for (const [accountId, probe] of Object.entries(document.probes)) {
     if (accountId === '' || !isProbe(probe)) continue
+    const retryAtMs = retryAtMsOf(probe)
     probes[accountId] = {
       outcome: probe.outcome,
       atMs: probe.atMs,
       ...knownProbeSource(probe.source) === undefined ? {} : { source: knownProbeSource(probe.source)! },
-      ...probe.retryAtMs === undefined ? {} : { retryAtMs: probe.retryAtMs },
+      ...retryAtMs === undefined ? {} : { retryAtMs },
       ...probe.message === undefined ? {} : { message: probe.message },
       ...probe.accountName === undefined ? {} : { accountName: probe.accountName },
       // `modelId` MUST be read back, and its absence here was a data-CORRUPTION

@@ -246,26 +246,58 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | u
 }
 
 /**
- * The upstream's reset sentence, as its Chinese gateway writes it.
+ * The `<timestamp> UTC±N` core of the upstream's reset sentence.
  *
- * Measured on a live 429 (code 6004), verbatim:
+ * Shared by both spellings below so the two can never drift into accepting
+ * different timestamps: the offset handling and the calendar round-trip check in
+ * {@link parseUpstreamResetAt} are what make a parsed value trustworthy, and two
+ * copies of this shape would be two chances to loosen one of them.
+ */
+const RESET_STAMP
+  = String.raw`(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})\s*UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?`
+
+/**
+ * The upstream's reset sentence, in BOTH spellings this service uses.
+ *
+ * Chinese gateway, measured on a live 429 (code 6004), verbatim:
  *
  *   `您的使用量已超出频率限制，将在 2026-09-30 02:30:30 UTC+8 重置，您也可以切换其他模型继续使用。`
  *
- * The two halves are captured separately because the second one is the whole
- * reason this parser exists: the upstream DOES name a time, and the plugin was
- * showing "the upstream gave no time" while the answer was sitting right there
- * in the body. The earlier note in this module ("the upstream provides no
- * rate-limit metadata") was drawn from the RESPONSE HEADERS alone — true as far
- * as it went, and wrong as a conclusion, because the time is in the body text.
+ * International gateway, measured on the same code over the same account pool,
+ * verbatim:
  *
- * Deliberately loose about the surrounding wording (`[\s\S]*?` on both sides)
- * and strict about the parts that must not be guessed: the keyword 重置, the
- * timestamp shape, and an explicit UTC offset. A message that merely mentions
- * 重置 without a parsable offset yields no time, which is the honest answer.
+ *   `usage exceeds frequency limit, but don't worry, your usage will reset at
+ *    2026-10-16 11:34:04 UTC+8, alternatively, you can switch to the other
+ *    models to continue using it.`
+ *
+ * WHY THERE ARE TWO. Each gateway states the time in its own language, and the
+ * marker sits on a DIFFERENT SIDE of the timestamp: 重置 follows it in Chinese,
+ * while `reset at` precedes it in English — so one pattern cannot cover both by
+ * loosening the surrounding prose alone. The original pattern demanded the
+ * Chinese keyword, so an English body parsed to nothing and the card said
+ * 「上游未给出何时恢复」 about a message that had just named the exact minute.
+ *
+ * That is the honest-absence contract broken in the OTHER direction — not a
+ * made-up time, but a real time discarded — and it is the worse of the two
+ * failures, because the account stays excluded on the 30-minute fallback instead
+ * of the ~18 hours upstream asked for. The pool then returns the account to
+ * candidacy early and spends a request rediscovering the same 6004.
+ *
+ * Both patterns stay deliberately loose about the surrounding prose and strict
+ * about the parts that must not be guessed: a keyword, the timestamp shape, and
+ * an explicit UTC offset. A message that merely mentions a reset without a
+ * parsable offset still yields no time, which remains the honest answer.
  */
-const UPSTREAM_RESET_PATTERN
-  = /将在?\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})\s*UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?[\s\S]*?重置/u
+const UPSTREAM_RESET_PATTERN_ZH
+  = new RegExp(`将在?\\s*${RESET_STAMP}[\\s\\S]*?重置`, 'u')
+/**
+ * The English spelling, anchored on `reset at` / `refresh on` IMMEDIATELY before
+ * the timestamp — the same strictness as the Chinese pattern, which requires its
+ * marker immediately after it. A message that mentions a reset somewhere else
+ * entirely therefore still yields no time.
+ */
+const UPSTREAM_RESET_PATTERN_EN
+  = new RegExp(`(?:reset|resets|refresh|refreshes)\\s+(?:at|on)\\s+${RESET_STAMP}`, 'iu')
 
 /**
  * Parse the reset time out of an upstream failure message.
@@ -284,7 +316,8 @@ const UPSTREAM_RESET_PATTERN
  * would be fiction in the other direction.
  */
 export function parseUpstreamResetAt(message: string): number | undefined {
-  const match = UPSTREAM_RESET_PATTERN.exec(message)
+  const match = UPSTREAM_RESET_PATTERN_ZH.exec(message)
+    ?? UPSTREAM_RESET_PATTERN_EN.exec(message)
   if (match === null) return undefined
   const [, year, month, day, hour, minute, second, sign, offsetHours, offsetMinutes] = match
   const offsetTotalMinutes

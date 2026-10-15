@@ -34,6 +34,7 @@
     "tests/issue51-sync-veil.spec.tsx",
     "tests/issue62-credit-position.spec.tsx",
     "tests/issue63-quota-notice.spec.tsx",
-    "tests/card-model-sweep.spec.tsx"
+    "tests/card-model-sweep.spec.tsx",
+    "tests/composer-panel-freshness.spec.tsx"
   ]
 }

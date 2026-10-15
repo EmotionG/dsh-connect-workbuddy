@@ -66,11 +66,34 @@ if (typeof document !== 'undefined') {
 }
 
 /**
- * Automatic refresh period. Five minutes, matching a credit balance's actual
- * rate of change: it moves on the scale of model calls, not seconds, and each
- * read is a read-only upstream call.
+ * Automatic refresh period for the READOUT. Five minutes, matching a credit
+ * balance's actual rate of change: it moves on the scale of model calls, not
+ * seconds, and each read is a read-only upstream call.
  */
 export const COMPOSER_CREDITS_REFRESH_INTERVAL_MS = 300_000
+
+/**
+ * Refresh period for the panel's per-account table, while it stays open.
+ *
+ * Deliberately NOT the readout's five minutes. The table carries two things,
+ * and the faster-moving one decides the cadence:
+ *
+ *  - the balance, which barely moves, and
+ *  - each account's `excludedBy` ("被限流" / "模型繁忙"), which is derived from
+ *    the pool's own cooldowns — and the SHORTEST of those is the model-scoped
+ *    two-minute throttle (`MODEL_BUSY_COOLDOWN_MS`).
+ *
+ * At five minutes the table could state an account is 模型繁忙 long after the
+ * upstream let it serve again, and the pool card — which polls every 60 s
+ * (`POLL_INTERVAL_MS` in `WorkBuddyCard.tsx`) — would say it is fine at the same
+ * moment. Two surfaces disagreeing about one account is exactly the complaint
+ * this constant answers, so the table now converges on the card's cadence
+ * instead of its own.
+ *
+ * The cost is bounded and paid only while the panel is open: one `fetchCredits`
+ * per account per minute, the same read the card already makes when it is open.
+ */
+export const COMPOSER_ACCOUNT_REFRESH_INTERVAL_MS = 60_000
 
 /** Localized copy injected by the browser-plugin registration. */
 export interface ComposerCreditsInjected {
@@ -145,6 +168,10 @@ export function ComposerCredits(props: ComposerCreditsProps) {
   const [lastRefresh, setLastRefresh] = useState<number | undefined>(undefined)
   const [open, setOpen] = useState(false)
   const inFlight = useRef(false)
+  /** Account-table reads in flight; see `fetchAccountCredits`. */
+  const accountsInFlight = useRef(0)
+  /** Which account-table read is the newest; see `fetchAccountCredits`. */
+  const accountsReadGeneration = useRef(0)
   const mounted = useRef(true)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -199,9 +226,27 @@ export function ComposerCredits(props: ComposerCreditsProps) {
    * A failure keeps whatever we already have rather than clearing it: the table
    * falls back to the usage document's account list, so a failed figure must not
    * remove the switch.
+   *
+   * `force` distinguishes the TWO callers, and the distinction is the point:
+   *
+   *  - the panel's timer passes nothing, so a tick that arrives while a read is
+   *    still in flight is SKIPPED. The panel is asking "has anything changed?",
+   *    and a read already on its way answers that.
+   *  - a deliberate action (the refresh button, or `switchTo` re-reading after a
+   *    write) passes `force: true`, because it must actually happen. Skipping it
+   *    would be the same defect this file is fixing: a control that reports "the
+   *    table is current" without having asked. It also claims the newest
+   *    generation, so its answer is the one that lands.
+   *
+   * Latest-wins rather than a queue: responses can resolve out of order, and a
+   * slow tick started earlier must not overwrite the press that superseded it —
+   * which would silently re-draw a mark the press had just cleared.
    */
-  const fetchAccountCredits = useCallback(async (signal?: AbortSignal): Promise<void> => {
+  const fetchAccountCredits = useCallback(async (signal?: AbortSignal, force?: boolean): Promise<void> => {
     if (activeRegion === undefined) return
+    if (!force && accountsInFlight.current > 0) return
+    const generation = ++accountsReadGeneration.current
+    accountsInFlight.current += 1
     try {
       const response = await fetch(withWorkBuddyRegion(WORKBUDDY_ACCOUNT_CREDITS_PATH, activeRegion), {
         headers: { accept: 'application/json' },
@@ -211,9 +256,22 @@ export function ComposerCredits(props: ComposerCreditsProps) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const data = await response.json() as { accounts?: unknown }
       if (!mounted.current || signal?.aborted === true) return
-      if (Array.isArray(data.accounts)) setAccountCredits(data.accounts as WorkBuddyWebAccountCredit[])
+      // Superseded while in flight: applying now would restore rows a newer read
+      // has already replaced.
+      if (generation !== accountsReadGeneration.current) return
+      if (Array.isArray(data.accounts)) {
+        setAccountCredits(data.accounts as WorkBuddyWebAccountCredit[])
+        // The footer's clock moves for THIS read too. It answers "when did the
+        // panel last ask the upstream about credits?", and this route is a
+        // credits read — reporting only the usage read's time would let a table
+        // that just refreshed sit under a timestamp that never changes, which is
+        // the same "is this stale?" question the frozen marks raised.
+        setLastRefresh(Date.now())
+      }
     } catch {
       // Keep the previous rows; see above.
+    } finally {
+      accountsInFlight.current -= 1
     }
   }, [activeRegion])
 
@@ -242,12 +300,40 @@ export function ComposerCredits(props: ComposerCreditsProps) {
     }
   }, [owned, hostHidden, fetchUsage])
 
-  // Per-account figures are read on OPEN, not on the 5-minute cycle.
+  /**
+   * Per-account figures are read on OPEN, then kept fresh while the panel stays
+   * open.
+   *
+   * The on-open read is what makes the table useful immediately. The TIMER is
+   * the fix for the complaint that started this: with an open-only read, a panel
+   * left open showed a frozen snapshot of every account's `excludedBy`, while
+   * the pool card behind it re-ranked every 60 s. The two then disagreed about
+   * the same account — the panel drawing no mark where the card said 模型繁忙 —
+   * and neither surface was wrong on its own data, which is what made it so hard
+   * to read.
+   *
+   * The timer starts only AFTER the first read settles, so a slow upstream
+   * cannot stack overlapping reads (the same shape the readout's own effect
+   * uses). Aborted on close: the panel pays one read per minute only while it is
+   * actually on screen.
+   */
   useEffect(() => {
     if (!open || activeRegion === undefined) return undefined
+    let cancelled = false
+    let timer: number | undefined
     const controller = new AbortController()
-    void fetchAccountCredits(controller.signal)
-    return () => { controller.abort() }
+    void fetchAccountCredits(controller.signal).finally(() => {
+      if (cancelled) return
+      timer = window.setInterval(
+        () => { void fetchAccountCredits(controller.signal) },
+        COMPOSER_ACCOUNT_REFRESH_INTERVAL_MS,
+      )
+    })
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearInterval(timer)
+      controller.abort()
+    }
   }, [open, activeRegion, fetchAccountCredits])
 
   // Escape closes the panel, matching the neighbouring popovers.
@@ -280,13 +366,40 @@ export function ComposerCredits(props: ComposerCreditsProps) {
     try {
       await writeAccountSlot(settingsScope, activeRegion, accountId)
       await fetchUsage()
-      await fetchAccountCredits()
+      // `true`: the row this user clicked must come back re-read. Skipping this
+      // because a tick was in flight would leave the marker (and the balance)
+      // describing the account the panel was showing BEFORE the switch.
+      await fetchAccountCredits(undefined, true)
     } catch {
       if (mounted.current) setFailed(true)
     } finally {
       if (mounted.current) setSwitchingId(undefined)
     }
   }
+
+  /**
+   * One manual refresh, of both things the panel shows.
+   *
+   * It used to call `fetchUsage` alone, so pressing 刷新 on the account table
+   * refreshed the trigger's balance and left every ROW exactly as it was —
+   * including its 被限流 / 模型繁忙 mark. The button sits inside the table's own
+   * header, so the user reads it as "refresh this table"; a control that
+   * refreshes something else is worse than no control, and it is one of the
+   * reasons the panel could keep claiming a state the card had already moved
+   * past.
+   *
+   * Both reads run concurrently rather than in sequence: neither depends on the
+   * other, and awaiting the usage document first would delay the table by one
+   * round trip for no benefit. `refreshUsage` resolves rather than throws on
+   * failure (it records `failed` itself), so the table's read is never skipped
+   * because the other half went wrong.
+   */
+  const refresh = useCallback(async (): Promise<void> => {
+    setFailed(false)
+    // `true`: a deliberate refresh must actually reach the upstream, not be
+    // skipped because a timer tick happens to be in flight.
+    await Promise.all([fetchUsage(), fetchAccountCredits(undefined, true)])
+  }, [fetchUsage, fetchAccountCredits])
 
   // Not this plugin's model: render nothing at all, so the composer row is
   // untouched while another provider is in use.
@@ -375,7 +488,7 @@ export function ComposerCredits(props: ComposerCreditsProps) {
               type="button"
               className="dsm-workbuddy-composer-panel-refresh"
               disabled={busy || switchingId !== undefined}
-              onClick={() => { void fetchUsage() }}
+              onClick={() => { void refresh() }}
             >
               {busy ? t('composer.refreshing') : t('composer.refresh')}
             </button>
