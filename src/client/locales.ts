@@ -312,13 +312,19 @@ export const en = {
   'row.creditPositionComposer': 'composer toolbar',
   'row.creditPositionStats': 'below the input box',
   'row.creditPositionAria': 'Credit readout position for {region}',
-  // The supplement to the host's fixed quota sentence (issue #63). Written to be
-  // TRUE FOR BOTH cases the QUOTA code covers — a model's own daily quota that has
-  // nothing to do with credits, and a genuinely empty balance — because the upstream
-  // says which it is in Chinese prose the plugin must not parse to make policy.
+  // The supplement to a quota failure (issue #63), rendered as an INLINE
+  // PARENTHETICAL in the conversation — one short clause, no dialog, no button.
+  // The plugin no longer claims the `shell.quota-notice` chain seat, so this is
+  // NOT appended to the host's sentence by this plugin any more (that takeover
+  // is what parked an unstyled span at the overlay's top-left); the host draws
+  // its own sentence and this qualifies it where the user is already looking.
+  // Written to be TRUE FOR BOTH cases the QUOTA code covers — a model's own daily
+  // quota that has nothing to do with credits, and a genuinely empty balance —
+  // because the upstream says which it is in Chinese prose the plugin must not
+  // parse to make policy. The glyphs are part of the string so a locale that
+  // brackets differently is not at the mercy of a CSS `content` rule.
   'quotaNotice.fallbackHead': 'The quota for this request is exhausted',
-  'quotaNotice.supplement': 'Some models have their own daily limit that is unrelated to your credit balance — check the account pool row for the stated reset time, or switch account or model to continue.',
-  'quotaNotice.dismiss': 'Got it',
+  'quotaNotice.supplement': ' (some models also have a daily limit that is unrelated to your credits)',
   'row.creditPositionHint': 'Where the credit readout sits. "composer toolbar" is the default (the row with the model picker). Choose "below the input box" — the row carrying the round / step / token statistics — if another plugin occupies the composer toolbar and the readout does not appear.',
   'row.showCreditsGlobalHint': 'Show the international (WB AI) credit balance in the composer toolbar, but only while this session uses a WB AI model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
   'composer.pointsCn': 'WB CN',
@@ -629,12 +635,14 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.creditPositionComposer': '输入框工具栏',
   'row.creditPositionStats': '输入框下方',
   'row.creditPositionAria': '{region} 的积分显示位置',
-  // 宿主那句固定文案的补充（issue #63）。措辞对 QUOTA 覆盖的**两种**情况都成立
-  // —— 模型自己的每日额度（与积分无关）与真的积分耗尽 —— 因为上游说的是中文散文，
-  // 插件不允许解析它来下政策判断。
+  // 额度失败的补充（issue #63），渲染成**对话里的行内括号**——一句短话，没有对话框、
+  // 没有按钮。插件**不再**占用宿主的 `shell.quota-notice` 链座位，所以这句不再由本插件
+  // 拼在宿主句子后面（那次占用才是把无样式 span 留在 overlay 左上角的原因）；宿主自己画
+  // 它那句，本插件只在这句旁边补一句。措辞对 QUOTA 覆盖的**两种**情况都成立 —— 模型自己
+  // 的每日额度（与积分无关）与真的积分耗尽 —— 因为上游说的是中文散文，插件不允许解析它
+  // 来下政策判断。
   'quotaNotice.fallbackHead': '当前请求的额度已用尽',
-  'quotaNotice.supplement': '部分模型另有每日额度限制，与积分余额无关 —— 也可能确实是本账号积分耗尽。账号池那一行会写明上游给出的恢复时刻；也可以先换个账号或换个模型继续。',
-  'quotaNotice.dismiss': '知道了',
+  'quotaNotice.supplement': '（部分模型另有每日额度，与积分无关）',
   'row.creditPositionHint': '积分显示在哪里。「输入框工具栏」是默认位置（与模型选择同一行）。如果装了别的插件后读数不显示，改成「输入框下方」—— 那是「轮次 / 步数 / token」统计所在的那一行。',
   'row.showCreditsGlobalHint': '在对话输入框工具栏显示国际版（WB AI）剩余积分，仅当本会话使用 WB AI 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
   'composer.pointsCn': 'WB CN',

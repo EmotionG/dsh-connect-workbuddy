@@ -20,19 +20,29 @@
  * resets hours later. Staying out of the retry set is the behaviour we keep
  * (the maintainer's call on issue #63); the sentence is what we supplement.
  *
- * HOW. The host ships a CHAIN seat for exactly this: `shell.quota-notice`, a
- * frame-wide overlay whose own comment says "a `shell.quota-notice` entry may
- * replace the generic Toast for codes it claims". The chain hands a claiming
- * entry the host's own owner object — `{ code, message, dismiss, keepOpen }` —
- * so this component can keep the host's sentence VERBATIM and append the one
- * fact the sentence is missing. Claiming only `QUOTA` leaves every other code on
- * the host's fallback Toast.
+ * HOW (SUPERSEDED — see the DECLINE note below). The host ships a CHAIN seat
+ * for exactly this: `shell.quota-notice`, a frame-wide surface whose own
+ * comment says "a `shell.quota-notice` entry may replace the generic Toast for
+ * codes it claims". An earlier build of this plugin claimed `QUOTA` there and
+ * re-rendered the sentence plus the supplement.
  *
- * WHY THE HOST'S SENTENCE IS KEPT, not rewritten: it is the string the shell
- * shows everywhere else for this code, and a plugin that reworded it would
- * contradict the shell's own vocabulary. The supplement is additive, and it is
- * written to be TRUE FOR BOTH CASES the code covers — a model's own daily quota
- * (not credits) and a genuinely empty balance — because the plugin cannot always
+ * THE DECLINE (the maintainer's call, on a screenshot). Claiming a chain entry
+ * does not decorate the host's surface, it TAKES IT OVER: the host's generic
+ * warning Toast is then not rendered at all, and what replaced it was an inline
+ * `<span>` — no fixed positioning, no centring, no background, no fade-out. It
+ * landed at the top-left of `shell.overlay` and stayed. That is the box the
+ * maintainer reported as "not being there before", and it was correct: the
+ * plugin had painted it. The registration now declines every owner, so the
+ * host's own Toast is what shows — a surface whose look this plugin does not
+ * get to decide — and the supplement lives in the conversation instead, beside
+ * the host's failure row, which is where the user is actually looking when a
+ * turn fails.
+ *
+ * WHY THE HOST'S SENTENCE IS LEFT ALONE: it is the string the shell shows
+ * everywhere else for this code, and a plugin that reworded it would contradict
+ * the shell's own vocabulary. The supplement is additive, and it is written to
+ * be TRUE FOR BOTH CASES the code covers — a model's own daily quota (not
+ * credits) and a genuinely empty balance — because the plugin cannot always
  * tell which one it is: the upstream states it in Chinese prose the plugin is
  * not allowed to parse for policy.
  *
@@ -46,19 +56,20 @@ import { createElement as h } from 'react'
 import type { Translate } from './searched-paths.ts'
 
 /**
- * The host's owner object for a claimed quota notice.
+ * The host's owner object for a quota notice.
  *
- * Only the fields this component uses are named, and all but `message` are
- * optional: `dismiss`/`keepOpen` exist on the host's object today, and a
- * deployment that stopped passing them must render a notice the user can at
- * least read rather than crash the overlay.
+ * Nothing here is read any more: the registration declines every owner, so this
+ * component never receives one from the chain. The shape is kept because it
+ * documents what the host HANDS a claiming entry — the fields a future surface
+ * would get — and because the props type below still references it. `message`
+ * is the host's own sentence; `dismiss`/`keepOpen` are its own affordances,
+ * which this plugin deliberately never called (taking over the surface and then
+ * also demanding a dismissal was the worse version of an already-wrong idea).
  */
 export interface WorkBuddyQuotaNoticeMatched {
   code?: string
-  /** The host's own sentence for this code, rendered verbatim. */
+  /** The host's own sentence for this code. */
   message?: string
-  /** Dismiss the notice; absent means no button is offered. */
-  dismiss?: () => void
 }
 
 export interface WorkBuddyQuotaNoticeProps {
@@ -68,37 +79,58 @@ export interface WorkBuddyQuotaNoticeProps {
 }
 
 /**
- * Which notice codes this plugin claims.
+ * Which notice codes this plugin USED TO claim.
  *
  * `QUOTA` only — it is what the shipped classifier produces for BOTH failures
- * this plugin raises (`6004` account rate limit and `14018` exhausted credits),
- * and claiming anything else would take over a notice this plugin knows nothing
- * about. Exported so the claim is unit-testable without a host.
+ * this plugin raises (`6004` account rate limit and `14018` exhausted credits).
+ *
+ * RETAINED AS HISTORY, NOT AS POLICY. The registration now declines every
+ * owner (see `registerQuotaNotice` in `./index.tsx`), so nothing consults this
+ * list at runtime. It stays because it records which codes the takeover
+ * targeted — the set a future reader would otherwise have to re-derive before
+ * they could safely re-claim, or safely confirm they must not. The spec keeps
+ * asserting the shape of the set so the decline reads as deliberate.
  */
 export const WORKBUDDY_QUOTA_NOTICE_CODES: readonly string[] = ['QUOTA']
 
-/** Whether this plugin should take over the notice for one owner object. */
+/**
+ * Whether this plugin used to take over the notice for one owner object.
+ *
+ * NOT consulted by the live registration any more; see
+ * {@link WORKBUDDY_QUOTA_NOTICE_CODES}.
+ */
 export function claimsQuotaNotice(code: unknown): boolean {
   return typeof code === 'string' && WORKBUDDY_QUOTA_NOTICE_CODES.includes(code)
 }
 
-/** The frame-wide supplement shown under the host's sentence. */
+/**
+ * The chain selector: which owner (if any) this plugin takes over.
+ *
+ * ALWAYS `null`, and that is the fix — see the DECLINE note in the file header.
+ * Exported so the decline is unit-testable without a host: the spec asserts
+ * this returns null for every owner, which is what keeps the host's own Toast
+ * on screen. A function rather than an inline lambda in the registration so the
+ * rule has one home and one test, instead of being restated at the call site.
+ */
+export function selectQuotaNoticeClaim(_owner: unknown): null {
+  return null
+}
+
+/**
+ * The supplement this plugin adds to a quota failure.
+ *
+ * It is what the `shell.quota-notice` chain WOULD render if the registration
+ * claimed an owner — which it no longer does. Kept as the rendering seat for
+ * the supplement so the copy, the locale keys and their guards survive the
+ * decline: the next surface that wants this sentence (a failure row, a
+ * transcript notice) mounts this component rather than re-inventing the markup.
+ *
+ * ONE line, no body, no button, no host sentence of its own — the takeover that
+ * used to prepend the host's sentence is exactly what was removed.
+ */
 export function WorkBuddyQuotaNotice(props: WorkBuddyQuotaNoticeProps) {
-  const { matched, t } = props
-  return h('div', { className: 'dsm-workbuddy-quota-notice', role: 'status' },
-    h('span', { className: 'dsm-workbuddy-quota-notice-head' },
-      // The host's sentence VERBATIM; the supplement is a second line rather
-      // than a longer first one so the sentence every other surface shows stays
-      // recognisable.
-      matched.message ?? t('quotaNotice.fallbackHead'),
-    ),
+  const { t } = props
+  return h('span', { className: 'dsm-workbuddy-quota-notice', role: 'status' },
     h('span', { className: 'dsm-workbuddy-quota-notice-body' }, t('quotaNotice.supplement')),
-    matched.dismiss === undefined
-      ? null
-      : h('button', {
-          type: 'button',
-          className: 'dsm-btn dsm-btn-outline dsm-workbuddy-quota-notice-dismiss',
-          onClick: () => matched.dismiss?.(),
-        }, t('quotaNotice.dismiss')),
   )
 }

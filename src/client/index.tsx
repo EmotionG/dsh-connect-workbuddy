@@ -36,7 +36,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
-import { claimsQuotaNotice, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
+import { selectQuotaNoticeClaim, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 
@@ -222,23 +222,35 @@ export function apply(ctx: WorkBuddyClientContext): void {
     }
 
     /**
-     * The frame-wide quota notice, claimed so the supplement can be shown
-     * (issue #63).
+     * The frame-wide quota notice, DECLINED so the host keeps its own Toast
+     * (issue #63 follow-up, the maintainer's call on a screenshot).
      *
-     * The host renders ONE fixed sentence for a `QUOTA` failure — 「当前请求的
-     * 额度已用尽」 — and discards the provider's message while doing it. For
-     * `6004` that sentence is wrong (the upstream's own words say 「频率限制」,
-     * with a reset time, and the reporting account still held thousands of
-     * credits), but re-classifying is NOT the fix: measured against the shipped
-     * classifier, every spelling that stops reading as `QUOTA` lands in
-     * `RATE_LIMIT`, which is IN the host's retry set — 5 in-place retries and
-     * ~15.5s of backoff on a limit that resets hours later. So the behaviour
-     * (no retry) stays and the sentence gets a SUPPLEMENT.
+     * WHAT WAS WRONG. The previous build claimed `QUOTA` and rendered the
+     * supplement as an inline `<span>` in this seat. The chain's own contract
+     * says a claiming entry "takes over the surface" — so claiming REPLACED the
+     * host's generic warning Toast, and the replacement was not a Toast: an
+     * inline span has no `position: fixed`, no centring, no background and no
+     * fade, so it parked at the TOP-LEFT of `shell.overlay` (an `inset: 0`
+     * layer) and stayed there until the next notice. The maintainer read it, on
+     * screen, as a box that had not been there before — and it had not.
      *
-     * `select` claims `QUOTA` only, and the chain is the host's own designed
-     * extension point for this ("a shell.quota-notice entry may replace the
-     * generic Toast for codes it claims") — every other code keeps the host's
-     * fallback Toast untouched.
+     * WHY DECLINING IS THE FIX, not a worse one. The host's own sentence is
+     * already correct and already appears in the turn's failure row inside the
+     * conversation (`message.failure.quota`, via `failureMessage` in
+     * `ui-chat`'s MessageItem) — the place the user is actually reading when a
+     * turn fails. Taking over the frame-wide surface bought this plugin nothing
+     * except a second, uglier copy of a sentence the host already draws where it
+     * matters. Declining the claim returns the seat to the host: the Toast is
+     * the host's own design, and this plugin stops imposing a look on a surface
+     * it does not own.
+     *
+     * The supplement itself is NOT lost — it rides in the conversation, which is
+     * the only surface that is actually in the user's eyeline (see
+     * `registerStatsCredits` and the failure row). The `select` below is
+     * therefore an explicit, documented DECLINE of every code rather than a
+     * deletion of the registration: the seat stays claimed in one place with its
+     * rationale attached, so a future reader does not re-add the takeover
+     * without re-reading why it was removed.
      */
     const registerQuotaNotice = (): (() => void) | undefined => {
       try {
@@ -255,15 +267,11 @@ export function apply(ctx: WorkBuddyClientContext): void {
         }).register({
           name: 'shell.quota-notice',
           locale: namespace,
-          // The chain calls this with the host's owner object and renders the
-          // entry only for a non-null answer. Returning the owner itself (as the
-          // shipped account plugin does) passes its message/dismiss through.
-          select: (owner: unknown) => {
-            const code = typeof owner === 'object' && owner !== null
-              ? (owner as { code?: unknown }).code
-              : undefined
-            return claimsQuotaNotice(code) ? owner : null
-          },
+          // Declining every owner leaves the chain's all-decline case in charge,
+          // which is the host's own generic warning Toast. The rule lives in
+          // `selectQuotaNoticeClaim` so it has exactly one home and its own test;
+          // `claimsQuotaNotice` still exports the retired claim set as history.
+          select: selectQuotaNoticeClaim,
           inject: () => ({ t }),
         }, WorkBuddyQuotaNotice))
       } catch (error: unknown) {
