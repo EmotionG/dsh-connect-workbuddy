@@ -26,6 +26,9 @@
  * Each test names the mutant it kills. A survivor here is a user-visible
  * defect, not a guard gap.
  */
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WorkBuddyCard } from '../src/client/WorkBuddyCard.tsx'
 import { fakeScope, mount, stubFetch, t } from './pool-render-helpers.tsx'
@@ -425,5 +428,67 @@ describe('the account-level error is actually rendered', () => {
     expect(error?.getAttribute('role')).toBe('alert')
     expect(error?.textContent).toContain('row.rescanHidesKept')
     await m.unmount()
+  })
+})
+
+/**
+ * The free-model quota warning.
+ *
+ * WHY THIS IS NOT COSMETIC. The catalog marks several models `creditMultiplier: 0`,
+ * and the card displays them as free. The upstream still refuses them with
+ * `6004` / `14003` once a per-window token quota is spent — that refusal is the
+ * quota, not a billing balance, and it cannot be topped up. A user who reads
+ * "free" as "unlimited" therefore interprets a 6004 as the plugin being broken
+ * and goes looking for a bad account (issue #56's reporter spent that hunt), or
+ * for a top-up that would change nothing.
+ *
+ * The line has to be its own BOLD paragraph. Folding it into the grey sentence
+ * above is exactly how the ×0 tiers came to read as unlimited in the first
+ * place, so the two properties pinned here are the ones that carry the meaning:
+ * it RENDERS at all, and it does not share the muted weight of its neighbours.
+ *
+ * The locale PROSE is asserted in the table check below rather than here, so a
+ * rewording does not have to touch this file.
+ */
+describe('the free-model quota warning', () => {
+  it('renders, and is bold rather than another muted hint line', async () => {
+    routeFetch([
+      [USAGE_PATH, () => ({ body: usageOf() })],
+      ['*', () => ({ body: {} })],
+    ])
+    const m = await mount(WorkBuddyCard, { t, settingsScope: fakeScope({}), view: 'page' })
+    await m.settle()
+
+    const warn = m.container.querySelector('.dsm-workbuddy-free-quota-warn')
+    expect(warn, 'the free-model quota warning is not rendered').not.toBeNull()
+    // `t` returns the KEY in these tests, so this proves WHICH string was chosen
+    // rather than what it says — the split that keeps prose and wiring from
+    // breaking each other.
+    expect(warn?.textContent).toContain('row.tabFreeQuotaWarn')
+
+    // The bold class is the whole signal. Asserting the class rather than a
+    // computed weight keeps this out of jsdom's (absent) cascade, and the CSS
+    // rule itself is pinned in `tests/card-credits-switch.spec.tsx`'s sibling
+    // source guard below.
+    expect(warn?.className).toContain('dsm-workbuddy-models-summary')
+    await m.unmount()
+  })
+
+  it('keeps the weight in the stylesheet rather than in an inline style', async () => {
+    // A `style={{fontWeight:600}}` would satisfy the render assertion above
+    // while making the rule unfindable to anyone auditing the card's CSS. The
+    // weight has to live where every other card rule lives.
+    //
+    // Read through `fileURLToPath` rather than `new URL(..., import.meta.url)`:
+    // under this file's jsdom environment `import.meta.url` is not a file URL,
+    // and handing it to `readFile` throws "The URL must be of scheme file" —
+    // a broken TEST, not a missing rule (it fails the same way against the
+    // correct stylesheet).
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client', 'styles.ts'),
+      'utf8',
+    )
+    expect(css, 'the bold rule is missing from the stylesheet')
+      .toContain('.dsm-workbuddy-free-quota-warn{font-weight:600}')
   })
 })

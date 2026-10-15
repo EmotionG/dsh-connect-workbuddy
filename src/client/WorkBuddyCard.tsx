@@ -1329,6 +1329,15 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                 })}
               </div>
               <p className="dsm-workbuddy-models-summary">{t('row.tabHint')}</p>
+              {/* Its OWN paragraph rather than a clause appended to the hint
+                  above: this one is BOLD and is the only sentence here that
+                  corrects a wrong assumption rather than describing a fact.
+                  Appending it in the same grey run is what let the ×0 tiers
+                  read as "unlimited" in the first place (issue #56's reporter
+                  lost 30 minutes to exactly that reading). */}
+              <p className="dsm-workbuddy-models-summary dsm-workbuddy-free-quota-warn">
+                {t('row.tabFreeQuotaWarn')}
+              </p>
               {!activeRegionOn
                 ? <p className="dsm-workbuddy-tab-off-notice">{t('row.tabOffNotice')}</p>
                 : null}

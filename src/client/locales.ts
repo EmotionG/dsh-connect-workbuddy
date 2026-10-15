@@ -18,6 +18,12 @@ export const en = {
   'row.tabCn': 'Domestic',
   'row.tabGlobal': 'Global',
   'row.tabHint': 'Each tab is a separate provider (workbuddy / workbuddy-global) with its own account, credits, and models. Both sides are live at once: different sessions can pick from either side, and changes on one tab never touch the other.',
+  // The free (×0) models are NOT unlimited — they carry a per-WINDOW token quota
+  // (the upstream's 6004/14003 refusals are that quota, not a billing balance).
+  // Stated separately from `tabHint` and in bold because the misreading it
+  // prevents is expensive: a user who believes ×0 means unlimited reads a 6004
+  // as "the plugin is broken" instead of "this window's allowance is spent".
+  'row.tabFreeQuotaWarn': 'Free models have a per-window token quota — they are not unlimited.',
   'row.tabSwitchHint': 'Uncheck to switch this provider off. Its models disappear from the DSH model picker; your account, credits, and model settings are kept and return when you check it again.',
   'row.tabSwitchAria': 'Offer the {region} provider to DSH',
   'row.tabOffNotice': 'This provider is switched off: none of its models are offered to DSH. Your account, credits, and model settings are kept — check the box above the tab to bring it back.',
@@ -368,6 +374,10 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.tabCn': '国内版',
   'row.tabGlobal': '国际版',
   'row.tabHint': '每个 tab 是一个独立供应商（workbuddy / workbuddy-global），各有自己的账号、积分与模型。两边同时生效：不同会话可各选一边，一侧的改动不影响另一侧。',
+  // 免费（×0）模型**不是无限量**：它有一个**时间段内的 token 定额**（上游的 6004/14003
+  // 拒的就是这个定额，不是账单余额）。与 `tabHint` 分开、且加粗显示，因为它要防的误读
+  // 代价很高：以为 ×0 = 无限用的人，会把 6004 读成「插件坏了」而不是「这一时段的额度用完了」。
+  'row.tabFreeQuotaWarn': '免费模型有时间段内定额 Token 上限，并非无限制使用。',
   'row.tabSwitchHint': '取消勾选即关闭该供应商：它的模型不再出现在 DSH 模型选择器里；账号、积分与模型设置都会保留，重新勾选即恢复。',
   'row.tabSwitchAria': '是否向 DSH 提供{region}供应商',
   'row.tabOffNotice': '该供应商已关闭：它的模型不会提供给 DSH。账号、积分与模型设置均已保留——勾选上方复选框即可恢复。',

@@ -120,6 +120,12 @@ export const WORKBUDDY_CARD_CSS = `
    scrolling to the end of a long model list. */
 .dsm-workbuddy-models-dirty{margin-left:8px;padding:1px 6px;border-radius:6px;background:var(--dsw-alias-state-warn-primary,#f59e0b);color:#1b1d22;font-size:11px;font-weight:600;line-height:16px;vertical-align:1px;white-space:nowrap}
 .dsm-workbuddy-models-summary{margin:2px 0 0;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
+/* The free-model quota warning (see the tabFreeQuotaWarn locale key). Bold on
+   purpose, and it keeps the summary's own grey rather than the primary label
+   colour: it has to stand out from the three lines around it WITHOUT reading as
+   an error banner, because the fact it states is normal product behaviour
+   rather than a failure. Weight is the only signal it needs. */
+.dsm-workbuddy-free-quota-warn{font-weight:600}
 .dsm-workbuddy-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden}
 .dsm-workbuddy-model{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:10px 12px;background:var(--dsw-alias-bg-layer-2,#232529);transition:opacity .16s}
 .dsm-workbuddy-model-disabled{opacity:.55}
