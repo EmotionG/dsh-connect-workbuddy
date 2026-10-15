@@ -1,5 +1,12 @@
 /**
- * The supplement this plugin adds to the host's quota notice (issue #63).
+ * The supplement this plugin adds to a quota failure (issue #63).
+ *
+ * 参考：`dsh-connect-trae`（MIT）— 「以插件身份向宿主的通知链注册一个条目」的
+ *   席位用法与自建 DOM（不依赖 ui-primitives）的渲染约定，见 docs/DESIGN.md §5.3。
+ * 改动：本模块是原创实现，但其中两处决定**与本文件早期版本相反**，且都是被真机
+ *   截图推翻的：(1) 曾认领 `shell.quota-notice` 链并在其中重绘宿主句子，后判定该
+ *   链的语义是「接管整个界面」而非加装饰，遂改为**一律拒收**；(2) 曾是带按钮的
+ *   卡片，后改为只读的行内括号。两处的原因各自写在下文对应位置，删改前请先读。
  *
  * WHY THIS EXISTS. When an upstream failure is classified `QUOTA`, the host
  * renders ONE fixed sentence — 「当前请求的额度已用尽」 — and (measured on the
