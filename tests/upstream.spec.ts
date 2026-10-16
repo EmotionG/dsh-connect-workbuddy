@@ -724,6 +724,113 @@ describe('WorkBuddyUpstreamClient.probeChat', () => {
   })
 })
 
+describe('the conversation-identity triple (issue #66)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  function credential(domain = 'www.codebuddy.cn'): WorkBuddyCredential {
+    return {
+      accessToken: 'at',
+      refreshToken: 'rt',
+      expiresAtMs: 0,
+      domain,
+      uid: 'u',
+      source: 'desktop',
+      filePath: '/tmp/workbuddy-desktop.info',
+    }
+  }
+
+  /** Capture the headers one chat request actually went out with. */
+  async function headersOf(domain: string): Promise<Record<string, string>> {
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response('data: [DONE]\n\n', { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient().chatStream(credential(domain), '{}')
+    return seen
+  }
+
+  const TRIPLE = ['X-Conversation-ID', 'X-Conversation-Request-ID', 'X-Conversation-Message-ID']
+
+  it('sends all three on the international gateway, which refuses the request without them', async () => {
+    // The reported defect: workbuddy-global answers EVERY step with 400 /
+    // business code 11128 ("conversation id missing"), on every model. The
+    // gateway's own display tips blame the client identity, which is why this
+    // reads as something other than a missing header.
+    const seen = await headersOf('www.workbuddy.ai')
+    for (const name of TRIPLE) expect(seen[name]).toBeTruthy()
+  })
+
+  it('sends them on the CN gateway too, so only one side can never be the whole story', async () => {
+    // The CN gateway tolerates their absence, so sending them there is harmless.
+    // Deliberate: a header that is only ever sent on one side is how the 3.1.0
+    // system-head rule became an international-only defect that no CN-side test
+    // could see. This asserts the one-code-path decision, not a CN requirement.
+    const seen = await headersOf('www.codebuddy.cn')
+    for (const name of TRIPLE) expect(seen[name]).toBeTruthy()
+  })
+
+  it('gives the three headers three DIFFERENT values', async () => {
+    // Bisecting the official bundle's header set showed X-Conversation-ID alone is
+    // still refused: all three must be present. Three copies of one id would
+    // satisfy a naive presence check while forging a conversation identity that
+    // does not exist — one session announced three times under a single id.
+    const seen = await headersOf('www.workbuddy.ai')
+    expect(new Set(TRIPLE.map(name => seen[name])).size).toBe(3)
+  })
+
+  it('sends a well-formed UUID in each, because a malformed id is refused upstream', async () => {
+    const seen = await headersOf('www.workbuddy.ai')
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(uuid)
+  })
+
+  it('generates fresh values per request rather than reusing one identity', async () => {
+    // The official client calls randomUUID() per request. Reusing a value across
+    // requests is what would make the upstream correlate two different steps as
+    // one message — the assertion below fails if the triple is hoisted to a
+    // module-level constant, which is the natural "optimisation" here.
+    const first = await headersOf('www.workbuddy.ai')
+    const second = await headersOf('www.workbuddy.ai')
+    for (const name of TRIPLE) expect(second[name]).not.toBe(first[name])
+  })
+
+  it('carries them on the probe path, which shares the chat endpoint', async () => {
+    // The probe is a real chat request, so the same gate applies — and it is how
+    // the reporter's own account test surfaced 11128 (one account "ok", another
+    // refused, in the same batch). A fix applied only to chatStream would leave
+    // the pool testing accounts against an endpoint whose rules are not met.
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response('data: [DONE]\n\n', { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient().probeChat(credential('www.workbuddy.ai'), '{}')
+    for (const name of TRIPLE) expect(seen[name]).toBeTruthy()
+  })
+
+  it('does not carry them on the billing endpoint, which is not chat', async () => {
+    // The triple is a CHAT-endpoint requirement. The reporter's matrix was taken
+    // on the chat endpoint only, so sending it on the billing calls the official
+    // client also makes without it would be inventing protocol nobody tested.
+    //
+    // Asserted BEHAVIOURALLY: an earlier draft of this test grepped the source
+    // text, and a mutation that added the triple to `billingHeaders` slipped past
+    // it because the text slice it compared had simply failed to match. Driving
+    // the real method is what makes the guard measure the request instead.
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient().fetchCredits(credential('www.workbuddy.ai'))
+    for (const name of TRIPLE) expect(seen[name]).toBeUndefined()
+  })
+})
+
 describe('WorkBuddyUpstreamClient.chatStream', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

@@ -27,6 +27,7 @@
  * @module dsh-connect-workbuddy/upstream
  */
 
+import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
@@ -585,6 +586,60 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
   }
 }
 
+/**
+ * The conversation-identity triple the chat endpoint now requires (issue #66).
+ *
+ * WHY THIS EXISTS. The international gateway added a second gate on top of the
+ * `system`-head rule from 3.1.0: a chat request must carry the official desktop
+ * client's conversation identity, or every step is refused with business code
+ * `11128` / `conversation id missing`. That error's own `displayTips` blames
+ * "渠道校验 / 不是官方客户端发出的", which reads as a client-identity problem —
+ * the literal message is the actionable part, and it names a MISSING CONVERSATION
+ * ID, not a missing or wrong user agent.
+ *
+ * The two gates are independent, and both must hold (measured 2026-10-16 on the
+ * real international gateway, plugin body shape unchanged):
+ *
+ *   headers            messages          result
+ *   -----------------  ----------------  --------------
+ *   plugin as-shipped  ["system","user"] 400 / 11128
+ *   plugin + triple    ["system","user"] 200
+ *   plugin + triple    ["user"]          400 / 11128
+ *
+ * So `ensureSystemHead()` must NOT be dropped as "no longer needed": the system
+ * rule went from sufficient to necessary-but-not-sufficient. The last row is what
+ * keeps this function from being mistaken for a replacement for it.
+ *
+ * MINIMAL SET. The official bundle's `applyGatewayHeaders` also sends
+ * `acp-connection-id`, `X-Agent-Intent` / `X-Agent-Purpose`, `X-IDE-*`,
+ * `X-Private-Data` and trace headers. Bisecting them one at a time showed NONE of
+ * those is required: `X-Conversation-Request-ID` and `-Message-ID` are needed
+ * alongside `X-Conversation-ID` (that one alone still fails), and each of the
+ * extras is satisfied by the triple without it. Hence exactly three.
+ *
+ * VALUES. The gateway does not verify where these ids come from — any well-formed
+ * UUID passes — so nothing here is a secret and nothing is persisted. They are
+ * still freshly generated per request, matching the official client's
+ * `randomUUID()` per call: reusing one value across requests would forge a
+ * conversation identity the plugin does not actually have, and the first thing
+ * that would break is the upstream's own correlation of a session it is being
+ * told about twice under one id.
+ *
+ * APPLIED TO BOTH REGIONS on purpose. The CN gateway tolerates their absence
+ * today, so this is harmless there — and a header that is only ever sent on one
+ * side is exactly how the 3.1.0 defect became international-only and invisible
+ * from the CN side. One code path, both regions.
+ *
+ * @returns the three headers, every value distinct.
+ */
+function conversationHeaders(): Record<string, string> {
+  return {
+    'X-Conversation-ID': randomUUID(),
+    'X-Conversation-Request-ID': randomUUID(),
+    'X-Conversation-Message-ID': randomUUID(),
+  }
+}
+
 /** Chat request headers, including the X-No-* conventions the official CLI uses. */
 function chatHeaders(credential: WorkBuddyCredential): Record<string, string> {
   const headers: Record<string, string> = {
@@ -597,6 +652,7 @@ function chatHeaders(credential: WorkBuddyCredential): Record<string, string> {
       : { 'X-Enterprise-Id': credential.enterpriseId },
     ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
     'X-Product': 'SaaS',
+    ...conversationHeaders(),
   }
   return headers
 }
