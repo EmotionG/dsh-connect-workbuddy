@@ -76,8 +76,43 @@ export const WORKBUDDY_APP_EXECUTABLE_ENV = 'WORKBUDDY_APP_EXECUTABLE'
 /** How long the app is given to answer with its key payload. */
 const KEY_FETCH_TIMEOUT_MS = 10_000
 
-/** File name of the WorkBuddy desktop executable on Windows. */
-const APP_EXECUTABLE_NAME = 'WorkBuddy.exe'
+/**
+ * File names the WorkBuddy desktop executable goes by on Windows.
+ *
+ * `WorkBuddy.exe` is the domestic build. The international build ships as
+ * **`WorkBuddyAI.exe` under a `WorkBuddyAI` directory** (issue #68), and the
+ * probe list below carries no candidate that matched it — so a machine with only
+ * the international app installed could not find the key payload's source and
+ * reported the credentials as unreadable, which the UI then described as a
+ * wrong-region sign-in.
+ *
+ * Kept as a LIST rather than a second constant because the same name test is
+ * used in two places that must agree: the directory joiners below, and the
+ * registry-value validator (`normalizeRegistryExecutable`), which must accept a
+ * `DisplayIcon` pointing at either binary. The first entry is the canonical one
+ * used when a directory is known to hold the domestic build.
+ */
+const APP_EXECUTABLE_NAMES: readonly string[] = ['WorkBuddy.exe', 'WorkBuddyAI.exe']
+
+/** The canonical executable name; the rest of {@link APP_EXECUTABLE_NAMES}. */
+const APP_EXECUTABLE_NAME = APP_EXECUTABLE_NAMES[0]!
+
+/**
+ * Windows install directories the desktop app is observed to use, in probe
+ * order, relative to a base such as `%LOCALAPPDATA%` or `%ProgramFiles%`.
+ *
+ * `Programs\WorkBuddy` is the common per-user layout; `WorkBuddy` is the flatter
+ * one some installers produce. The `WorkBuddyAI` pair is the international
+ * build's layout (issue #68) — both spellings are carried because the directory
+ * and the binary were observed to agree, but a future build could pair either
+ * way, and a miss here is invisible (it surfaces as "unreadable credentials").
+ */
+const WINDOWS_APP_SUBDIRECTORIES: readonly (readonly string[])[] = [
+  ['Programs', 'WorkBuddy'],
+  ['WorkBuddy'],
+  ['Programs', 'WorkBuddyAI'],
+  ['WorkBuddyAI'],
+]
 
 /**
  * macOS bundles the desktop app may be installed as, in probe order.
@@ -366,7 +401,11 @@ export function normalizeRegistryExecutable(value: string): string | undefined {
   // belong to the path itself.
   const withoutIndex = unquoted.replace(/,\s*-?\d+\s*$/u, '')
   if (withoutIndex === '') return undefined
-  if (win32.basename(withoutIndex).toLowerCase() !== APP_EXECUTABLE_NAME.toLowerCase()) return undefined
+  // Either build's binary is a legitimate `DisplayIcon` target (issue #68): a
+  // registry value naming the international app must not be rejected as "some
+  // other product's binary" and sent on to be launched.
+  const base = win32.basename(withoutIndex).toLowerCase()
+  if (!APP_EXECUTABLE_NAMES.some(name => name.toLowerCase() === base)) return undefined
   return withoutIndex
 }
 
@@ -453,12 +492,24 @@ export function workbuddyAppExecutableCandidates(
     // which never exists on Windows — so the per-user layout this branch exists
     // to find silently missed. The tests did not catch it because they compared
     // against a `join()`-built expectation that mangled the same way.
-    candidates.push(
-      local === undefined || local === '' ? undefined : win32.join(local, 'Programs', 'WorkBuddy', APP_EXECUTABLE_NAME),
-      local === undefined || local === '' ? undefined : win32.join(local, 'WorkBuddy', APP_EXECUTABLE_NAME),
-      programFiles === undefined || programFiles === '' ? undefined : win32.join(programFiles, 'WorkBuddy', APP_EXECUTABLE_NAME),
-      programFilesX86 === undefined || programFilesX86 === '' ? undefined : win32.join(programFilesX86, 'WorkBuddy', APP_EXECUTABLE_NAME),
-    )
+    //
+    // Each directory is paired with BOTH executable names rather than assuming a
+    // build's directory and its binary agree (issue #68): a miss here is
+    // invisible, because it surfaces as "credentials unreadable" rather than as
+    // "executable not found".
+    const bases = [
+      local === undefined || local === '' ? undefined : local,
+      programFiles === undefined || programFiles === '' ? undefined : programFiles,
+      programFilesX86 === undefined || programFilesX86 === '' ? undefined : programFilesX86,
+    ]
+    for (const base of bases) {
+      if (base === undefined) continue
+      for (const subdirectory of WINDOWS_APP_SUBDIRECTORIES) {
+        for (const name of APP_EXECUTABLE_NAMES) {
+          candidates.push(win32.join(base, ...subdirectory, name))
+        }
+      }
+    }
   } else if (platform === 'darwin') {
     for (const name of MACOS_APP_BUNDLE_NAMES) {
       candidates.push(

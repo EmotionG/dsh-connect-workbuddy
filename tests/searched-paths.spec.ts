@@ -296,6 +296,44 @@ describe('signedOutNotice', () => {
     expect(notice.fallback).toBeUndefined()
   })
 
+  it('lets an UNREADABLE key outrank a wrong-region sibling, and they do co-occur', () => {
+    // Issue #68. The two reasons are not alternatives — they appear together,
+    // and the combination is the normal shape on a machine carrying two
+    // WorkBuddy builds: `diagnose()` probes BOTH regions' files, so the newer
+    // one fails to decrypt (`encrypted`) while the older still opens and is
+    // reported as the other region's sign-in (`wrong-region`).
+    //
+    // Until this was fixed `wrong-region` was tested first, so the headline said
+    // "switch tabs" while the real blocker was a key that could not be read.
+    // Switching tabs cannot fix that — the same defect this module exists to
+    // prevent, with the two reasons swapped.
+    const notice = signedOutNotice({
+      selectionLost: false,
+      message: RESOLVE_MESSAGE,
+      searched: [failure('wrong-region', '/a'), failure('encrypted', '/b')],
+    })
+    expect(notice.key).toBe('row.signedOutEncrypted')
+    expect(notice.fallback).toBeUndefined()
+
+    // Assert on the rendered string too: the copy that reaches the user is the
+    // whole point, and "switch tabs" appearing here is the failure being fixed.
+    const rendered = signedOutText(notice, key => zh[key])
+    expect(rendered).toBe(zh['row.signedOutEncrypted'])
+    expect(rendered).not.toContain('切换到上方对应标签页')
+  })
+
+  it('still leads with wrong-region when NO sibling failed to decrypt', () => {
+    // The other half of the same rule: with the blocker absent, the cheap fix
+    // must keep winning. Otherwise the change above would have traded one wrong
+    // headline for another.
+    const notice = signedOutNotice({
+      selectionLost: false,
+      message: RESOLVE_MESSAGE,
+      searched: [failure('wrong-region', '/a'), failure('missing', '/b')],
+    })
+    expect(notice.key).toBe('row.signedOutWrongRegion')
+  })
+
   it('lets an orphaned saved id outrank everything', () => {
     // Tokens are healthy there; only re-picking an account helps, and no path
     // list or region hint may replace that advice.

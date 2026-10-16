@@ -430,12 +430,51 @@ describe('workbuddy app executable discovery', () => {
       ProgramFiles: 'C:\\Program Files',
       'ProgramFiles(x86)': 'C:\\Program Files (x86)',
     })
-    expect(candidates.length).toBe(4)
     for (const candidate of candidates) {
-      expect(candidate.endsWith('WorkBuddy.exe')).toBe(true)
+      expect(candidate.endsWith('.exe')).toBe(true)
       expect(candidate).not.toContain('/')
-      expect(candidate.split('\\').at(-1)).toBe('WorkBuddy.exe')
+      expect(candidate.split('\\').at(-1)).toMatch(/^WorkBuddy(AI)?\.exe$/u)
     }
+    // Three bases x four directories x two binaries. Asserted as a product so a
+    // future edit that drops a whole dimension cannot pass by shrinking the set
+    // quietly — the failure mode here is "not found", which reads as a
+    // credentials problem, not as a missing candidate.
+    expect(candidates.length).toBe(3 * 4 * 2)
+  })
+
+  it('probes the international build, which ships under a different name and directory', () => {
+    // Issue #68: the international app installs as
+    // `%LOCALAPPDATA%\Programs\WorkBuddyAI\WorkBuddyAI.exe` — a different
+    // DIRECTORY and a different BINARY from the domestic build. Neither was in
+    // the probe list, so a machine with only the international app could not
+    // reach the key payload, and the unreadable credentials were reported as a
+    // wrong-region sign-in. `win32.join` for the reason above: the expectation is
+    // a Windows-shaped path and must not follow the host's separators.
+    const candidates = workbuddyAppExecutableCandidates('win32', 'C:\\Users\\x', {
+      LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local',
+    })
+    expect(candidates).toContain(
+      win32.join('C:\\Users\\x\\AppData\\Local', 'Programs', 'WorkBuddyAI', 'WorkBuddyAI.exe'),
+    )
+    // The domestic pair must survive the addition, in its observed order.
+    expect(candidates.indexOf(win32.join('C:\\Users\\x\\AppData\\Local', 'Programs', 'WorkBuddy', 'WorkBuddy.exe')))
+      .toBeLessThan(candidates.indexOf(win32.join('C:\\Users\\x\\AppData\\Local', 'Programs', 'WorkBuddyAI', 'WorkBuddyAI.exe')))
+  })
+
+  it('accepts a registry value naming either build, and still rejects everything else', () => {
+    // `normalizeRegistryExecutable` is the other place the name is checked, and
+    // it must agree with the probe list: a `DisplayIcon` pointing at the
+    // international binary is a legitimate target, not "another product's
+    // binary" to be rejected. The negative half matters just as much — this
+    // value is launched, so widening it carelessly would run something else.
+    expect(normalizeRegistryExecutable('"C:\\Program Files\\WorkBuddyAI\\WorkBuddyAI.exe",0'))
+      .toBe('C:\\Program Files\\WorkBuddyAI\\WorkBuddyAI.exe')
+    expect(normalizeRegistryExecutable('"C:\\Program Files\\WorkBuddy\\WorkBuddy.exe",0'))
+      .toBe('C:\\Program Files\\WorkBuddy\\WorkBuddy.exe')
+    expect(normalizeRegistryExecutable('"C:\\Program Files\\WorkBuddy\\uninstall.exe",0'))
+      .toBeUndefined()
+    expect(normalizeRegistryExecutable('"C:\\Program Files\\WorkBuddy\\WorkBuddy.exe.bak",0'))
+      .toBeUndefined()
   })
 
   it('offers the macOS bundle paths on darwin and nothing on linux', () => {

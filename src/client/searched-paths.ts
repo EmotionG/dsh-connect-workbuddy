@@ -150,6 +150,10 @@ export interface SignedOutNotice {
  * is precisely the action that cannot work when the credential exists but is
  * encrypted. Leaving it in the collapsed list meant the headline contradicted
  * the detail below it — and the headline is the only part most users read.
+ *
+ * `encrypted` outranks `wrong-region` as well, which is a change (issue #68):
+ * the two are not alternatives, they co-occur, and when they do the unreadable
+ * key is the blocker. See the note in {@link signedOutNotice}.
  */
 export function signedOutNotice(input: {
   selectionLost: boolean
@@ -157,17 +161,25 @@ export function signedOutNotice(input: {
   searched: readonly WorkBuddyWebSearchPath[]
 }): SignedOutNotice {
   if (input.selectionLost) return { key: 'row.selectionLostMessage' }
-  // A wrong-region sign-in is the one answer better than "you are not signed
-  // in": the user IS signed in, on the other tab. Say so in the headline
-  // instead of burying the fix in a collapsed list.
-  if (input.searched.some(item => item.reason === 'wrong-region')) {
-    return { key: 'row.signedOutWrongRegion' }
-  }
-  // Ranked below wrong-region because a readable sign-in on the other tab is a
-  // conclusive, cheaper fix; ranked above the generic hint because "sign in
-  // again" is the one instruction that cannot help here.
+  // `encrypted` OUTRANKS `wrong-region`, and the order was reversed until
+  // issue #68 — which is where it was caught. The two can appear TOGETHER, and
+  // that combination is not exotic: `diagnose()` probes BOTH regions' files, so
+  // on a machine carrying two WorkBuddy builds (one of which introduced the
+  // `keyblob` wrapping) the newer file fails to decrypt while the older one
+  // still opens and is then reported as the other region's sign-in.
+  //
+  // With `wrong-region` first, the headline always said "it belongs to the other
+  // tab — switch tabs", while the real blocker was an unreadable key. Switching
+  // tabs cannot fix that, so the copy sent the user to the one action that could
+  // not work — which is the SAME failure this function was written to prevent,
+  // just with the two reasons swapped. Whichever ordering is chosen, the one
+  // that names a hard blocker must win: a readable sign-in on the other tab is a
+  // cheaper fix, but only when a sign-in is readable at all.
   if (input.searched.some(item => item.reason === 'encrypted')) {
     return { key: 'row.signedOutEncrypted' }
+  }
+  if (input.searched.some(item => item.reason === 'wrong-region')) {
+    return { key: 'row.signedOutWrongRegion' }
   }
   if (input.searched.length > 0) return { key: 'row.signedOutHint' }
   // Nothing was probed, so the Host's message is the only account we have of
