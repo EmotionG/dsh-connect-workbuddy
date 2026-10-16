@@ -49,7 +49,40 @@ Windows 在本项目里不是「顺带能跑」的平台，而是**有专属分�
 > 现已把测试改名为「derives a 16-hex-char id, which is the shape the real envelopes carry」并在注释里写明它不证明什么；**推导规则**（哈希 base64 串而非解码字节、取 `sha256(key)` 前 16 位十六进制）由它上面的两条测试真正钉住 —— 那两条才是否证得动的。
 >
 > 若要真正钉住这个向量，需要**连同推导它的一把 secret 一起取样**（或至少记录 `sha256(secret)` 的输入形式）；在那之前，① 仍是**观察记录**，不是**回归守卫**。登记在此，免得下一个人再把它当成守卫。
+>
+> **2026-10-16 再更正（issue #68 结案，A 档）**：这条「需要连同 secret 一起取样」的待办**已在 macOS 上一台装着两个版本的真机上完成**，三个 keyId 全部对上、且**全部由同一把 secret 推出**。结论与探针见 §2.1。**要点：`keyId` 不是「哪把 key 在加密」的证据** —— 同一个 secret 在不同哈希输入下会给出**三个都合法**的 keyId，而三者互不相等。此前把「exe 报的 keyId ≠ 凭据要求」读成「推导还没定案」，是把身份标识别当成密钥标识用了。
 | **D 未验证** | 无任何上述支撑 | —— |
+
+### 2.1 keyId 到底是什么：三值同源，已结案（issue #68，2026-10-16）
+
+**争议**：解密路径上出现三个互不相等的 16 位十六进制值，看起来像「有三把不同的 key，不知道哪把对」：
+
+| 值 | 出现处 |
+| --- | --- |
+| `9127dea1b44020a7` | 凭据信封**要求**的 `keyId`（`accessToken` / `nickname` / `refreshToken` 全部一致） |
+| `c74aaf9df09104a5` | `deriveAtRestKeyId()` 对 `Electron` 进程取回的 payload 算出的值 |
+| `66ef584820ad33e7` | 把 `atRestSecretKey` 先 base64 解码、再对**解码字节**做 sha256 得到的值 |
+
+三者不等，于是被读成「protector key 的推导没定案」。**这个读法是错的**，因为三个值来自**同一把 secret**，只是哈希输入不同：
+
+```text
+secret = <payload>.atRestSecretKey        （base64 文本，32 字节明文）
+key    = sha256(secret as utf8)           ← 插件采用的形式
+keyId  = hex(sha256(key))[0..16]
+```
+
+- `c74aaf9df09104a5` = `hex(sha256(secret))[0..16]` —— **秘密本身**的摘要，不是 key 的 keyId。它长得像 keyId，所以极易被误认为「另一把候选 key」。
+- `66ef584820ad33e7` = `hex(sha256(base64_decode(secret)))[0..16]` —— 对**解码后的字节**做哈希。这是最自然的错误猜法（文档里那句「哈希 base64 串而非解码字节」正是为它写的），但它**不打开任何信封**。
+- `9127dea1b44020a7` = `hex(sha256(sha256(secret as utf8)))[0..16]` —— **只有它**能让 GCM 标签通过。
+
+**验证（macOS 真机，`/Applications` 下同时装着两个版本）**：对 `workbuddy-desktop.info`（国内）与 `workbuddy-desktop-ai.info`（国际）的 8 个信封逐一开箱，`nickname` 与 `accessToken` 全部解出；`accounts[].nickname` / `allAccounts[].nickname`（长度 16/16/36 字节，都不是令牌）也一致。**两个区域的文件用同一把 key** —— 区域差别在文件与账户，不在密钥。
+
+**两个此前被当成「另一条加密路径」的东西，都不是**：
+
+- `~/.workbuddy/keyblob` 与 `~/.workbuddy-ai/keyblob` 里的 `keyId`（`1ade3d8d51807afa` / `1d071c4d12239dda`）是**另一个层级**：keyblob 自己的 `keyId` 标识它包裹的那把 data key，而 `slot[0].protectorKeyId` 仍是 `9127dea1b44020a7`（即上面的保护者）。**它们从未出现在凭据链上**，未被也不应被当作凭据 key 的候选。
+- keyblob 的 `wrapped`（32 字节密文）与凭据信封的 16/36 字节 `nickname` 不是同一种载荷，混在一张表里会继续生出假候选。
+
+**给下一个人**：判定「哪把 key 对」**不要比 keyId**，要看 GCM 标签是否通过 —— keyId 只是**身份标签**，同一份密钥材料在三种输入形式下有三种合法拼法。要正确定位，跑 `doctor` 拿到的 `atRestDecryption` 只说明**能不能拿到 payload**；`nickname` 是否解出才是**这把 key 对不对**的判据。本机实测的判据链与本节的探针脚本见提交信息（`scripts/` 不入包）。
 
 ### A 档取证：§1-5 的控制台闪窗（2026-09-26，Windows 11 22621）
 
