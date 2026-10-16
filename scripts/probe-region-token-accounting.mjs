@@ -85,6 +85,33 @@ const KIND = value('--kind', 'prose')
  * Chinese carries ~3× the tokens per character of English (measured: 0.669 vs
  * 0.224 tokens/char), which is why `--language` matters too: a ratio computed
  * against the wrong language is off by 3×.
+ *
+ * ## Why the high-entropy kinds exist (added 2026-10-16)
+ *
+ * The `prose`/`code`/`json` triple above turned out to MISS THE MOST EXPENSIVE
+ * CLASS IN A REAL SESSION. A body-composition capture of a real long session
+ * (`WORKBUDDY_BODY_REPORT`, issue #59) showed `tool-result` is the single
+ * largest block type — 47% of all characters — and measuring IT gave
+ * **455.5 tokens/1k chars**, i.e. 1.6× the `code` rate that a table without it
+ * would treat as the ceiling. Feeding that one number back into the capture's
+ * composition closed a 28% prediction gap to ~1%.
+ *
+ * Within `tool-result`, the dearest content is high-entropy: measured against
+ * `code(en) = 287.9`, base64 runs **2.50×**, hex **2.04×**, ANSI terminal output
+ * **1.92×**, aligned process/table output **1.63×**. A probe that samples only
+ * prose therefore UNDERSTATES a real history by a factor, and the understatement
+ * is silent — which is exactly the shape of the original 1.94× report.
+ *
+ * ## Sampling rule (added 2026-10-16, learned the hard way)
+ *
+ * These fillers must be sampled UNIFORMLY across their source, not taken from
+ * the head of a log. The reporter measured the same real `tool-result` text two
+ * ways: the first 12k characters gave 322.6 tokens/1k, and a full-range uniform
+ * sample gave 455.5 — **41% apart, same class, same regions**. Head-of-log is
+ * where a session's prose and prompts live; the tool output that dominates the
+ * bulk sits later. Every generator below therefore cycles its alphabet with a
+ * stride chosen to be coprime with the period, so the first `CHARS` characters
+ * are a full-range sample rather than a prefix of one motif.
  */
 const FILLERS = {
   'en:prose': 'The quick brown fox jumps over the lazy dog. Prometheus bound the cache key to the prefix. ',
@@ -94,6 +121,134 @@ const FILLERS = {
   'en:json': '{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"src/upstream.ts\\",\\"limit\\":400}"}}]}\n{"status":"ok","bytes":18244,"cached":true,"region":"ap-others"}\n',
   'zh:json': '{"角色":"助手","工具调用":[{"编号":"调用_1","类型":"函数","函数":{"名称":"读取文件","参数":"{\\"路径\\":\\"src/upstream.ts\\",\\"上限\\":400}"}}]}\n{"状态":"成功","字节数":18244,"已缓存":true,"区域":"ap-others"}\n',
 }
+
+const ENTROPY_FILLERS = {}
+
+/**
+ * Greatest common divisor. Exported so a test can prove the strides below share
+ * no factor with their alphabet lengths.
+ * @param a - first integer.
+ * @param b - second integer.
+ * @returns the greatest common divisor.
+ */
+export function gcd(a, b) {
+  return b === 0 ? a : gcd(b, a % b)
+}
+
+/**
+ * Emit `count` characters of pseudo-random-looking text from an alphabet.
+ *
+ * WHY NOT JUST CYCLE THE ALPHABET: reading `ABC…Zabc…z012…` in order produces a
+ * short-period motif that a tokenizer compresses far better than real
+ * high-entropy text, which would make the measured rate too LOW — reintroducing
+ * exactly the understatement this class exists to correct.
+ *
+ * WHY NOT A STRIDE ALONE: walking the alphabet with a stride visits all `L`
+ * symbols and then repeats, so the text still has period `L` (64 for base64),
+ * which is also far too compressible. Measured against a real payload the rate
+ * would again be understated.
+ *
+ * WHAT IS USED: a small linear congruential generator over 32 bits, mixed with a
+ * fixed per-call seed. The period is ~4 billion rather than 64, the output is a
+ * pure function of the seed (so both regions and both turns get identical text),
+ * and it costs no fixture file. `seed` differs per class so the classes are not
+ * the same bytes in different clothes.
+ *
+ * @param alphabet - symbols to draw from.
+ * @param count - how many characters to emit.
+ * @param seed - mixing constant; the same seed always yields the same text.
+ * @returns the generated filler.
+ */
+function entropy(alphabet, count, seed) {
+  const out = []
+  // Numerical Recipes LCG constants: full 32-bit period, no low-bit pattern.
+  let state = seed >>> 0
+  for (let emitted = 0; emitted < count; emitted += 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+    // MIX BEFORE TAKING THE MODULUS. `(state >>> 8) % L` reads only log2(L) bits
+    // of the state, and those bits of an LCG repeat far sooner than the full
+    // 32-bit period: measured with L = 64 it repeated every 16384 characters,
+    // which a 65536-character filler then contains four times over — a short
+    // period is exactly the compressibility this generator exists to avoid. Two
+    // xorshift-multiply rounds fold the high bits into the low ones first, which
+    // measured no period at all within 120000 characters.
+    let mixed = (state ^ (state >>> 15)) >>> 0
+    mixed = Math.imul(mixed, 0x2c1b3c6d) >>> 0
+    mixed = (mixed ^ (mixed >>> 12)) >>> 0
+    out.push(alphabet[mixed % alphabet.length])
+  }
+  return out.join('')
+}
+
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const HEX = '0123456789abcdef'
+const ANSI_SYMS = 'abcdefghijklmnopqrstuvwxyz0123456789 ./'
+const PROC_COLS = 'abcdefghijklmnopqrstuvwxyz0123456789-_.'
+const TOOL_SRC = 'export function readFile(p: string) {\n  const b = await fs.readFile(p, "utf8")\n  return { p, bytes: b.length, ok: true }\n}\n{"path":"src/upstream.ts","line":175,"text":"contextWindow: info.contextWindow"}\nRun 1/12: ok 18244ms  cached=true\n'
+const TOOL_SRC_ZH = 'export function 读取文件(路径: string): boolean {\n  const 内容 = await fs.readFile(路径, "utf8")\n  return { 路径, 字节数: 内容.length, 成功: true }\n}\n{"路径":"src/upstream.ts","行":175,"文本":"contextWindow: info.contextWindow"}\n第 1/12 次: 成功 18244毫秒 已缓存=true\n'
+
+// base64 is the dearest measured class (2.50× code): a real encoded payload.
+const BASE64_TEXT = entropy(B64, 65536, 0x9e3779b9)
+// hex covers hashes and digests (2.04×).
+const HEX_TEXT = entropy(HEX, 65536, 0x85ebca6b)
+// ANSI is coloured terminal output (1.92×). The SGR framing is PART of the cost,
+// so it is emitted rather than stripped — stripping it would measure a class
+// nobody sends. Colour codes cycle 31-37 like a real logger's levels.
+const ANSI_TEXT = (() => {
+  const symbols = entropy(ANSI_SYMS, 6000, 0xc2b2ae35)
+  let out = ''
+  for (let i = 0; i < symbols.length; i += 1) {
+    out += `\u001B[3${1 + (i % 7)}m${symbols[i]}\u001B[0m`
+  }
+  return out
+})()
+// proc is aligned process/table output (1.63×): padded columns, as `ps`/`df` emit.
+const PROC_TEXT = (() => {
+  const cells = entropy(PROC_COLS, 4096, 0x27d4eb2f)
+  let out = ''
+  for (let i = 0; i < cells.length; i += 1) {
+    const pid = String(1000 + ((i * 7919) % 89999))
+    out += `${pid.padStart(6, ' ')}  ${cells[i].repeat(8).padEnd(8, cells[i])}  ${String((i * 37) % 100000).padStart(5, ' ')}  ok\n`
+  }
+  return out
+})()
+
+for (const lang of ['en', 'zh']) {
+  ENTROPY_FILLERS[`${lang}:base64`] = BASE64_TEXT
+  ENTROPY_FILLERS[`${lang}:hex`] = HEX_TEXT
+  ENTROPY_FILLERS[`${lang}:ansi`] = ANSI_TEXT
+  ENTROPY_FILLERS[`${lang}:proc`] = PROC_TEXT
+}
+// `tool-result` is a CLASS OF ITS OWN, not a blend: code, JSON-ish structure,
+// paths and command output in one blob is what a real tool result carries, and
+// it is the single largest block type in a long session (47% of characters).
+//
+// It is deliberately NOT sampled through `entropy()`: scrambling the template
+// character-by-character would produce text no tool ever emits, and the whole
+// point of this class is that its CONTENT SHAPE is realistic (identifiers,
+// braces, quoted keys, paths, aligned numbers). Its variation comes from
+// repeating the template at an offset that advances per copy, so the filler has
+// no short period either.
+const TOOL_RESULT_EN = (() => {
+  let out = ''
+  let offset = 0
+  while (out.length < 16384) {
+    out += TOOL_SRC.slice(offset % TOOL_SRC.length) + TOOL_SRC.slice(0, offset % TOOL_SRC.length)
+    offset += 97
+  }
+  return out.slice(0, 16384)
+})()
+const TOOL_RESULT_ZH = (() => {
+  let out = ''
+  let offset = 0
+  while (out.length < 16384) {
+    out += TOOL_SRC_ZH.slice(offset % TOOL_SRC_ZH.length) + TOOL_SRC_ZH.slice(0, offset % TOOL_SRC_ZH.length)
+    offset += 97
+  }
+  return out.slice(0, 16384)
+})()
+ENTROPY_FILLERS['en:tool-result'] = TOOL_RESULT_EN
+ENTROPY_FILLERS['zh:tool-result'] = TOOL_RESULT_ZH
 
 const fillerKey = `${LANGUAGE}:${KIND}`
 const FILLER = FILLERS[fillerKey] ?? FILLERS['en:prose']
