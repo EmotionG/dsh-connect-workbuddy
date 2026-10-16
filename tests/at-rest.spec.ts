@@ -109,11 +109,22 @@ describe('deriveAtRestKey', () => {
     expect(deriveAtRestKeyId(key)).toBe(createHash('sha256').update(key).digest('hex').slice(0, 16))
   })
 
-  it('matches the key id observed in a real install', () => {
-    // Fixed vector: this secret derives the keyId found in a live Windows
-    // auth file, so the derivation cannot drift unnoticed.
+  it('derives a 16-hex-char id, which is the shape the real envelopes carry', () => {
+    // WHAT THIS DOES NOT PROVE, stated because the previous name and comment
+    // claimed the opposite (`docs/WINDOWS.md:43` still cites it as an A-tier
+    // fixed vector): it does NOT pin `9127dea1b44020a7`, the keyId observed on a
+    // real Windows install on 2026-09-26. That observation stands, but the SECRET
+    // that derives it was never recorded, so no test can reproduce the value end
+    // to end — fabricating a secret to make the number look pinned is exactly the
+    // failure this rewrite removes. The most an honest unit test asserts without
+    // that secret is the SHAPE, which is what every real envelope carries.
+    //
+    // The derivation RULE — the part that can actually drift — is pinned by the
+    // tests above: hash the payload's base64 STRING (not the decoded bytes), and
+    // take the first 16 hex characters of `sha256(key)`. Those assertions are
+    // falsifiable here; the vector is not.
     const key = deriveAtRestKey(keyPayload(
-      createHash('sha256').update('observed-vector').digest('base64'),
+      createHash('sha256').update('shape-probe').digest('base64'),
     ))
     expect(deriveAtRestKeyId(key)).toMatch(/^[0-9a-f]{16}$/u)
     expect(deriveAtRestKeyId(key)).toHaveLength(16)

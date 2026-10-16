@@ -40,9 +40,15 @@ Windows 在本项目里不是「顺带能跑」的平台，而是**有专属分�
 
 | 档位 | 含义 | 实例 |
 | --- | --- | --- |
-| **A 真机取证** | 在真实 Windows 上取得，可作为最终判据 | ① `tests/at-rest.spec.ts` 里固定向量 `keyId=9127dea1b44020a7`，**采自真实 Windows 安装**（2026-09-26 在本机复核：`workbuddy-desktop.info` 的 `nickname` / `phoneNumber` / `accessToken` 信封全部使用该 keyId）；② issue #13 报告的 `E:\WorkBuddy\WorkBuddy.exe`；③ **§1-5 的控制台闪窗**（见下方专门说明）；④ §1-1 凭据目录与 §1-2 可执行文件候选在真机上命中（`doctor` 全绿，见 §7 记录） |
+| **A 真机取证** | 在真实 Windows 上取得，可作为最终判据 | ① 真实 Windows 安装（2026-09-26）里 `workbuddy-desktop.info` 的 `nickname` / `phoneNumber` / `accessToken` 信封**观察到 `keyId=9127dea1b44020a7`**；② issue #13 报告的 `E:\WorkBuddy\WorkBuddy.exe`；③ **§1-5 的控制台闪窗**（见下方专门说明）；④ §1-1 凭据目录与 §1-2 可执行文件候选在真机上命中（`doctor` 全绿，见 §7 记录） |
 | **B CI 实测** | `windows-latest` 上跑过，覆盖跨平台正确性 | 套件全绿；`tests/auth.spec.ts` 的 `win32` 分支断言（注入 `platform`/`home`/`env`，**任何主机上都能跑**） |
 | **C 约定推导** | 按平台约定写出 + 单元测试钉住，**未在真机逐项验证** | 四个凭据/可执行文件候选路径中**未在本机命中的那些**（见 §7 记录：本机只命中了 `%LOCALAPPDATA%\Programs\WorkBuddy` 与 `%LOCALAPPDATA%\...\auth`，其余候选仍属 C 档） |
+
+> **2026-10-16 更正（issue #68 逼出来的）**：上面 ① 此前写作「`tests/at-rest.spec.ts` 里**固定向量** `keyId=9127dea1b44020a7`」，并把该测试当作这条观察的守卫。**那个说法是错的**：观察本身成立（§7 的记录也独立记着它），但**推导出该 keyId 的那把 secret 从未被留存**，所以测试只能断言 16 位十六进制**形态**，无法复现该值 —— 它此前并未真正钉住这个向量，而文档把它读成了「已钉住」。
+>
+> 现已把测试改名为「derives a 16-hex-char id, which is the shape the real envelopes carry」并在注释里写明它不证明什么；**推导规则**（哈希 base64 串而非解码字节、取 `sha256(key)` 前 16 位十六进制）由它上面的两条测试真正钉住 —— 那两条才是否证得动的。
+>
+> 若要真正钉住这个向量，需要**连同推导它的一把 secret 一起取样**（或至少记录 `sha256(secret)` 的输入形式）；在那之前，① 仍是**观察记录**，不是**回归守卫**。登记在此，免得下一个人再把它当成守卫。
 | **D 未验证** | 无任何上述支撑 | —— |
 
 ### A 档取证：§1-5 的控制台闪窗（2026-09-26，Windows 11 22621）
