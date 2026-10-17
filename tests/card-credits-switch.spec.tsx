@@ -38,12 +38,19 @@ function usageOf(region: string): Record<string, unknown> {
   }
 }
 
-/** The credit-switch controls currently rendered, as {label, checked}. */
+/** The credit-switch controls currently rendered, as {label, checked}.
+ *
+ * The label is read off `.dsm-workbuddy-pref-label`, not off any span: the row's
+ * copy block also carries the explanation, and `textContent` on the wrapper
+ * would return the title and the explanation glued together — which would make
+ * every label assertion below compare against a string that no locale key ever
+ * matches. Scanning from the CHECKBOX (rather than from every preference line)
+ * keeps the picker row out: that row has a label of its own and no input. */
 function creditSwitches(container: HTMLElement): { label: string, checked: boolean }[] {
-  return Array.from(container.querySelectorAll<HTMLLabelElement>('.dsm-workbuddy-credits-switch'))
-    .map(label => ({
-      label: label.querySelector('span')?.textContent ?? '',
-      checked: label.querySelector('input')?.checked ?? false,
+  return Array.from(container.querySelectorAll<HTMLInputElement>('.dsm-workbuddy-pref-check'))
+    .map(input => ({
+      label: input.closest('.dsm-workbuddy-pref')?.querySelector('.dsm-workbuddy-pref-label')?.textContent ?? '',
+      checked: input.checked,
     }))
 }
 
@@ -62,7 +69,7 @@ const render = async (body: Record<string, unknown>, scopeValue: Record<string, 
 describe('card sidebar-credit switch when the region is switched OFF', () => {
   /** The switch's input, with its checked/disabled state. */
   const switchOf = (container: HTMLElement): HTMLInputElement | null =>
-    container.querySelector<HTMLInputElement>('.dsm-workbuddy-credits-switch input')
+    container.querySelector<HTMLInputElement>('.dsm-workbuddy-pref-check')
 
   it('renders the switch unchecked for a region whose provider is off', async () => {
     // A disabled provider has no credits to show, so reporting the stored flag
@@ -214,16 +221,16 @@ describe('card sidebar-credit switch follows the active tab', () => {
     }
     const m = await mount(WorkBuddyCard, { t, settingsScope: staleScope, view: 'page' })
     await m.settle()
-    expect(m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-credits-switch input')?.checked).toBe(true)
+    expect(m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-pref-check')?.checked).toBe(true)
 
-    await m.click(m.container.querySelector('.dsm-workbuddy-credits-switch input') as Element)
+    await m.click(m.container.querySelector('.dsm-workbuddy-pref-check') as Element)
     await m.settle()
 
     // The write reached the host...
     expect(bodies).toHaveLength(1)
     expect((bodies[0].value as any).cn.showCreditsInMainUi).toBe(false)
     // ...and the control now reflects it, despite the stale mirror.
-    expect(m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-credits-switch input')?.checked).toBe(false)
+    expect(m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-pref-check')?.checked).toBe(false)
   })
 
   it('writes the ACTIVE region slot when toggled', async () => {
@@ -231,7 +238,7 @@ describe('card sidebar-credit switch follows the active tab', () => {
     // the international side. The save goes to the host endpoint (which merges
     // per region), so the contract to pin is the POSTED body.
     const { m, calls } = await render(usageOf('cn'), { regions: { cn: { showCreditsInMainUi: true } } })
-    const box = m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-credits-switch input')
+    const box = m.container.querySelector<HTMLInputElement>('.dsm-workbuddy-pref-check')
     expect(box).not.toBeNull()
     await m.click(box as Element)
     const save = calls.find(call => call.url.includes('__save'))
@@ -247,7 +254,7 @@ describe('card sidebar-credit switch follows the active tab', () => {
   })
 })
 
-describe('the switch shares the account-pool heading row', () => {
+describe('the readout renders as preference lines, not as the pool heading\'s extra', () => {
   /** A usage body that ALSO carries Host pool state, so the pool section renders. */
   function usageWithPool(region: string): Record<string, unknown> {
     return {
@@ -272,36 +279,78 @@ describe('the switch shares the account-pool heading row', () => {
     return m
   }
 
-  it('renders the switch INSIDE the pool heading, and not on a separate row', async () => {
-    // The whole point of the move: one checkbox no longer costs a full line.
-    // Asserted by ANCESTRY rather than by counting boxes, because a switch that
-    // rendered in BOTH places would pass a mere presence check while
-    // reintroducing the wasted line.
+  it('keeps the switch OUT of the account-pool heading', async () => {
+    // The regression this guards. The control used to be handed to AccountPool
+    // as `headerExtra` and rendered between 「账号池」 and the serving-account
+    // badge, so a control for one feature sat inside another feature's title —
+    // and its width shoved the badge off to the far right. Asserted by ANCESTRY:
+    // a presence check would pass just as happily with the control back in there.
     const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
     const head = m.container.querySelector('.dsm-workbuddy-pool-head')
     expect(head).not.toBeNull()
-    expect(head?.querySelector('.dsm-workbuddy-credits-switch')).not.toBeNull()
-    // The standalone fallback row must NOT also be present.
-    expect(m.container.querySelector('.dsm-workbuddy-credits-switch-row')).toBeNull()
-    // Still exactly one switch overall.
+    expect(head?.querySelector('.dsm-workbuddy-prefs')).toBeNull()
+    expect(head?.querySelector('.dsm-workbuddy-pref')).toBeNull()
+  })
+
+  it('renders the preference lines above the account pool', async () => {
+    const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
+    const prefs = m.container.querySelector('.dsm-workbuddy-prefs')
+    expect(prefs).not.toBeNull()
+    // The readout is a display preference, so it belongs with the general
+    // settings above the account tables, not after them.
+    const pool = m.container.querySelector('.dsm-workbuddy-pool-head')
+    if (pool === null) throw new Error('pool head missing')
+    if (prefs === null) throw new Error('prefs block missing')
+    expect(prefs.compareDocumentPosition(pool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Exactly one switch, never a second copy in a fallback site.
     expect(creditSwitches(m.container)).toHaveLength(1)
   })
 
-  it('falls back to its own row when the pool section does not render', async () => {
-    // `AccountPool` returns null without Host pool state. The switch must survive
-    // that: handing it to a section that renders nothing would silently remove a
-    // settings control from every Host that reports no pool.
+  it('renders the same lines when the pool section does not render', async () => {
+    // The old `headerExtra` slot had a real hole: AccountPool returns null
+    // without Host pool state, and the switch went with it — so on an older Host
+    // the readout could not be switched on at all. The lines are rendered by the
+    // CARD now, so both Hosts get the identical control.
     const { m } = await render(usageOf('cn'), { regions: { cn: {} } })
     expect(m.container.querySelector('.dsm-workbuddy-pool-head')).toBeNull()
-    expect(m.container.querySelector('.dsm-workbuddy-credits-switch-row')).not.toBeNull()
+    const prefs = m.container.querySelector('.dsm-workbuddy-prefs')
+    expect(prefs).not.toBeNull()
+    expect(prefs?.querySelector('.dsm-workbuddy-pref-check')).not.toBeNull()
     expect(creditSwitches(m.container)).toHaveLength(1)
   })
 
-  it('keeps the region-specific label now that the tab bar is not adjacent', async () => {
-    // Before the move the label sat right under the tab bar; now it shares a row
-    // with "account pool", so it has to name its own scope. Two identical labels
-    // would make the CN and international switches indistinguishable in a card
-    // where both exist.
+  it('gives each line its own explanation, and no heading above them', async () => {
+    // Two lines, two explanations: the switch's says what the readout IS, the
+    // picker's says what "where" means. Running either into a single wrapped
+    // blob is what makes the pair read as a wall of text.
+    //
+    // No heading: these switches describe THIS tab, so they hang off the tab
+    // block the way the reference card's preferences do. A 「积分」 heading one
+    // line under the tab hint would name the same thing twice.
+    const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
+    const hints = Array.from(m.container.querySelectorAll('.dsm-workbuddy-pref-hint'))
+      .map(node => node.textContent)
+    expect(hints).toContain('row.showCreditsHintInline')
+    expect(hints).toContain('row.creditPositionHintInline')
+    expect(m.container.querySelector('.dsm-workbuddy-prefs h3')).toBeNull()
+  })
+
+  it('indents the picker line so it reads as a child of the switch', async () => {
+    // The picker has no checkbox of its own, so it borrows that column as
+    // padding: its label must start on the same left edge as the two labels
+    // above it. An unindented row reads as a third, unrelated setting.
+    const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
+    const pickerRow = m.container.querySelector('.dsm-workbuddy-pref-indent')
+    expect(pickerRow).not.toBeNull()
+    expect(pickerRow?.querySelector('.dsm-workbuddy-credit-position')).not.toBeNull()
+    // The control sits BESIDE its label, not at the row's far edge: one
+    // sentence, not a label facing a control across the card.
+    expect(pickerRow?.querySelector('.dsm-workbuddy-pref-lead .dsm-workbuddy-pref-label')).not.toBeNull()
+  })
+
+  it('keeps the region-specific label', async () => {
+    // Two identical labels would make the CN and international switches
+    // indistinguishable in a card where both exist, so each names its region.
     const cn = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
     expect(creditSwitches(cn.container)[0]?.label).toBe('row.showCreditsCn')
   })

@@ -316,16 +316,28 @@ export const en = {
   'row.poolRowRemoved': '{accountName}: hidden from the list. 「Detect accounts again」 re-adds it; the desktop app stays signed in.',
   'row.poolRowRemoving': 'Removing the account…',
   'row.poolRowRemoveDesktopOnly': '{accountName}: hidden from the list — this account comes from the desktop app\'s own sign-in, which is left untouched. 「Detect accounts again」 re-adds it.',
-  'row.showCreditsCn': 'WB CN credits in composer',
-  'row.showCreditsGlobal': 'WB AI credits in composer',
+  'row.showCreditsCn': 'Show credits in the composer toolbar',
+  'row.showCreditsGlobal': 'Show credits in the composer toolbar',
   'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
   // WHERE the readout sits (issue #62). The composer row is a LIST seat shared
   // with any other plugin that registers there — one report is the readout
   // disappearing once another plugin was installed — so the seat is a choice.
-  'row.creditPositionLabel': 'position',
+  'row.creditPositionLabel': 'Position',
   'row.creditPositionComposer': 'composer toolbar',
   'row.creditPositionStats': 'below the input box',
   'row.creditPositionAria': 'Credit readout position for {region}',
+  // The subordinate control's own explanation, ALWAYS visible: it answers "why
+  // is there a picker here at all" rather than restating the option names.
+  // Restating them belongs to the disabled state only — see
+  // creditPositionDisabledHint. Both are deliberately short: they are the
+  // second and third text tiers under the switch's title, and a longer line
+  // would push the switch itself into second place.
+  'row.creditPositionHintInline': 'Where the readout sits. "composer toolbar" is the default — the row with the model picker.',
+  'row.creditPositionDisabledHint': 'Unavailable while the switch above is off: tick "Show credits in the composer toolbar" first.',
+  // The row's explanation: what the readout IS. Kept distinct from
+  // creditPositionHintInline, which explains the picker beside it — one
+  // sentence per control.
+  'row.showCreditsHintInline': 'The balance for the account currently serving this tab. Click for per-account balances; it also refreshes every 5 minutes.',
   // The supplement to a quota failure (issue #63), rendered as an INLINE
   // PARENTHETICAL in the conversation — one short clause, no dialog, no button.
   // The plugin no longer claims the `shell.quota-notice` chain seat, so this is
@@ -649,16 +661,25 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolRowRemoved': '{accountName}：已从列表中隐藏。点「重新检测账号」会重新加入，桌面 App 的登录不受影响。',
   'row.poolRowRemoving': '正在删除账号…',
   'row.poolRowRemoveDesktopOnly': '{accountName}：已从列表中隐藏——这个账号来自桌面 App 自己的登录，该登录未被改动。点「重新检测账号」会重新加入。',
-  'row.showCreditsCn': '对话框显示 WB CN 积分',
-  'row.showCreditsGlobal': '对话框显示 WB AI 积分',
+  'row.showCreditsCn': '在输入框工具栏显示积分读数',
+  'row.showCreditsGlobal': '在输入框工具栏显示积分读数',
   'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
   // 积分显示在哪个位置（issue #62）。输入框工具栏是**共享**的 list 插槽，
   // 别的插件也注册在那里时本插件读数会消失（报告者遇到的就是这个），
   // 所以位置做成可选项。
-  'row.creditPositionLabel': '位置',
+  'row.creditPositionLabel': '显示位置',
   'row.creditPositionComposer': '输入框工具栏',
   'row.creditPositionStats': '输入框下方',
   'row.creditPositionAria': '{region} 的积分显示位置',
+  // 位置选择器的从属说明，**始终可见**：它解释的是「为什么这里还有个下拉框」，
+  // 而不是复述选项名称 —— 复述类说明只该在该行灰掉时出现，见
+  // creditPositionDisabledHint。两段文字都刻意短：它们是主开关标题下的
+  // 第二、三级文字，再长就会把主开关本身挤成次要信息。
+  'row.creditPositionHintInline': '读数显示在哪里。「输入框工具栏」是默认位置，与模型选择同一行。',
+  'row.creditPositionDisabledHint': '主开关关闭时不可调整：先勾选上方「在输入框工具栏显示积分读数」。',
+  // 这一行讲「读数是什么」；下面 creditPositionHintInline 讲「选位置是什么意思」。
+  // 一个控件一句说明。
+  'row.showCreditsHintInline': '当前为本 tab 服务的那个账号的余额。点一下能看各账号明细，另外每 5 分钟自动刷新一次。',
   // 额度失败的补充（issue #63），渲染成**对话里的行内括号**——一句短话，没有对话框、
   // 没有按钮。插件**不再**占用宿主的 `shell.quota-notice` 链座位，所以这句不再由本插件
   // 拼在宿主句子后面（那次占用才是把无样式 span 留在 overlay 左上角的原因）；宿主自己画

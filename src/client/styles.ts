@@ -38,33 +38,105 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-btn-primary{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}
 .dsm-btn-primary:hover:not(:disabled){opacity:.9}
 .dsm-workbuddy-usage{display:flex;flex-direction:column;gap:16px;margin:0;padding:16px 0 4px}
-.dsm-workbuddy-tabs{display:flex;gap:6px;padding:4px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#2a2c33)}
-.dsm-workbuddy-tab{appearance:none;font:inherit;cursor:pointer;flex:1;border:0;border-radius:7px;padding:7px 10px;color:var(--dsw-alias-label-tertiary,#999);font-size:13px;font-weight:500;line-height:18px;background:transparent;transition:color .15s,background .15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The provider bar: one CARD per region, side by side.
+ *
+ * COPIED FROM dsh-connect-trae, rule for rule, because an approximation of it
+ * read as a different component. An earlier revision marked the selected card
+ * with 1px border PLUS an inset 1.5px hairline in the contrast colour, and
+ * that is 2.5 CSS px of near-black on a 2x display — five device pixels of
+ * frame against the reference's one. What the reference does instead:
+ *
+ *   - selected = the accent COLOUR on the same 1px border, plus a slightly
+ *     darker fill. The LIGHTNESS carries the state, not the thickness.
+ *   - the switch is separated from the label by a hairline RULE inside the
+ *     card (border-left in border-l1), not by dead space. That rule is what
+ *     makes the switch read as a second control in the same box rather than
+ *     as a floating square at the card's right edge.
+ *   - the cell owns its padding (8px 12px) and the tab button has none, so
+ *     the label's text sits at a predictable inset no matter how the button's
+ *     focus ring draws.
+ *   - 10px corner radius, matching the reference's card shape.
+ *
+ * The row stays what it was semantically: role="tablist" with one button per
+ * region, and the checkbox inside each card is a SEPARATE control (switch this
+ * provider on/off) — never merged into the tab action. Both regions can be on
+ * at once, so this must not become a radio group just because the cards look
+ * like one.
+ *
+ * The checkbox is the PLATFORM'S OWN, styled only with accent-color — the
+ * same three declarations the reference card has, no more. An earlier revision
+ * drew it here (appearance:none, 15px square, 3px radius, a tick made of two
+ * rotated borders) on the theory that pinning the geometry would match the
+ * reference across platforms. It did not: the reference does not draw it, so
+ * the drawn box was a second, invented control sitting in the same row as the
+ * real one. Measured against the screenshot, its box is 26 device px on a 2x
+ * display — 13 CSS px, which is the engine's own default size, not a number
+ * anyone wrote down.
+ *
+ * accent-color hands size, radius and tick glyph to the platform. That is the
+ * point: the box then follows the reader's OS and theme, which is what makes
+ * it read as a checkbox rather than as a painted square. */
+.dsm-workbuddy-tabs{display:flex;gap:8px;align-items:stretch}
+.dsm-workbuddy-tab-cell{display:flex;align-items:center;gap:4px;flex:1;min-width:0;padding:8px 12px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#2a2c33);transition:border-color .15s,background .15s}
+.dsm-workbuddy-tab-cell:hover{border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-tab-cell:has(.dsm-workbuddy-tab-active){border-color:var(--dsw-alias-brand-primary,#5686fe);background:var(--dsw-alias-bg-layer-2,#232529)}
+.dsm-workbuddy-tab{appearance:none;font:inherit;cursor:pointer;flex:1;min-width:0;border:0;border-radius:7px;padding:0;color:var(--dsw-alias-label-tertiary,#999);font-size:13px;font-weight:600;line-height:20px;text-align:left;background:transparent;transition:color .15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dsm-workbuddy-tab:hover:not(:disabled):not(.dsm-workbuddy-tab-active){color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
-.dsm-workbuddy-tab-active{color:var(--dsw-alias-label-primary,#e6e6e6);background:var(--dsw-alias-bg-layer-2,#232529);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2,#3a3d45)}
-.dsm-workbuddy-tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:baseline}
-.dsm-workbuddy-tab-cell{display:flex;align-items:center;gap:2px;flex:1;min-width:0}
-.dsm-workbuddy-tab-switch{display:inline-flex;align-items:center;flex:none;padding:0 8px 0 2px;cursor:pointer}
+.dsm-workbuddy-tab-active{color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:baseline}
+/* The hairline rule between the label and the switch. The auto left margin is
+   what pushes the switch to the card's right edge; without it the rule would
+   sit tight against the text. */
+.dsm-workbuddy-tab-switch{display:inline-flex;align-items:center;flex:none;margin-left:auto;padding-left:10px;border-left:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));cursor:pointer}
 .dsm-workbuddy-tab-switch input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
-.dsm-workbuddy-tab-switch input:disabled{opacity:.4;cursor:default}
-/* One sidebar-credit switch, belonging to the ACTIVE tab's region. It rides in
-   the account-pool heading row (dsm-workbuddy-pool-head-extra) so one
-   checkbox no longer costs a full line of vertical space; the tab bar already
-   says which region is in scope, so it still reads as this tab's property
-   rather than as a shared pair of settings. No vertical margin: the heading row
-   owns the spacing. */
-.dsm-workbuddy-credits-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
-/* The standalone fallback site: used only when the account-pool section did not
-   render (no Host pool state), so there is no heading row to share. This is the
-   spacing the control carried before it moved beside that heading. */
-.dsm-workbuddy-credits-switch-row{display:flex;align-items:center;margin:8px 0 2px}
-/* The credit readout's seat picker (issue #62). Narrower than the pool's model
-   select so the show/hide box and this control share one heading row, and it
-   wraps onto its own line rather than squashing the pool title. */
-/* Its OWN label class, deliberately not the switch's: a query for "the
-   sidebar-credit switch" must not be able to pick this control up, and the two
-   are different widgets (a checkbox and a two-way picker). */
+.dsm-workbuddy-tab-switch input:disabled{cursor:default}
+/* PREFERENCE LINES: a checkbox on a line that commits on the click, packed from
+   the LEFT — the shape the reference card uses for this exact block.
+ *
+ * They belong to the TAB block above and carry no heading of their own, because
+ * both switches describe THIS tab. Earlier revisions gave them a headed section,
+ * which meant a second 「积分」 heading one line under the tab hint; the reference
+ * card never had one either.
+ *
+ * The picker used to sit at the row's far edge, pushed there by
+ * justify-content:space-between. That split one sentence into two objects with
+ * half a card of empty space between them, and left the reader to guess which
+ * label the control belonged to. Here nothing in a row stretches: the words ask
+ * the question and the control answers right beside them.
+ *
+ * align-items:flex-start, not center: the hint wraps to two lines at narrow
+ * widths, and centring would float the checkbox against the middle of it.
+ *
+ * No horizontal inset: the reference card pads this block by the same 2px its
+ * tab hint carries, so box and caption share one left edge. THIS card's tab hint
+ * (the dsm-workbuddy-models-summary class) has no side padding, so copying the
+ * reference's 2px would leave the two edges 2px apart — a difference too small
+ * to name and just big enough to look unaligned. */
+.dsm-workbuddy-prefs{display:flex;flex-direction:column;gap:14px;padding:2px 0 0}
+.dsm-workbuddy-pref{display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0);cursor:pointer}
+/* The platform's own checkbox, themed only with accent-color. A hand-drawn box
+   was tried on this card and reverted: brand-primary resolves to the host's
+   CONTRAST colour, so a ticked box painted itself as a heavy black pill — the
+   loudest object in a section made of plain 13px text. */
+.dsm-workbuddy-pref input{flex:none;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-workbuddy-pref-check{inline-size:15px;block-size:15px;margin:3px 0 0}
+.dsm-workbuddy-pref input:disabled{cursor:default}
+.dsm-workbuddy-pref:has(input:disabled){opacity:.6;cursor:default}
+/* The NAME and what it does are TWO lines, not one wrapped blob: first what the
+   switch does, then what it means. Running them together is what made this
+   block read as a wall of text. */
+.dsm-workbuddy-pref-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dsm-workbuddy-pref-label{font-weight:500;color:var(--dsw-alias-label-primary,#e6e6e6)}
+/* The picker's own line: indented by the checkbox's width plus the row gap
+   (15px + 10px), so its label starts on the same left edge as the checkbox
+   labels above it rather than under their boxes. */
+.dsm-workbuddy-pref-indent{padding-left:25px}
+/* Name then control, packed left — 显示位置 [输入框工具栏] — so the row reads as
+   one sentence instead of a text column facing a control column. */
+.dsm-workbuddy-pref-lead{display:flex;align-items:center;justify-content:flex-start;gap:10px;min-width:0}
+.dsm-workbuddy-pref-lead .dsm-workbuddy-pref-label{flex:none}
+.dsm-workbuddy-pref-hint{color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:17px}
 /* The supplement to the host's fixed quota sentence (issue #63). The plugin no
    longer claims the host's shell.quota-notice chain seat, so this no longer
    paints into shell.overlay — that seat is the reason the previous build's
@@ -75,11 +147,34 @@ export const WORKBUDDY_CARD_CSS = `
    The body is one step quieter than the text it follows. */
 .dsm-workbuddy-quota-notice{display:inline}
 .dsm-workbuddy-quota-notice-body{color:var(--dsw-alias-label-tertiary,#8b8f98);font-size:12px}
-.dsm-workbuddy-credit-position-switch{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
-.dsm-workbuddy-credit-position{max-width:150px;padding:2px 6px;font-size:12px}
-.dsm-workbuddy-credits-switch-row .dsm-workbuddy-credit-position-switch{margin-left:12px}
-.dsm-workbuddy-credits-switch input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
-.dsm-workbuddy-credits-switch input:disabled{opacity:.4;cursor:default}
+/* The seat picker is the PLATFORM's select, sized by its own two options rather
+ * than stretched: the control answers one short question and sits beside the
+ * words that ask it.
+ *
+ * This was drawn by hand for one revision — appearance:none, a layer-2 panel and
+ * a chevron built from two rotated gradients — copying a reference screenshot's
+ * white field. That does not survive the trip: the screenshot was a LIGHT
+ * settings page, this card is dark, and the drawn field ended up the only
+ * element here with its own fill, border and arrow, so it read as a form control
+ * pasted into a paragraph. The reference card's own dark build uses the native
+ * control with a hairline border, which is what this rule is.
+ *
+ * Sized by content, not by a min-width: it used to carry min-width:132px so it
+ * could share a heading row with the account badge, and that floor is now the
+ * reason a two-word option would still leave a gap after the word it answers. */
+.dsm-workbuddy-credit-position{flex:none;max-width:none;margin-top:0;padding:3px 8px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:7px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-primary,#e6e6e6);font:inherit;font-size:12px;line-height:16px;cursor:pointer}
+.dsm-workbuddy-credit-position:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-credit-position:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-credit-position:disabled{opacity:.5;cursor:default}
+/* A card whose provider is switched OFF dims its LABEL AND DOT. The checkbox
+ * beside them must stay at full strength, because that checkbox is the only
+ * way to switch the region back on — dimming it would grey out the control
+ * that fixes the state it is reporting. Its own disabled rule still dims it
+ * when writes are unavailable, which is a different condition and reads as a
+ * different thing.
+ *
+ * That is also what the reference card does: it marks the off state on the
+ * tab button and leaves the switch live. */
 .dsm-workbuddy-tab-off{opacity:.55}
 /* Re-detection keeps a copy in the signed-out branch (that branch is where
    "I just signed in over there" applies), so it needs its own placement: the
@@ -178,14 +273,19 @@ export const WORKBUDDY_CARD_CSS = `
 
 /* ---- Account pool ---- */
 .dsm-workbuddy-pool{display:flex;flex-direction:column;gap:12px;margin:0;padding:16px 0 4px;border-top:1px solid var(--dsw-alias-border-l2,#36373b)}
-/* Title, then the inline extra (the sidebar-credit switch), then the
-   serving-account badge on the far edge. The badge is pushed right with
-   margin-left:auto rather than the row using space-between: with three
-   children the latter would strand the switch in the middle instead of binding
-   it to the title, and with only two (no switch) margin-left:auto keeps the
-   badge on the right edge exactly as before. */
+/* The block's heading: title on the left, serving-account badge on the right.
+ *
+ * It used to hold a THIRD child — the credit-readout switch, slotted in between
+ * the title and the badge by the card. A control that configures something else
+ * spent several revisions sitting inside this block's title, and it forced the
+ * row onto a shared baseline with a picker whose width shoved the badge to the
+ * far edge. The switch now has its own section above; what is left is the one
+ * thing that is genuinely this block's title row.
+ *
+ * The badge is pushed right with margin-left:auto rather than the row using
+ * space-between, so it stays on the right edge even if a future change adds a
+ * child or removes one. */
 .dsm-workbuddy-pool-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.dsm-workbuddy-pool-head-extra{display:inline-flex;align-items:center}
 .dsm-workbuddy-pool-current-badge{margin-left:auto;padding:2px 10px;border-radius:999px;background:rgba(86,134,254,.16);color:var(--dsw-alias-brand-primary,#5686fe);font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
 /* Sits under the header block, before the batch buttons: account discovery is
    the first step of using the pool, so it reads above the actions it enables. */

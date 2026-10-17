@@ -1185,58 +1185,6 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   )
 
   /**
-   * Sidebar credit line switch — ONE control, for the ACTIVE tab's region only.
-   *
-   * The two regions are independent providers with independent accounts, so
-   * each tab owns its own switch and they are never shown as a pair: this one
-   * writes `regions.<activeRegion>.showCreditsInMainUi`, which decides only
-   * whether THAT region's line appears in the sidebar. That matches how every
-   * other control in this card is scoped to the selected tab (account, pool,
-   * model list), and it means a CN-only user is never shown a switch for an
-   * account they do not have. An earlier revision rendered both boxes side by
-   * side under the tab bar regardless of the active tab; that read as one
-   * shared setting and was replaced.
-   *
-   * RENDERED BESIDE THE POOL HEADING, not on its own row. It used to occupy a
-   * full line of vertical space for a single checkbox; the pool heading already
-   * had a title-left / badge-right row, so the control fits there without the
-   * block growing. It is handed to `AccountPool` as a ready-made node purely so
-   * the two can share a flex row — the write path, the disabled rules and the
-   * serialization against the card's other region writers all stay here, where
-   * the settings scope and the save state live.
-   */
-  const creditsSwitch = (
-    <label
-      className="dsm-workbuddy-credits-switch"
-      title={activeRegion === 'cn' ? t('row.showCreditsCnHint') : t('row.showCreditsGlobalHint')}
-    >
-      <input
-        type="checkbox"
-        /* A region that is NOT switched on has no credits to show, so the
-           control renders OFF rather than reporting a stored flag the user
-           cannot act on: the value is forced to `false` instead of read, and
-           the box is disabled below.
-
-           This is not cosmetic. The line fetches that region's usage, and a
-           withdrawn provider makes every one of those requests fail — leaving
-           the sidebar with a permanently failing row beside a checkbox claiming
-           the line is on. Reading the stored flag would also lie in the other
-           direction: `showCreditsInMainUi` defaults to true, so a region the
-           user never configured would read as ON while its provider is off. */
-        checked={activeRegionOn ? creditsShownOn(activeRegion) : false}
-        /* Serialized against the SAVE writers for the same reason the provider
-           on/off box is: all of them write the SAME region slot, and a toggle
-           carrying a stale snapshot could roll back a concurrent save.
-           Disabled outright while the region is off — there is nothing to show
-           until it is switched on. */
-        disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
-        onChange={(event) => { void toggleCredits(activeRegion, event.target.checked) }}
-      />
-      <span>{activeRegion === 'cn' ? t('row.showCreditsCn') : t('row.showCreditsGlobal')}</span>
-    </label>
-  )
-
-  /**
    * WHERE the readout sits — a two-way choice, active tab's region only
    * (issue #62).
    *
@@ -1244,31 +1192,115 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * question together ("show it, and where"), and because a user only reaches
    * for this when the default seat is unavailable — typically after installing
    * another plugin that occupies the composer row. Rendered as a `<select>`
-   * rather than a pair of radios so it stays one compact row on the pool
-   * heading, matching the switch beside it.
+   * rather than a pair of radios so it stays one compact row.
+   *
+   * LABEL LEFT, CONTROL RIGHT — the reverse of the first draft, which put the
+   * select first. Under an always-visible caption the label is what the eye
+   * scans for ("显示位置"), so it leads and the value follows; leading with the
+   * control made it read as a second checkbox whose box happened to be a
+   * dropdown. It also matches the reference settings screen, where the option
+   * name sits left of its picker.
    *
    * Disabled with the region, exactly like the switch: a region that is off has
    * no readout to place.
    */
   const creditPositionPicker = (
-    <label
-      className="dsm-workbuddy-credit-position-switch"
-      title={t('row.creditPositionHint')}
+    <select
+      className="dsm-workbuddy-credit-position"
+      value={activeRegionOn ? creditPositionOn(activeRegion) : 'composer'}
+      disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+      aria-label={t('row.creditPositionAria', { region: activeRegion === 'cn' ? t('row.tabCn') : t('row.tabGlobal') })}
+      onChange={(event: { currentTarget: { value: string } }) => {
+        void changeCreditPosition(activeRegion, event.currentTarget.value === 'stats' ? 'stats' : 'composer')
+      }}
     >
-      <select
-        className="dsm-workbuddy-pool-select dsm-workbuddy-credit-position"
-        value={activeRegionOn ? creditPositionOn(activeRegion) : 'composer'}
-        disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
-        aria-label={t('row.creditPositionAria', { region: activeRegion === 'cn' ? t('row.tabCn') : t('row.tabGlobal') })}
-        onChange={(event: { currentTarget: { value: string } }) => {
-          void changeCreditPosition(activeRegion, event.currentTarget.value === 'stats' ? 'stats' : 'composer')
-        }}
+      <option value="composer">{t('row.creditPositionComposer')}</option>
+      <option value="stats">{t('row.creditPositionStats')}</option>
+    </select>
+  )
+
+  /*
+   * The caption under the picker, ALWAYS visible regardless of whether the
+   * picker can be used.
+   *
+   * It states what the setting MEANS, not what its options say — the reference
+   * card's caption works the same way, and it is the copy that makes the
+   * indented control legible as a child of the switch rather than as a stray
+   * row. Restating the option names only when the control is greyed out is what
+   * the DISABLED caption below does; folding both duties into one string is why
+   * an always-visible line would either repeat the options pointlessly or leave
+   * a dead picker unexplained.
+   */
+  const creditPositionCaption = t('row.creditPositionHintInline')
+
+  /* Shown only when the picker is inert. It names the CAUSE (the switch above)
+     and the FIX, which the generic caption deliberately does not. */
+  const creditPositionDisabledCaption = t('row.creditPositionDisabledHint')
+
+  /*
+   * THE CREDIT READOUT, AS TWO PREFERENCE LINES.
+   *
+   * This block has been in three places on this card. It started as two boxes
+   * side by side under the tab bar, which read as ONE shared setting rather than
+   * as this tab's; that moved it into the ACCOUNT POOL's heading row as
+   * `headerExtra`, where it shared a baseline with 「账号池」 and the
+   * serving-account badge; that became a section with its own heading, whose
+   * far-right control column split one sentence into two objects with half a
+   * card of empty space between them.
+   *
+   * The reference card settles it: a preference is a checkbox on a line that
+   * commits on the click, the explanation sits UNDER its label (two lines, not
+   * one wrapped blob), and the picker that belongs to a switch is indented to
+   * that switch's label and sits beside the words that ask for it. No heading,
+   * no control column, nothing stretched to an edge. That is what this is.
+   *
+   * It renders OUTSIDE AccountPool (below), not through `headerExtra`, so it
+   * survives a Host that reports no pool state instead of vanishing with the
+   * section that happened to carry it.
+   */
+  const creditPreferences = (
+    <div className="dsm-workbuddy-prefs">
+      <label
+        className="dsm-workbuddy-pref"
+        title={activeRegion === 'cn' ? t('row.showCreditsCnHint') : t('row.showCreditsGlobalHint')}
       >
-        <option value="composer">{t('row.creditPositionComposer')}</option>
-        <option value="stats">{t('row.creditPositionStats')}</option>
-      </select>
-      <span>{t('row.creditPositionLabel')}</span>
-    </label>
+        <input
+          type="checkbox"
+          className="dsm-workbuddy-pref-check"
+          /* Same two rules as the first draft — the flag is forced OFF for a
+             region that is off, and every writer of that region slot is
+             serialized — kept HERE because this row owns the write. */
+          checked={activeRegionOn ? creditsShownOn(activeRegion) : false}
+          disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+          onChange={(event: { target: { checked: boolean } }) => {
+            void toggleCredits(activeRegion, event.target.checked)
+          }}
+        />
+        <span className="dsm-workbuddy-pref-copy">
+          <span className="dsm-workbuddy-pref-label">
+            {activeRegion === 'cn' ? t('row.showCreditsCn') : t('row.showCreditsGlobal')}
+          </span>
+          <span className="dsm-workbuddy-pref-hint">{t('row.showCreditsHintInline')}</span>
+        </span>
+      </label>
+      {/* Indented to the checkbox's LABEL (15px box + 10px row gap), not to the
+          card edge: the picker is a property of the switch above it, and an
+          unindented row would read as a third, unrelated setting. */}
+      <label
+        className="dsm-workbuddy-pref dsm-workbuddy-pref-indent"
+        title={t('row.creditPositionHint')}
+      >
+        <span className="dsm-workbuddy-pref-copy">
+          <span className="dsm-workbuddy-pref-lead">
+            <span className="dsm-workbuddy-pref-label">{t('row.creditPositionLabel')}</span>
+            {creditPositionPicker}
+          </span>
+          <span className="dsm-workbuddy-pref-hint">
+            {activeRegionOn ? creditPositionCaption : creditPositionDisabledCaption}
+          </span>
+        </span>
+      </label>
+    </div>
   )
 
   return (
@@ -1341,6 +1373,28 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
               {!activeRegionOn
                 ? <p className="dsm-workbuddy-tab-off-notice">{t('row.tabOffNotice')}</p>
                 : null}
+              {/* The credit readout, as bare preference lines right under
+                  the tab block — the reference card's shape, and the right one
+                  here too: both switches describe THIS tab, so they belong to
+                  the tab block rather than to a section of their own with a
+                  heading that repeats 「积分」.
+
+                  This block has been in three places. Two boxes side by side
+                  under the tab bar read as ONE shared setting rather than as
+                  this tab's. Moving it into AccountPool as `headerExtra` put it
+                  on a baseline with 「账号池」 and the serving-account badge, and
+                  the picker — the widest of the three — pushed the badge to the
+                  far right where it read as the picker's label. Giving it its
+                  own headed section fixed the placement but then split each
+                  sentence into a label at the left edge and a control at the
+                  right edge.
+
+                  Rendering it here, outside AccountPool, also fixes a real
+                  hole: AccountPool returns null without Host pool state, and
+                  the switch went with it — so on an older Host the user could
+                  not turn the readout on at all, and the only cue was a missing
+                  line. */}
+              {creditPreferences}
               {/* The signed-in status card is GONE: the account name and the
                   token expiry were both information the rest of the card already
                   carries, and this line was actively the wrong place for it.
@@ -1439,23 +1493,6 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       onSelectAccount={(accountId) => { void switchAccount(accountId) }}
                       selectingAccount={switchingAccount}
                       accountTools={accountTools}
-                      // The sidebar-credit switch rides in the pool's heading row
-                      // so it costs no vertical space; see `creditsSwitch`.
-                      //
-                      // Only passed when this section will actually RENDER one:
-                      // `AccountPool` returns null without Host pool state, and a
-                      // switch handed to it would vanish with it — silently
-                      // removing a settings control on every Host that reports no
-                      // pool. The `status.pool === undefined` branch below renders
-                      // the same node on its own line instead, so exactly one of
-                      // the two sites is live.
-                      //
-                      // Deliberately NOT gated on `activeRegionOn`: a region that
-                      // is switched off must still SHOW the switch, rendered
-                      // disabled, or the user cannot see why the line is missing
-                      // (and the card's own off-notice points at the provider box
-                      // rather than at a control that vanished).
-                      {...status.pool === undefined ? {} : { headerExtra: <>{creditsSwitch}{creditPositionPicker}</> }}
                       siblingBusy={saving || togglingRegion !== undefined}
                       onBusyChange={setPoolBusy}
                       // Returns the promise so the pool section can AWAIT the
@@ -1475,19 +1512,6 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       // (see the `onRefresh` prop note in AccountPool).
                       onRefresh={() => refreshUsage(activeRegion)}
                     />
-                    {/* The switch's OTHER site, and the reason it is not simply
-                        always inside the pool: `AccountPool` renders nothing
-                        without Host pool state (an older Host, or any profile
-                        whose route omits it), and a control handed to a section
-                        that returns null disappears with it. Exactly one of the
-                        two sites is live, so the switch is always reachable.
-
-                        A standalone row rather than the heading row here,
-                        because there is no heading to share: this branch has no
-                        "account pool" title at all. */}
-                    {status.pool === undefined
-                      ? <div className="dsm-workbuddy-credits-switch-row">{creditsSwitch}{creditPositionPicker}</div>
-                      : null}
 
                     <section className="dsm-workbuddy-models" aria-label={t('row.modelsTitle')}>
                       {/* The model list no longer folds. It used to be a native
