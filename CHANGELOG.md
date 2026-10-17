@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.8.0 (2026-10-18)
+
+> 版本号是 **minor**：这不是只改内部的 patch —— 它**会改动会话历史**。跨区/跨窗口切换后原本必然卡死的那一类会话，本版能把上下文折回去继续用。没有溢出时行为完全不变。
+
+### Fixes
+
+- **切到窗口更小的路由后，会话永久卡在 `400 code 11115 prompt is too long`（#59 后半）**
+  - **症状**：会话在一个 1M 窗口的模型上跑得很长，切成国际区（`workbuddy-global`，窗口 1,048,576）后，**每一条**请求都返回 `prompt is too long: 1374460 tokens > 1048576 maximum`。换回原区域能用，再切过去还是卡死；手动压缩同样 400。会话实质报废。
+  - **根因（宿主侧，两处叠加）**：
+    1. **压力阈值按「当前模型」窗口现算**，`compaction-basic/src/config.ts:188-192` 的 `thresholdTokens = min(contextWindow × thresholdRatio, messageBudgetTokens)`。1M 窗口下阈值是 800,000，而 707,801 未到 —— 会话在**切区那一刻就已经超了新模型的窗口**，可自动压缩的触发点还在旧模型的尺度上，永远等不到。
+    2. **溢出兜底把整段历史塞进一次摘要请求**，`compaction-basic/src/index.ts:299` 的 `selectCompactableRange(session, measurement, 0)` 保留量为 0 → `region.ts:150-154` 选出「除最后一条外的全部历史」；`summarizer.ts:141-151` 又把这份摘要发给**当前那条小窗口路由**。于是救援请求和它要救援的请求一样溢出 —— 死锁。
+    宿主侧已按 deepseek-ai/deepseek-harness#9814 提交，上面两处即该 issue 的 A、B 两点。
+  - **本版做的事**：适配器在溢出错误**仍然持有 session id** 的那一刻接手，用宿主**自己的**压缩事务（`ctx.compaction.compactRegion`）把历史折回去，而不是另发一次摘要请求。
+    - 分块上限 = 模型窗口的 **35%**，因此摘要请求本身**按构造**一定装得下（宿主默认那一次是 131%）。
+    - 折叠目标是窗口的 **60%**，逐块折叠直到低于目标；块边界来自宿主自己的 `tokenMeter`。
+    - **绝不折掉当前请求携带的那条消息**（`nodes.at(-1)` 永远保留）。
+    - 宿主拒绝某个区间（切断了 tool call 与 result 的配对、或正有压缩在跑）时，把尾边向内收一格重试；仍是拒绝就放弃，绝不空转。
+    - 折完仍降不下去（单条消息本身就超过窗口）时立刻停手 —— 这是结构性问题，重试只会烧掉重试预算。
+  - **实测（真实 GL 400 载荷）**：`isContextOverflow` 对 `prompt is too long: 1374460 tokens > 1048576 maximum` 与 `{"code":11115,...,"type":"CONTEXT_WINDOW_EXCEEDED"}` 均判定为真，对 `rate limit exceeded` 判定为假 —— 只在真溢出时动手。
+  - **降级路径**：宿主没装压缩包（`compaction` 服务不存在）、或请求没带 `sessionId`（非主循环调用）时，适配器原样返回，行为与本版之前**逐字节相同**。
+
+### 已知未修
+
+- **跨区 prompt token 计数漂移**（#59 前半）：同一份 3.6 MB 请求体，CN 计 642,800、GL 计 447,306。这不是网关数错 —— 历史里的 thinking 块按上游当初实际返回的字段名（`reasoning` / `reasoning_content`）原样回放（宿主 `pi-ai` 0.85.1 `openai-completions.js:428` → `:1006`），同一批字节因此落进不同计费桶。归属宿主，本插件没有改写历史的权限，详见 #59 与 `src/body-report.ts` 头部说明。
+
 ## 4.7.0 (2026-10-17)
 
 > 版本号是 **minor**：这不是只改内部的 patch —— 它**改变了发往上游的请求体**。DSH Desktop 0.2.1-rc.1 随包 pi-ai 1.1.0，本版修的是该组合下「请求静默丢掉 system prompt 与全部工具声明」。若你停留在更早的宿主，行为不变。

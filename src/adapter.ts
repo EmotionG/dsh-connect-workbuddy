@@ -16,8 +16,8 @@
  * @module dsh-connect-workbuddy/adapter
  */
 
-import { createProvider } from '@earendil-works/pi-ai'
-import type { Api, AuthContext, Context, CredentialStore, Message, Model, Provider, ProviderStreams } from '@earendil-works/pi-ai'
+import { createAssistantMessageEventStream, createProvider, isContextOverflow } from '@earendil-works/pi-ai'
+import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AuthContext, Context, CredentialStore, Message, Model, Provider, ProviderStreams } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -30,6 +30,7 @@ import { WORKBUDDY_FALLBACK_SYSTEM_PROMPT } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { piAiRuntimeInfo } from './pi-ai-runtime.ts'
 import type { PiAiGeneration } from './pi-ai-runtime.ts'
+import type { ContextRescue } from './context-rescue.ts'
 
 /** Provider route this bundle owns for the domestic (CN) gateway. */
 export const WORKBUDDY_PROVIDER = 'workbuddy'
@@ -106,6 +107,12 @@ export interface WorkBuddyAdapterOptions {
   displayName?: string
   /** Resolve the durable attachment service at request time, when present. */
   resolveAttachments?: () => AttachmentStore | undefined
+  /**
+   * Resolve the host-side context-overflow rescue, when this host exposes one.
+   * Omitted (or resolving to `undefined`) leaves the adapter exactly as it was:
+   * a provider overflow is forwarded and the host's own recovery decides.
+   */
+  resolveContextRescue?: () => ContextRescue | undefined
   /**
    * Override the pi-ai generation gate (see {@link piAiRuntimeInfo}); tests
    * inject both branches because this checkout only ever RESOLVES one of
@@ -488,6 +495,64 @@ function withLegacyContext(api: ProviderStreams, generation: PiAiGeneration): Pr
 }
 
 /**
+ * Layer the host-side context-overflow rescue onto a provider's streams.
+ *
+ * pi-ai reports a provider failure as an `error` event rather than a throw, so
+ * the rescue runs while the failing assistant message is still in hand: history
+ * is folded before the event continues on its way, and the host's retry then
+ * rebuilds its request against a smaller surface. Nothing is swallowed — the
+ * error event is forwarded unchanged, because deciding whether to retry is the
+ * host's policy, not this transport's.
+ *
+ * Both gates are deliberate. Without `sessionId` there is no session to fold,
+ * and without a declared `contextWindow` there is no budget to fold against;
+ * either absence leaves the stream untouched.
+ */
+function withContextRescue(
+  api: ProviderStreams,
+  resolve: (() => ContextRescue | undefined) | undefined,
+): ProviderStreams {
+  if (resolve === undefined) return api
+
+  const wrap = <Options extends { sessionId?: string }>(
+    inner: (model: Model<Api>, context: Context, options?: Options) => AssistantMessageEventStream,
+  ) =>
+    (model: Model<Api>, context: Context, options?: Options): AssistantMessageEventStream => {
+      const source = inner(model, context, options)
+      const rescue = resolve()
+      const sessionId = options?.sessionId
+      const window = model.contextWindow
+      if (rescue === undefined || sessionId === undefined || window === undefined) return source
+
+      const out = createAssistantMessageEventStream()
+      let final: AssistantMessage | undefined
+      void (async () => {
+        try {
+          for await (const event of source) {
+            if (event.type === 'done') final = event.message
+            if (event.type === 'error') final = event.error
+            // Fold before the consumer settles: the error still reaches it, but
+            // the surface is already smaller when the host retries.
+            if (event.type === 'error' && isContextOverflow(event.error)) {
+              await rescue.rescue(sessionId, window)
+            }
+            out.push(event)
+          }
+          out.end(final)
+        } catch {
+          // Unreachable in practice: pi-ai converts every provider failure into
+          // an `error` event. Close the stream rather than leave a consumer
+          // waiting on an iterator that will never advance.
+          out.end(final)
+        }
+      })()
+      return out
+    }
+
+  return { ...api, stream: wrap(api.stream), streamSimple: wrap(api.streamSimple) }
+}
+
+/**
  * Assemble the adapter. The provider's `getModels` reads the live catalog,
  * and every model's `baseUrl` is re-resolved per read so the shim's
  * ephemeral port applies from the first snapshot after startup.
@@ -524,7 +589,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
       },
     },
     models: buildModels(),
-    api: withLegacyContext(openAICompletionsApi(), generation),
+    api: withContextRescue(withLegacyContext(openAICompletionsApi(), generation), options.resolveContextRescue),
   })
 
   // `getModels` is delegated to a live read (the reuse-catalog pattern from

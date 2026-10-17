@@ -44,6 +44,8 @@ import {
   WORKBUDDY_PROVIDER_DISPLAY_NAMES,
   WORKBUDDY_PROVIDERS,
 } from './adapter.ts'
+import { createContextRescue } from './context-rescue.ts'
+import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context-rescue.ts'
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
@@ -2004,6 +2006,19 @@ export function apply(ctx: Context, config: Config): void {
       if (stopped) return
 
       const adapters = {} as Record<WorkBuddyRegion, WorkBuddyAdapter>
+      // The host services that can fold history are optional: a host without the
+      // compaction bundle loaded simply has no `compaction` service, and the
+      // rescue then reports "nothing folded" instead of failing a request.
+      // Resolved per attempt rather than captured, because plugin load order
+      // decides when each service exists.
+      const hostService = <Service>(name: string): Service | undefined =>
+        (ctx as unknown as { get(service: string): unknown }).get(name) as Service | undefined
+      const contextRescue = createContextRescue(() => ({
+        meter: hostService<RescueTokenMeter>('tokenMeter'),
+        compaction: hostService<RescueCompaction>('compaction'),
+        agents: hostService<RescueAgents>('agents'),
+        log: (message: string, error?: unknown) => { ctx.logger.warn(message, error) },
+      }))
       try {
         // Constructed only once the listeners hold their ports: a provider's
         // models read the shim origin at construction time.
@@ -2015,6 +2030,7 @@ export function apply(ctx: Context, config: Config): void {
             provider: WORKBUDDY_PROVIDERS[region],
             displayName: WORKBUDDY_PROVIDER_DISPLAY_NAMES[region],
             resolveAttachments: () => ctx.get('attachments'),
+            resolveContextRescue: () => contextRescue,
           })
         }
         invalidateCatalog = () => {
