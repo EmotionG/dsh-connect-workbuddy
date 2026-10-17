@@ -32,7 +32,7 @@
  * asserts the report cannot leak a fixture's text.
  */
 
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveDshHome, withFileLock } from './host-peers.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
@@ -82,6 +82,31 @@ export interface WorkBuddyBodyReport {
   /** Total bytes of the serialized body, as sent. */
   bodyBytes: number
   messageCount: number
+  /**
+   * What the UPSTREAM counted for this request, when it said.
+   *
+   * This is the other half of the #59 comparison, and it is the half that was
+   * missing. `bodyBytes`/`chars` say what we SENT; `promptTokens` says what the
+   * gateway CHARGED for it. With only the sent side, a difference between two
+   * captures is ambiguous — "the gateway counted the same bytes differently" and
+   * "the two bodies were not the same" have the same shape.
+   *
+   * `undefined` rather than 0 when the upstream reported no usage (a failed
+   * request, or a stream cut before its final `usage` frame). An absent
+   * measurement must stay unreadable as "charged nothing" — telling those two
+   * apart is the entire point of the field.
+   */
+  promptTokens?: number
+  /** The upstream's completion tokens for the same request, when reported. */
+  completionTokens?: number
+  /**
+   * The cache-hit portion of `promptTokens`, when the upstream splits it out.
+   *
+   * Kept separate because the two gateways were measured to spell the hit count
+   * differently, and a cached prompt is not billed like a fresh one — folding it
+   * into `promptTokens` would blur the one number the comparison turns on.
+   */
+  cachedTokens?: number
   /** Characters (code points) across every message block. */
   chars: number
   cjkChars: number
@@ -254,6 +279,54 @@ export function describeBody(bodyJson: string, region: WorkBuddyRegion, nowMs: n
 }
 
 /**
+ * What the upstream said it counted, as read from the stream's `usage` block.
+ *
+ * Kept distinct from the report so the two halves can arrive at different times:
+ * the sent side is known before the request leaves, whereas these fields only
+ * exist once the answer is over.
+ */
+export interface WorkBuddyUsageCounts {
+  promptTokens?: number
+  completionTokens?: number
+  cachedTokens?: number
+}
+
+/** A finite, non-negative token count, or undefined for anything else. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * Read the token counts out of one already-parsed SSE chunk.
+ *
+ * Returns undefined when the chunk carries no `usage` — which is every chunk but
+ * the last one on a streamed answer, so this is called for each frame and must
+ * stay cheap and total. The cache-hit count is looked for under BOTH spellings
+ * observed on the two gateways (`prompt_tokens_details.cached_tokens`, OpenAI's,
+ * and `prompt_cache_hit_tokens`, which the domestic gateway also emits); taking
+ * the first one present keeps the report comparable across regions instead of
+ * showing 0 on whichever side uses the other name.
+ */
+export function usageOfChunk(chunk: Record<string, unknown>): WorkBuddyUsageCounts | undefined {
+  const usage = chunk['usage']
+  if (typeof usage !== 'object' || usage === null || Array.isArray(usage)) return undefined
+  const record = usage as Record<string, unknown>
+  const promptTokens = tokenCount(record['prompt_tokens'])
+  const completionTokens = tokenCount(record['completion_tokens'])
+  const details = record['prompt_tokens_details']
+  const fromDetails = typeof details === 'object' && details !== null && !Array.isArray(details)
+    ? tokenCount((details as Record<string, unknown>)['cached_tokens'])
+    : undefined
+  const cachedTokens = fromDetails ?? tokenCount(record['prompt_cache_hit_tokens'])
+  if (promptTokens === undefined && completionTokens === undefined && cachedTokens === undefined) return undefined
+  return {
+    ...promptTokens === undefined ? {} : { promptTokens },
+    ...completionTokens === undefined ? {} : { completionTokens },
+    ...cachedTokens === undefined ? {} : { cachedTokens },
+  }
+}
+
+/**
  * Resolve the directory the report writes to, or `undefined` when disabled.
  *
  * Exported for the same reason the other env-var resolvers in this plugin are:
@@ -289,11 +362,19 @@ export async function appendBodyReport(directory: string, report: WorkBuddyBodyR
 }
 
 /**
- * Record one outgoing body, if the report is enabled.
+ * Record one outgoing body, if the report is enabled, and return a handle that
+ * can carry the upstream's `usage` back onto the SAME line.
  *
  * NEVER THROWS and never awaits long: this is called on the request path, and a
  * chat request must not fail (or stall) because a diagnostic could not write a
  * file. A failure is reported through `onError` so the caller can log it.
+ *
+ * The returned function exists because the two halves of the #59 comparison are
+ * only available at different times: what we SENT is known before the request
+ * leaves, what the gateway CHARGED only after the stream ends. Writing a second
+ * line for the usage would be worse than useless — the reporter diffs "the last
+ * line of cn.jsonl against the last line of global.jsonl", and a trailing
+ * usage-only line would silently become the one being compared.
  */
 export async function recordBodyReport(
   region: WorkBuddyRegion,
@@ -303,14 +384,93 @@ export async function recordBodyReport(
     nowMs?: number
     onError?: (error: unknown) => void
   } = {},
-): Promise<void> {
+): Promise<((usage: WorkBuddyUsageCounts | undefined) => void)> {
   const directory = bodyReportDirectory(options.env)
-  if (directory === undefined) return
+  if (directory === undefined) return () => {}
   try {
     const report = describeBody(bodyJson, region, options.nowMs ?? Date.now())
-    if (report === undefined) return
+    if (report === undefined) return () => {}
     await appendBodyReport(directory, report)
+    return attachUsage(directory, report, options.onError)
   } catch (error: unknown) {
     options.onError?.(error)
+    return () => {}
+  }
+}
+
+/**
+ * How many trailing lines are searched for the line this handle wrote.
+ *
+ * One would be enough for a single-threaded request, but a turn can have several
+ * requests in flight (parallel tool steps) and their lines interleave, so the
+ * target is not necessarily last. A small bounded window keeps the read cheap on
+ * a file that grows to tens of megabytes, while still finding a line that landed
+ * a couple of appends ago.
+ */
+const USAGE_ATTACH_WINDOW = 32
+
+/**
+ * Return a callback that rewrites its own line with the upstream's counts.
+ *
+ * Matched by `at` + `region` + `bodyBytes` + `messageCount`, all four being
+ * stable for a finished request: `at` alone can collide when two requests are
+ * timestamped in the same millisecond, and `bodyBytes` tells apart the two
+ * different bodies a failover or a retry can produce. A line that is already
+ * annotated is left alone, so a second call cannot double-apply.
+ */
+function attachUsage(
+  directory: string,
+  report: WorkBuddyBodyReport,
+  onError?: (error: unknown) => void,
+): (usage: WorkBuddyUsageCounts | undefined) => void {
+  /**
+   * Two independent idempotence guards, kept redundant on purpose.
+   *
+   * `done` avoids a second disk read within one handle's lifetime; the
+   * "already annotated" check inside the loop catches the OTHER case — a second
+   * handle for the same body, which is what a failover retry produces (it opens
+   * its own stream, and therefore its own handle). Either alone is enough for
+   * the common path, so removing just one is not observable behaviourally;
+   * removing BOTH is, and `tests/issue59-body-report.spec.ts` pins that.
+   */
+  let done = false
+  return usage => {
+    if (usage === undefined || done) return
+    done = true
+    const file = join(directory, `${report.region}.jsonl`)
+    void (async () => {
+      try {
+        await withFileLock(file, async () => {
+          const text = await readFile(file, 'utf8')
+          const lines = text.split('\n')
+          // The final element after a trailing newline is '' — ignored below.
+          for (let index = lines.length - 1; index >= 0 && index >= lines.length - USAGE_ATTACH_WINDOW; index -= 1) {
+            const line = lines[index]
+            if (line === undefined || line === '') continue
+            let parsed: unknown
+            try {
+              parsed = JSON.parse(line)
+            } catch {
+              continue
+            }
+            if (!isRecord(parsed)) continue
+            if (parsed['at'] !== report.at) continue
+            if (parsed['region'] !== report.region) continue
+            if (parsed['bodyBytes'] !== report.bodyBytes) continue
+            if (parsed['messageCount'] !== report.messageCount) continue
+            // Already annotated: leave it alone. This is the guard that makes
+            // "first measurement wins" hold when a SECOND handle exists for the
+            // same body (a failover retry starts a fresh stream); `done` above
+            // only saves a disk read within one handle's lifetime.
+            if (parsed['promptTokens'] !== undefined) return
+            lines[index] = JSON.stringify({ ...parsed, ...usage })
+            await writeFile(file, lines.join('\n'), 'utf8')
+            return
+          }
+        })
+      } catch (error: unknown) {
+        onError?.(error)
+      }
+    })()
   }
 }

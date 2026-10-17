@@ -1,13 +1,14 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   appendBodyReport,
   bodyReportDirectory,
   countChars,
   describeBody,
   recordBodyReport,
+  usageOfChunk,
   WORKBUDDY_BODY_REPORT_ENV,
 } from '../src/body-report.ts'
 
@@ -221,10 +222,178 @@ describe('where the report goes, and when it does not', () => {
     await writeFile(blocker, 'x')
 
     const errors: unknown[] = []
-    await expect(recordBodyReport('cn', bodyOf([{ role: 'user', content: 'x' }]), {
+    // Still resolves — to a no-op handle, so the caller can invoke it
+    // unconditionally when the upstream's usage arrives later.
+    const attach = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'x' }]), {
       env: { [WORKBUDDY_BODY_REPORT_ENV]: join(blocker, 'nested') },
       onError: error => errors.push(error),
-    })).resolves.toBeUndefined()
+    })
+    expect(typeof attach).toBe('function')
+    expect(() => attach({ promptTokens: 1 })).not.toThrow()
     expect(errors).toHaveLength(1)
+  })
+})
+
+/**
+ * The charged side of the comparison (issue #59).
+ *
+ * The report had only the SENT side (`bodyBytes`, `chars`), which left every
+ * capture ambiguous: "the gateway counted the same bytes differently" and "the
+ * two bodies were not the same" are indistinguishable from the sent side alone.
+ * These cases pin the second half — reading it out of the stream and putting it
+ * on the line of the request it belongs to.
+ */
+describe('what the upstream counted, read from the stream', () => {
+  it('takes prompt, completion and cache-hit counts from an OpenAI-shaped usage block', () => {
+    expect(usageOfChunk({ usage: { prompt_tokens: 708000, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 5000 } } }))
+      .toEqual({ promptTokens: 708000, completionTokens: 12, cachedTokens: 5000 })
+  })
+
+  it('accepts the DOMESTIC gateway\'s other spelling of the cache-hit count', () => {
+    // The two gateways were measured to report the hit count under different
+    // names; reading only one would show 0 on the other side and make the number
+    // the comparison turns on look like a difference in caching rather than in
+    // naming.
+    expect(usageOfChunk({ usage: { prompt_tokens: 900, prompt_cache_hit_tokens: 100 } }))
+      .toEqual({ promptTokens: 900, cachedTokens: 100 })
+  })
+
+  it('returns undefined for a chunk with no usage at all', () => {
+    // Every chunk but the last one. Crucially NOT `{}`: an absent measurement
+    // must never be recorded as a measurement of zero.
+    expect(usageOfChunk({ choices: [{ delta: { content: 'hi' } }] })).toBeUndefined()
+    expect(usageOfChunk({ usage: {} })).toBeUndefined()
+    expect(usageOfChunk({ usage: null })).toBeUndefined()
+  })
+
+  it('rejects values that are not usable token counts', () => {
+    expect(usageOfChunk({ usage: { prompt_tokens: 'lots' } })).toBeUndefined()
+    expect(usageOfChunk({ usage: { prompt_tokens: Number.NaN } })).toBeUndefined()
+    expect(usageOfChunk({ usage: { prompt_tokens: -1 } })).toBeUndefined()
+  })
+
+  it('annotates the line of the request it belongs to, and adds no new line', async () => {
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    const first = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'one' }]), { env, nowMs: 1000 })
+    const second = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'two' }]), { env, nowMs: 2000 })
+
+    first({ promptTokens: 111, completionTokens: 7 })
+    second({ promptTokens: 222 })
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[1] as string).promptTokens).toBe(222)
+    })
+
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    // Two requests, two lines. A third "usage only" line would silently become
+    // the line the reporter diffs against the other region.
+    expect(lines).toHaveLength(2)
+    expect(JSON.parse(lines[0] as string).promptTokens).toBe(111)
+    expect(JSON.parse(lines[1] as string).promptTokens).toBe(222)
+    expect(JSON.parse(lines[1] as string).completionTokens).toBeUndefined()
+  })
+
+  it('leaves the line untouched (and adds nothing) when the upstream said nothing', async () => {
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    const attach = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'x' }]), { env, nowMs: 1000 })
+    attach(undefined)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    expect(lines).toHaveLength(1)
+    // Absent, not zero.
+    expect(JSON.parse(lines[0] as string).promptTokens).toBeUndefined()
+  })
+
+  it('applies only the first measurement, so a failover retry cannot overwrite the serve', async () => {
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    const attach = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'x' }]), { env, nowMs: 1000 })
+    attach({ promptTokens: 111 })
+    // Let the first write LAND before the second arrives, so this pins the
+    // handle's own idempotence rather than racing two concurrent writes.
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[0] as string).promptTokens).toBe(111)
+    })
+    attach({ promptTokens: 999 })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    expect(JSON.parse(lines[0] as string).promptTokens).toBe(111)
+  })
+
+  it('does not let a second handle for the SAME body overwrite the first measurement', async () => {
+    // A failover retry opens its own stream for the same prepared body, and
+    // therefore gets its own handle. The on-disk "already annotated" check is
+    // what stops that second measurement from replacing the first — the
+    // in-handle flag cannot see a different handle.
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    const body = bodyOf([{ role: 'user', content: 'same body' }])
+    const first = await recordBodyReport('cn', body, { env, nowMs: 1000 })
+    const retry = await recordBodyReport('cn', body, { env, nowMs: 1001 })
+    first({ promptTokens: 111 })
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[0] as string).promptTokens).toBe(111)
+    })
+    // The retry's own line (the second one) gets its own measurement, and the
+    // first line keeps the first one.
+    retry({ promptTokens: 999 })
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[1] as string).promptTokens).toBe(999)
+    })
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    expect(JSON.parse(lines[0] as string).promptTokens).toBe(111)
+    expect(lines).toHaveLength(2)
+  })
+
+  it('does not annotate a DIFFERENT line that shares the timestamp, model and region', async () => {
+    // The scan walks BACKWARD from the end, so to catch a missing identity check
+    // the handle we call must belong to the EARLIER line while a LATER line is
+    // indistinguishable except for its identity fields. Two requests timestamped
+    // in the same millisecond is the real case: annotating by `at` alone would
+    // put one request's measurement onto another request's line.
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    const earlier = await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'a' }]), { env, nowMs: 1000 })
+    await recordBodyReport('cn', bodyOf([{ role: 'user', content: 'a'.repeat(500) }]), { env, nowMs: 1000 })
+    // Only the EARLIER (smaller) body is measured.
+    earlier({ promptTokens: 222 })
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[0] as string).promptTokens).toBe(222)
+    })
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    expect(lines).toHaveLength(2)
+    // The later, larger body must stay unannotated despite the shared `at`.
+    expect(JSON.parse(lines[1] as string).promptTokens).toBeUndefined()
+  })
+
+  it('does not annotate a line with the same byte size but a different message count', async () => {
+    // `bodyBytes` alone is not an identity: an extra message costs a fixed 29
+    // bytes, so a longer single message and three shorter ones can serialize to
+    // exactly the same length while describing different prompts. With both
+    // shipped for the same `at`, only `messageCount` tells them apart.
+    const env = { [WORKBUDDY_BODY_REPORT_ENV]: directory }
+    // Tuned so both bodies serialize to exactly 196 bytes against `bodyOf`.
+    const oneLong = bodyOf([{ role: 'user', content: 'x'.repeat(51) }])
+    const twoShort = bodyOf([
+      { role: 'user', content: 'y'.repeat(11) },
+      { role: 'user', content: 'y'.repeat(11) },
+    ])
+    const earlier = await recordBodyReport('cn', oneLong, { env, nowMs: 1000 })
+    await recordBodyReport('cn', twoShort, { env, nowMs: 1000 })
+    const before = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => JSON.parse(line) as { bodyBytes: number, messageCount: number })
+    // Precondition: the two lines are indistinguishable by size, and differ only
+    // by message count. If this ever stops holding, the case below is vacuous.
+    expect(before[0]!.bodyBytes).toBe(before[1]!.bodyBytes)
+    expect(before[0]!.messageCount).not.toBe(before[1]!.messageCount)
+
+    earlier({ promptTokens: 222 })
+    await vi.waitFor(async () => {
+      const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+      expect(JSON.parse(lines[0] as string).promptTokens).toBe(222)
+    })
+    const lines = (await readFile(join(directory, 'cn.jsonl'), 'utf8')).trim().split('\n')
+    expect(JSON.parse(lines[1] as string).promptTokens).toBeUndefined()
   })
 })

@@ -24,6 +24,7 @@ import { Readable } from 'node:stream'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { workbuddyAccountId } from './auth.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
+import { usageOfChunk } from './body-report.ts'
 import { DsmlStreamBuffer } from './dsml-recovery.ts'
 import type { RecoveredToolCall, RecoveryGate } from './dsml-recovery.ts'
 import {
@@ -167,6 +168,28 @@ export interface WorkBuddyShimOptions {
    * callee must treat the string as read-only.
    */
   onRequestBody?: (bodyJson: string) => void
+  /**
+   * Called with the token counts the UPSTREAM reported for the request whose
+   * body was just handed to {@link onRequestBody} (issue #59).
+   *
+   * `onRequestBody` records what we SENT; this records what the gateway
+   * CHARGED. The issue cannot be settled with only one of them: a difference
+   * between two captures is ambiguous until both sides are known, because
+   * "the gateway counted the same bytes differently" and "the two bodies were
+   * not the same" look identical from the sent side alone.
+   *
+   * May fire zero times (the upstream reported no `usage`, or the stream was
+   * cut before its final frame) or more than once per body (a failover retry
+   * reaches a second upstream). The callee is expected to keep the FIRST
+   * real measurement, since that is the one the report's line belongs to.
+   *
+   * Fired without awaiting, and never allowed to fail the request.
+   */
+  onUpstreamUsage?: (usage: {
+    promptTokens?: number
+    completionTokens?: number
+    cachedTokens?: number
+  }) => void
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -438,6 +461,12 @@ class RecoveryStream {
     gate: RecoveryGate | undefined,
     private readonly logger: ShimLogger | undefined,
     notice?: string,
+    /** Called once, with the upstream's token counts, when the stream reports them. */
+    private readonly onUsage?: (usage: {
+      promptTokens?: number
+      completionTokens?: number
+      cachedTokens?: number
+    }) => void,
   ) {
     this.buffer = gate === undefined ? undefined : new DsmlStreamBuffer(gate)
     this.notice = notice
@@ -597,9 +626,38 @@ class RecoveryStream {
     }
   }
 
+  /** Whether a usage measurement has already been reported for this stream. */
+  private usageReported = false
+
+  /**
+   * Read the upstream's token counts out of one parsed chunk and report them.
+   *
+   * FIRES AT MOST ONCE per stream, and only when there is a real number to
+   * report. Two reasons, both load-bearing:
+   *
+   *   - a streamed answer's `usage` arrives on its final frame, but a failover
+   *     retry starts a NEW `RecoveryStream`, so a second call here would be a
+   *     second measurement for the same line;
+   *   - a chunk with no `usage` (which is every chunk but the last) must not be
+   *     reported as zero — an absent measurement and a measurement of zero are
+   *     different facts, and the #59 comparison turns entirely on that
+   *     difference.
+   */
+  private noteUsage(chunk: Record<string, unknown>): void {
+    if (this.usageReported || this.onUsage === undefined) return
+    const usage = usageOfChunk(chunk)
+    if (usage === undefined) return
+    this.usageReported = true
+    try {
+      this.onUsage(usage)
+    } catch (error: unknown) {
+      // A diagnostic must never fail a chat request.
+      this.logger?.warn('dsh-connect-workbuddy: usage report failed', error)
+    }
+  }
+
   /** Handle one complete frame, rewriting it only when recovery produced something. */
-  private handleFrame(frame: string): void {
-    const payload = dataPayload(frame)
+  private handleFrame(frame: string): void {    const payload = dataPayload(frame)
     if (payload === undefined) {
       this.send(frame, false)
       return
@@ -621,6 +679,11 @@ class RecoveryStream {
     }
 
     const choices = chunk['choices']
+    // The `usage` block is normally carried by a frame that has NO `choices`
+    // (the final chunk on a streamed answer), so it must be read BEFORE the
+    // choices check below — otherwise every such frame is forwarded unread and
+    // the measurement never leaves the stream.
+    this.noteUsage(chunk)
     const choice = Array.isArray(choices) ? choices[0] : undefined
     if (typeof choice !== 'object' || choice === null || Array.isArray(choice)) {
       this.send(frame, false)
@@ -1090,6 +1153,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const prepareAccount = options.prepareAccount
   const onAccountFailure = options.onAccountFailure
   const onRequestBody = options.onRequestBody
+  const onUpstreamUsage = options.onUpstreamUsage
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -1519,7 +1583,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     const notice = switchedFrom === undefined || switchedBecause === undefined
       ? undefined
       : failoverNoticeText(switchedFrom, switchedBecause)
-    const writer = new RecoveryStream(res, gate, logger, notice)
+    const writer = new RecoveryStream(res, gate, logger, notice, onUpstreamUsage)
     await writer.consume(result.response.body)
 
     // The one outcome that can only be recognised AFTER the stream: the turn

@@ -46,7 +46,7 @@ import {
 } from './adapter.ts'
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
-import { recordBodyReport } from './body-report.ts'
+import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
 import type { UpstreamErrorKind } from './upstream.ts'
 import {
@@ -767,6 +767,17 @@ export function apply(ctx: Context, config: Config): void {
       refresh: credential => client.refreshToken(credential),
     })
     const catalog = new WorkBuddyCatalog(region)
+    /**
+     * Where the next upstream `usage` should be written.
+     *
+     * The body report is two-phase (send, then charge), and the two phases are
+     * wired through different callbacks, so the seam between them has to live
+     * somewhere. `noop` rather than `undefined` keeps the usage path free of a
+     * presence check on the hot request path — and a request whose report was
+     * disabled resolves to the same noop, so nothing needs to know whether
+     * reporting is on.
+     */
+    let pendingUsage: (usage: WorkBuddyUsageCounts | undefined) => void = () => {}
     const shim = createWorkBuddyShim({
       store,
       client,
@@ -790,9 +801,19 @@ export function apply(ctx: Context, config: Config): void {
       // What went upstream, in counts (issue #59). Off unless
       // `WORKBUDDY_BODY_REPORT` is set; the region is captured here because the
       // shim deliberately does not know about regions.
+      //
+      // The returned handle carries the upstream's `usage` back onto the SAME
+      // line: the sent side is known before the request leaves, the charged side
+      // only after the stream ends. One pending handle per region is enough
+      // because a shim serves requests for one body at a time as far as this
+      // diagnostic is concerned, and keeping the newest is the right tie-break —
+      // a late measurement belongs to the most recently sent body.
       onRequestBody: body => {
         void recordBodyReport(region, body, { onError: error => ctx.logger.warn('dsh-connect-workbuddy: body report failed', error) })
+          .then(attach => { pendingUsage = attach })
+          .catch((error: unknown) => ctx.logger.warn('dsh-connect-workbuddy: body report failed', error))
       },
+      onUpstreamUsage: usage => { pendingUsage?.(usage) },
       prepareAccount: () => applyPoolSelection(region),
       failoverAccount: triedAccountIds => failoverAccountFor(region, triedAccountIds),
       // Asked only after a request has ALREADY failed and the pool found nowhere
