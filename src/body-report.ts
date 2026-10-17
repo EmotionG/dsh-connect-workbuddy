@@ -9,16 +9,32 @@
  *   - the gateways count identical bytes differently (upstream's business); or
  *   - the two requests did not carry the same messages (ours to fix).
  *
- * The second world was left standing by two independent measurements. The
- * reporter ran this project's `--kind`/`--language` probe on BOTH regions and
- * got the same tokens-per-1000-chars on byte-identical prose, code and JSON
- * (ratios 0.98–1.06 across six cells), so identical bytes really do bill
- * identically. And a code trace showed historical `reasoning` never reaches the
- * wire at all: pi-ai only forwards `thinking` blocks as text when
- * `compat.requiresThinkingAsText` is set — this plugin never sets it — and the
- * `reasoning_details` route needs a signature the stream parser never writes.
- * With the counting difference excluded and reasoning excluded, the remaining
- * candidate is that the two bodies differ in the first place.
+ * Neither world, it turned out — the answer was a third one, and this report is
+ * what produced it. A paired capture in one session (4.6.7) measured
+ * `bodyBytes` 3,628,068 vs 3,626,374, a ratio of 0.9995: both requests carried
+ * the same bytes. What differed was the BUCKET each byte was counted in — CN
+ * text 741,952 vs GL 184,821, CN reasoning 72,270 vs GL 627,994, with a
+ * complementary residual of 0.3%. The gateways did not miscount; the same
+ * history was labelled differently on the two sides.
+ *
+ * The labelling is pi-ai's replay, not this plugin's. `openai-completions.js`
+ * records the reasoning field name the upstream stream actually used into
+ * `thinkingSignature` (`:428`), and on the way back out writes
+ * `assistantMsg[<that name>] = <the thinking text>` (`:1006`), so a
+ * transcript produced against a gateway that says `reasoning` is replayed as
+ * `reasoning` and one that says `reasoning_content` as `reasoning_content`.
+ * This plugin sets only `compat.supportsReasoningEffort` (`src/adapter.ts:200`),
+ * so the `else` branch is taken and the field goes out raw rather than folded
+ * into text.
+ *
+ * An earlier revision of this comment claimed the opposite — that historical
+ * `reasoning` never reaches the wire, because `requiresThinkingAsText` is unset
+ * and the `reasoning_details` route needs a signature the parser never writes.
+ * Both halves are wrong under pi-ai 0.85.1: the unset flag is precisely what
+ * routes thinking out as a raw field, and the parser does write the
+ * `reasoning_details` signature (`:188–193`). The correction matters because it
+ * turns `reasoning` into a bucket that can be non-zero — and diffing it across
+ * regions is the direct measurement of the drift.
  *
  * This module exists to settle exactly that, and it can do it WITHOUT either
  * region having credit: the body is assembled locally, before the upstream ever
@@ -222,10 +238,13 @@ function describeMessage(message: Record<string, unknown>): WorkBuddyBodyMessage
     }
   }
 
-  // A reasoning-carrying field on an ASSISTANT message. This plugin's trace says
-  // it should never appear (pi-ai drops `thinking` blocks and writes an empty
-  // `reasoning_content` only on the deepseek compat path), and this report is
-  // what turns that claim into something a reporter can check on their machine.
+  // A reasoning-carrying field on an ASSISTANT message. This one DOES appear:
+  // pi-ai replays each historical thinking block under the field name its own
+  // upstream stream used, so a transcript that talked to a `reasoning` gateway
+  // carries `reasoning` and one that talked to a `reasoning_content` gateway
+  // carries `reasoning_content`. All three spellings are counted into a single
+  // `reasoning` bucket on purpose — the number that matters for #59 is the size
+  // of that bucket on each side, not which spelling produced it.
   for (const field of ['reasoning_content', 'reasoning', 'reasoning_text']) {
     const value = message[field]
     if (typeof value === 'string' && value !== '') blocks.push(block('reasoning', value))

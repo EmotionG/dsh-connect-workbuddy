@@ -17,20 +17,25 @@ import {
  * and ~1.374M by the international one, so switching regions turned into an
  * instant `code 11115 prompt is too long`.
  *
- * Two measurements narrowed it to a single question. The reporter ran this
- * project's content-class probe in BOTH regions and got identical
- * tokens-per-1000-chars on byte-identical prose, code and JSON (0.98–1.06), so
- * identical bytes bill identically; and a code trace showed historical
- * `reasoning` never reaches the wire (pi-ai forwards `thinking` only when
- * `compat.requiresThinkingAsText` is set, which this plugin never sets). What
- * remains is that the two requests did not carry the same messages — which this
- * report is meant to settle, WITHOUT either region needing credit, because the
- * body is assembled locally before `14018 Credits exhausted` can be returned.
+ * Two measurements narrowed it to a single question, and the report answered
+ * it. The reporter ran this project's content-class probe in BOTH regions and
+ * got identical tokens-per-1000-chars on byte-identical prose, code and JSON
+ * (0.98–1.06), so identical bytes bill identically. A code trace was read as
+ * showing that historical `reasoning` never reaches the wire — that reading was
+ * wrong. `bodyBytes` then came back at 0.9995 while `promptTokens` came back at
+ * 0.696, which is only possible if the same bytes are counted into different
+ * buckets: CN text 741,952 vs GL 184,821, CN reasoning 72,270 vs GL 627,994,
+ * complementary residual 0.3%. The field a thinking block is replayed under is
+ * chosen by pi-ai from the name its upstream stream used, so a transcript built
+ * against one gateway's spelling is billed as `text` on one side and
+ * `reasoning` on the other. This report is what lets a reporter see that split
+ * on their own machine, WITHOUT either region needing credit, because the body
+ * is assembled locally before `14018 Credits exhausted` can be returned.
  *
  * Two properties are guarded here and neither is cosmetic:
  *   1. the shape is faithful — the buckets a long session is made of (tool
- *      results, tool-call arguments, CJK vs ASCII) must be distinguishable, or
- *      the diff answers nothing;
+ *      results, tool-call arguments, CJK vs ASCII, and reasoning) must be
+ *      distinguishable, or the diff answers nothing;
  *   2. it carries COUNTS ONLY — a report that leaked message text would be
  *      unusable as a diagnostic a user can safely paste into an issue.
  */
@@ -109,10 +114,11 @@ describe('describing what a request body is made of', () => {
   })
 
   it('records a reasoning field when one appears — the empirical check on the code trace', () => {
-    // The trace says pi-ai drops `thinking` blocks and never writes a
-    // non-empty `reasoning_content` here, so this bucket SHOULD be absent from
-    // real captures. The report counts it rather than assuming, which is what
-    // lets a reporter confirm or refute that claim on their own machine.
+    // pi-ai replays a thinking block under whichever field name its upstream
+    // stream used, so this bucket is expected to be non-empty in real captures
+    // and its SIZE is the interesting number. The report counts it rather than
+    // assuming, which is what lets a reporter confirm the split on their own
+    // machine.
     const report = describeBody(bodyOf([
       { role: 'assistant', content: '', reasoning_content: '思考内容' },
       { role: 'assistant', content: '', reasoning: '' },
