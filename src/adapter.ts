@@ -514,13 +514,19 @@ function withContextRescue(
 ): ProviderStreams {
   if (resolve === undefined) return api
 
-  const wrap = <Options extends { sessionId?: string }>(
-    inner: (model: Model<Api>, context: Context, options?: Options) => AssistantMessageEventStream,
+  // Both parameters stay generic so this wrapper serves whichever pi-ai
+  // generation is installed: 1.x replaced the flat `Context` with a branded
+  // `TranscriptContext`, and naming either type here would pin the wrapper to
+  // one generation and break the other's typecheck.
+  const wrap = <ContextShape, Options>(
+    inner: (model: Model<Api>, context: ContextShape, options?: Options) => AssistantMessageEventStream,
   ) =>
-    (model: Model<Api>, context: Context, options?: Options): AssistantMessageEventStream => {
+    (model: Model<Api>, context: ContextShape, options?: Options): AssistantMessageEventStream => {
       const source = inner(model, context, options)
       const rescue = resolve()
-      const sessionId = options?.sessionId
+      // 0.85 and 1.x both carry the session id here under the same name; the
+      // structural read keeps the wrapper independent of the options type.
+      const sessionId = (options as { sessionId?: string } | undefined)?.sessionId
       const window = model.contextWindow
       if (rescue === undefined || sessionId === undefined || window === undefined) return source
 
