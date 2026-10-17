@@ -1,5 +1,76 @@
 # Changelog
 
+## 4.7.0 (2026-10-17)
+
+> 版本号是 **minor**：这不是只改内部的 patch —— 它**改变了发往上游的请求体**。DSH Desktop 0.2.1-rc.1 随包 pi-ai 1.1.0，本版修的是该组合下「请求静默丢掉 system prompt 与全部工具声明」。若你停留在更早的宿主，行为不变。
+
+### Fixes
+
+- **DSH 0.2.1-rc.1 下所有 workbuddy 模型静默丢失 system prompt 与工具声明（新一轮 #24/#25/#26 同族缺陷）**
+  - **症状**：升级到 DSH `0.2.1-rc.1`（随包 `@earendil-works/pi-ai@1.1.0`）后，workbuddy / workbuddy-global 的模型**全部**不再调用工具，界面上**没有任何报错**。模型有时把 DSML 标记当正文吐出来——和 4.4.2 记录的现象一模一样。
+  - **根因（三环叠加，缺一不成立）**：
+    1. `dsh-llm-pi-ai` **两版都不做归一化**。0.1.7 与 0.2.1 的 `piContext()` 都直接返回 `{systemPrompt, messages, tools}`，两版里 `normalizeContext` 出现次数均为 **0**。
+    2. pi-ai **0.85.1 读顶层字段**：`dist/api/openai-completions.js:909` 的 `if (context.systemPrompt)`，工具读 `context.tools`。所以 0.85 能自己兜底，宿主不归一化也看不出问题。
+    3. pi-ai **1.1.0 只读 `messages`**：走 `resolveTranscript()` → `collapseSystemMessages()`，顶层 `systemPrompt` / `tools` **从不读取**。
+    于是 `withLegacyContext()` 的 **modern 分支原样透传**（当时一行 `return api`），把 0.85 形状的原始信封直接交给 1.1.0 的 api → 请求体里 system prompt 与 tools 双双为空。
+  - **为什么 4.4.2 的修复不够**：4.4.2 修的是「1.x 被判成 legacy → 折成 0.85 形状 → 工具丢」。本版是**同一失效模式的反面**——「1.x 判成 modern（判定是对的）→ 不折 → 工具和 prompt 一起丢」。门是对的，空的是那个分支。`generationOf()` 无需改动。
+  - **实测证据（真实 `createProvider` + 真实 `openAICompletionsApi` + 本地 SSE 服务器抓线上 body）**：
+
+    | pi-ai | 线上 `messages[].role` | system 文本 | `body.tools` |
+    |---|---|---|---|
+    | 0.85.1 | `["system","user"]` | 原样 | 1 ✅ |
+    | **1.1.0（修复前）** | **`["user"]`** | **丢失** | **0** |
+    | 1.1.0（修复后） | `["system","user"]` | 原样 | 1 ✅ |
+    | 1.1.0（已归一化输入） | `["system","user"]` | 原样 | 1 ✅（幂等） |
+
+  - **改了什么**：新增 `foldModernContext()`，modern 分支改为**归一化**而非透传——把顶层的 `systemPrompt`/`tools` 折进首条 `system` 消息（文本进 `content`、工具进 `toolsAdded`），并**删掉**这两个顶层字段，与 pi-ai 官方 `normalizeContext` 的输出形状一致。
+  - **为什么内联而不是调 `normalizeContext`**：该函数在 **0.85.1 里不存在**，静态 import 会在那里变成 `undefined`；而本模块一贯「绝不静态 import pi-ai」（`pi-ai-runtime.ts` 头部教条，正是它让独立 `bin` 能在没装 peer 的 profile 里跑）。内联折叠零新依赖。
+  - **幂等**：输入若已归一化（顶层两字段都不存在），直接原样返回——否则会再前置一条**空的** system 消息。
+  - **★ 守卫为什么一直没抓到**：`tests/adapter-outgoing-body.spec.ts` 是唯一断言「线上 body 真的带 tools 与 system」的用例，却被 `it.skipIf(piAiRuntimeInfo().generation !== 'legacy')` 限死，**modern 分支零覆盖**；而作者 checkout 解析到 0.85.1，它一直是绿的。`adapter.spec.ts` 也帮不上忙——它 mock 了 api，只断言「交给 wrapper 的 context」，这个断言恰好**认证**了缺陷。
+  - **本版把守卫扩成 2×2 矩阵**：{legacy, modern} × {原始信封, 已归一化 transcript} 四格都断言 `body.tools` 与首条 system 文本。在原用例的基础上补了「modern × 原始信封」这一格——**它就是本缺陷的回归钉**。另加幂等用例与「只有 tools、没有 systemPrompt」用例。
+  - **本机与 CI 的代际约束（写在用例注释里）**：legacy 两格只能在 0.85 checkout 上跑（1.x 的 api 读不了 0.85 扁平形状）；modern 两格只能在 0.87+/1.x 上跑（0.85 的 `estimateMessageTokens` 会对 system 消息的**字符串**逐字符迭代并读 `block.name.length` 而崩溃，即 #24 的崩溃）。用例按**已安装版本**选格，不会让任何一代完全无人看管。
+  - **变异验证**：把 modern 分支改回 `return api` → 新增的「FOLDS a raw seam envelope」用例**红**（1 例）。验证后已还原。
+  - **实机验证**：临时把 checkout 的 `node_modules/@earendil-works/pi-ai` 换成 1.1.0（连同 1.1.0 新需要的 `typebox`/`partial-json`/`openai`），modern 四格**全绿**；legacy 两格如预期红（1.1.0 读不了扁平形状）。验证后已完整还原 0.85.1 与依赖树。
+
+- **「可关闭思考」的模型被锁成不可关闭，不可关闭的反倒可关（`adapter.ts` 既有缺陷，非本次升级引入）**
+  - **根因**：`workBuddyThinkingLevelMap()` 的判断写反了 —— `if (canDisableThinking !== true) map.off = null`，而 `null` 在 pi-ai 里的语义是「该档位**不支持**」（`getSupportedThinkingLevels` 按 `mapped === null` 过滤；`openai-completions` 用 `thinkingLevelMap?.off !== null` 决定能否发「关闭思考」的请求）。
+  - **实际后果**：上游声明 `canDisableThinking: true` 且用户没取消勾选 → `off` 被置 `null` → 关闭思考**不可选**；上游声明 `false`/未声明 → 不置 `null` → `off` 落成字符串 `'off'` → **反而可选**。与 `offDefaultFor()` 的语义正好相反。
+  - **为什么一直没发现**：`tests/adapter.spec.ts` 只探了 `canDisableThinking: false` 那半边，而写反的形式在那半边也恰好通过；另外两条对 `true` 的用例把期望值写成了「没有 off」或「off 缺失」，**把缺陷当成了规格**。
+  - **改了什么**：改为 `canDisableThinking === true ? 'off' : null`，并把三条用例的期望值改正，新增「能力未声明时不给 off」一例。
+  - **变异验证**：把判断改回 `!== true` → 2 例红。
+
+- **DSH 宿主线守卫的 semver 比较器是错的：判 `0.2.1-rc.1` 通过，而 npm 实算是 false**
+  - **根因**：`tests/dsh-line.spec.ts` 自写的 `satisfiesRange()` 只做朴素 `>=` / `<` 比较，没有实现 semver 的**预发布悬崖**——预发布版本只有当同一比较器集合里存在**同一 `major.minor.patch` 元组**上的预发布比较符时才被放行。`>=0.1.7-rc.1` 只对 `0.1.7-x` 开口，`<0.3.0-0` 排除整个 `0.3.0` 元组，`0.2.1-rc.1`（元组 `0.2.1`）两条都不满足。
+  - **为什么夹具没触发**：原夹具是 `['0.1.7-rc.1','0.1.7-rc.2','0.2.0-rc.1','0.2.0-rc.9','0.2.0','0.2.1','0.2.99']`——恰好跳过真实发布的 `0.2.1-rc.1`；而 `0.2.0-rc.1` / `0.2.0-rc.9` 被断言成 admitted，那本身也是错的（npm 判 false）。
+  - **改了什么**：比较器按规范重写（`parseVersion` / `compareParsed` / `sameTuple` + 悬崖规则），夹具拆成「正式版放行」与「已知预发布偏差」两组，并新增 5 条照抄 npm 实际输出的悬崖用例。
+  - **新增的「已知偏差」用例**：显式断言 `0.2.1-rc.1` 与 `0.2.0-rc.1` 在现声明下 **不** admitted、而 `0.2.1` GA admitted。于是偏差是**被记录、被解释**的，而不是被错比较器掩盖；将来若改清单，这条会提醒同步更新说明。
+  - **为什么可以暂不改清单**：详见下一条。宿主 `evaluatePluginCompatibility()` 只校验 `@deepseek-ai/dsh*` 命名空间，本机 profile 用 `link:` + 默认不自动装 peer，rc 宿主上插件照常加载；等宿主发 `0.2.1` GA，现声明即放行。
+  - **变异验证**：去掉悬崖规则 → 2 例红。
+
+### Changed
+
+- **`@earendil-works/pi-ai` 的 peer 范围放宽到 1.x：`>=0.85.0 <0.88.0 || >=1.0.0-0 <2.0.0`（peer 与 dev 两处同步）**
+  - **为什么必须改**：旧范围 `>=0.85.0 <0.88.0` **不**放行 DSH 0.2.1-rc.1 随包的 1.1.0，而 1.1.0 恰恰是本版修好后要支持的版本 —— 声明与实际支持面自相矛盾。
+  - **范围是实算出来的，不是猜的**：`0.85.0 / 0.85.1 / 0.87.1 / 1.0.0 / 1.0.2 / 1.1.0` 均 `true`；`2.0.0` 与 `1.1.0-beta.1` 均 `false`。上界停在 `<2.0.0` 与 `generationOf()` 刻意不认 2.x 的判断保持一致；预发布串不承诺。
+  - **注意**：宿主门禁只校验 `@deepseek-ai/dsh*`，所以这条 peer **从不参与**宿主校验（4.4.2 已记录）。改它主要是让**清单说真话**，真正保护用户的是上面那条代码修复。
+  - **`dsh-*` 那 9 条 peer 本版未动**：理由见上一条「已知偏差」——任何为 `0.2.x` rc 硬凑的静态范围都会有漏（已逐一实算否证：`|| >=0.2.0-rc.1 <0.2.99`、`|| >=0.3.0-0 <0.3.0`、`>=0.1.7-rc.1-0 <0.3.0-0`、去掉预发布上界、`0.2.x` 通配符，全部失败）。
+
+### CI
+
+- **新增 `test-pi-ai-next` 作业：在 pi-ai 1.1.0 上跑一遍完整 typecheck + 测试 + 构建**
+  - **为什么必须有**：`tests/adapter-outgoing-body.spec.ts` 的矩阵是 2×2，但**一个代际跑不了另一个代际的库**——0.85 checkout 上只能跑 legacy 两格（1.x 的 api 读不了扁平形状），1.x checkout 上只能跑 modern 两格（0.85 的分词器在 system 消息上崩，即 #24）。主 `test` 作业钉的是 0.85.1，**modern 半边从未在 CI 里运行过**，而这正是 0.2.1-rc.1 坏掉的那一半。
+  - **怎么切版本**：pi-ai 既是 peer 又是直接 devDependency，`pnpm-workspace.yaml` 的 `overrides` 是官方支持的改法。作业用 `sed` 改那一条 override，再 `--no-frozen-lockfile` 让 pnpm 只为它重解析。
+  - **有一道断言防止作业空转**：装完立刻 `node -p` 读实际版本并要求等于矩阵值，否则「跑了一遍绿」可能跑的根本不是 1.1.0。
+  - **本作业当场抓到一个本机永远看不到的缺陷**：pi-ai 1.x 给 provider 侧上下文加了**品牌**（`TranscriptContext`，`unique symbol` 字段，声明为「只有 `normalizeContext()` 能产出」）。在 1.x 的**类型**上，`stream`/`streamSimple` 的两条分支都收到品牌类型，于是把普通 `Context` 传进去会 `TS2345`——而 `modern` 分支的 `return api` 也一并被类型系统拒绝。本机 0.85 的类型面是裸 `Context`，**这个错误在 0.85 上不存在**。修法是一处**有注释的** `transcript<T>()` 断言，理由写在函数上：调用点已经完成 `normalizeContext` 的职责，而 `normalizeContext` 在 0.85 不存在、不能导入。**变异验证**：去掉该断言 → 1.1.0 上 `tsc` 报 4 个 `TS2345`。
+  - **验证过它真的会响**：把 modern 分支改回 `return api`，1.1.0 作业**红 4 例**（`adapter.spec.ts` 与 `adapter-outgoing-body.spec.ts` 各自的 modern 守卫），而 0.85.1 作业保持全绿。这正是本作业存在的意义。
+  - 仅跑 ubuntu：这是库层面的断言，不是平台断言；OS 矩阵已由主 `test` 作业覆盖。
+
+### Docs
+
+- `src/pi-ai-runtime.ts` 头部更正：peer 范围同步为新值；删去把 1.x 说成「未发布」的过时表述（DSH 0.2.1-rc.1 已随包 1.1.0）；补一句「落在 modern 是必要但**不充分**——modern 分支还必须折叠原始信封」。
+- `src/adapter.ts` 的 `adaptLegacyPiAiContext()` 补注 **legacy-only**：它的结果是 0.85 扁平形状，绝不能交给 1.x 的 api（1.x 从 `messages[].toolsAdded` 读工具，会一个都看不到）。
+- 新增 `docs/DSH-0.2.1-RC1-FOLLOWUP.md`：本次升级的完整调研档，含逐包对照表、四项「已核对无需改动」、失败候选与证据来源。
+
 ## 4.6.7 (2026-10-17)
 
 > 版本号是 **patch**：只改账号池的排序规则，没有接口或配置变更。但它是**行为变更**——开启账号池的机器上，「这次请求用谁」可能变了，且新行为正是本版要的。

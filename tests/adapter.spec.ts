@@ -67,6 +67,10 @@ describe('workBuddyThinkingLevelMap', () => {
       high: 'high',
       xhigh: 'xhigh',
       max: null,
+      // A model that declares it CAN disable thinking must expose `off`.
+      // This assertion previously had no `off` key at all — it encoded the
+      // inverted guard at adapter.ts:160 rather than catching it.
+      off: 'off',
     })
   })
 
@@ -75,6 +79,13 @@ describe('workBuddyThinkingLevelMap', () => {
       supportedEfforts: ['high'],
       canDisableThinking: false,
     }))).toMatchObject({ off: null, high: 'high' })
+  })
+
+  it('withholds off when the capability is undeclared', () => {
+    // Absence is "unknown" and stays unoffered, matching how the rest of the
+    // plugin treats an undeclared capability.
+    expect(workBuddyThinkingLevelMap(model({ supportedEfforts: ['high'] })))
+      .toMatchObject({ off: null, high: 'high' })
   })
 
   it('does not report reasoning without supported effort levels', () => {
@@ -102,8 +113,9 @@ describe('workBuddyThinkingLevelMap', () => {
       high: 'high',
       xhigh: 'xhigh',
       max: 'max',
+      off: 'off',
     })
-    expect(map?.off).toBeUndefined()
+    expect(map?.off).toBe('off')
   })
 })
 
@@ -363,12 +375,13 @@ describe('the provider stream actually receives an adapted context', () => {
     expect(seen.messages.some(m => m.role === 'system')).toBe(false)
   })
 
-  it('passes the transcript through byte-for-byte on a MODERN pi-ai', async () => {
-    // A 0.87+ api consumes the normalized transcript natively: the prompt
+  it('leaves an already-normalized transcript intact on a MODERN pi-ai', async () => {
+    // A 0.87+/1.x api consumes the normalized transcript natively: the prompt
     // lives on the leading system message and the tools on its `toolsAdded`.
-    // Any fold here would delete the only carrier of both — the reported
-    // #26 symptom (models that can never call tools) and #25's 400 on the
-    // international gateway. Same object reference, not merely an equal one.
+    // The modern branch now FOLDS a raw envelope (the 0.2.1-rc.1 regression),
+    // but an input that is already normalized has nothing to fold, so it must
+    // come through unchanged — same object, and above all no second, empty
+    // system message prepended to it.
     receivedContexts.length = 0
     const { createWorkBuddyAdapter, WORKBUDDY_GLOBAL_PROVIDER } = await import('../src/adapter.ts')
     const { WorkBuddyCatalog } = await import('../src/catalog.ts')
@@ -398,7 +411,54 @@ describe('the provider stream actually receives an adapted context', () => {
     )
 
     expect(receivedContexts).toHaveLength(1)
+    // Same reference: the fold is an identity on an already-normalized input.
     expect(receivedContexts[0]).toBe(normalized)
+  })
+
+  it('FOLDS a raw seam envelope on a MODERN pi-ai (the 0.2.1-rc.1 regression)', async () => {
+    // `dsh-llm-pi-ai` hands providers a raw `{systemPrompt, tools, messages}`
+    // and never normalizes. pi-ai 1.x reads ONLY `messages`, so passing that
+    // through unnormalized sent every request upstream with no prompt and no
+    // tool declarations — silently. The modern branch must fold it.
+    receivedContexts.length = 0
+    const { createWorkBuddyAdapter, WORKBUDDY_PROVIDER } = await import('../src/adapter.ts')
+    const { WorkBuddyCatalog } = await import('../src/catalog.ts')
+
+    const { adapter } = createWorkBuddyAdapter({
+      shim: { baseUrl: () => 'http://127.0.0.1:1', token: async () => 'shared-secret' } as never,
+      store: {} as never,
+      catalog: new WorkBuddyCatalog(),
+      piAiGeneration: 'modern',
+    })
+    const profile = (adapter as unknown as {
+      config: { profiles: () => ReadonlyMap<string, { piProvider: { streamSimple: (m: unknown, c: unknown, o: unknown) => unknown } }> }
+    }).config.profiles().get(WORKBUDDY_PROVIDER)
+    expect(profile).toBeDefined()
+
+    profile?.piProvider.streamSimple(
+      { id: 'hy3', api: 'openai-completions', provider: WORKBUDDY_PROVIDER },
+      {
+        systemPrompt: 'You are helpful.',
+        tools: [{ name: 'pwsh', parameters: { type: 'object', properties: {} } }],
+        messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+      },
+      { apiKey: 'k' },
+    )
+
+    expect(receivedContexts).toHaveLength(1)
+    const seen = receivedContexts[0] as {
+      systemPrompt?: unknown
+      tools?: unknown
+      messages: { role?: string, content?: unknown, toolsAdded?: { name?: string }[] }[]
+    }
+    // The flat fields are consumed and dropped...
+    expect(seen.systemPrompt).toBeUndefined()
+    expect(seen.tools).toBeUndefined()
+    // ...and promoted onto a single leading system message.
+    expect(seen.messages[0]?.role).toBe('system')
+    expect(seen.messages[0]?.content).toBe('You are helpful.')
+    expect(seen.messages[0]?.toolsAdded?.map(tool => tool.name)).toEqual(['pwsh'])
+    expect(seen.messages.filter(message => message.role === 'system')).toHaveLength(1)
   })
 
   it('defaults to the generation this plugin actually resolves', async () => {

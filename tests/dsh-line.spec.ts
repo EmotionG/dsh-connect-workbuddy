@@ -68,35 +68,95 @@ function manifest(): {
 const UPPER_BOUND = '<0.3.0-0'
 const LOWER_BOUND = '>=0.1.7-rc.1'
 
+/** 每个声明了 `dsh-*` peer 的包名与其范围。 */
+function dshPeers(section: 'peerDependencies' | 'devDependencies'): Array<[string, string]> {
+  const deps = manifest()[section] ?? {}
+  return Object.entries(deps).filter(
+    ([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'),
+  )
+}
+
 /**
- * semver 序比较：按 主.次.补 数值比较，预发布段按 semver 规则低于同号正式版。
+ * 判定一个版本是否落在 `>= 下界 < 上界` 形态的范围里，**按 npm semver 的
+ * 真实语义**求值，包括那条最容易写错的「预发布悬崖」。
  *
- * 只覆盖本套件用到的形态（`x.y.z` 与 `x.y.z-pre.N`），够用且无依赖。
- * 返回 -1 / 0 / 1；无法解析时抛错，避免把格式错误静默当成相等。
+ * 存在的理由：下面「上界真的挡得住」那几条**必须对声明本身求值**，而不是对
+ * 测试里另写一遍的字面量求值。否则声明与断言各自漂移也照样全绿——那正是本
+ * 套件要防的那类「看起来是围栏、实际不挡」的缺陷，只不过换了一层。
+ *
+ * ## 为什么不能只做朴素的 `>=` / `<` 比较（本套件曾经的缺陷）
+ *
+ * 初版直接比较下界与上界，于是判 `0.2.1-rc.1` 落在 `>=0.1.7-rc.1 <0.3.0-0`
+ * 里 —— npm 实算是 **false**。semver 规定：
+ *
+ * > 预发布版本**只有**当同一比较器集合里存在**同一 `major.minor.patch`
+ * > 元组**上的预发布比较符时，才被放行。
+ *
+ * `>=0.1.7-rc.1` 只对 `0.1.7-x` 开口，`<0.3.0-0` 排除整个 `0.3.0` 元组，
+ * 于是 `0.2.1-rc.1`（元组 `0.2.1`）**两条都不满足**。
+ *
+ * 而旧夹具恰好列了 `0.2.0-rc.1` 与 `0.2.1`、独独跳过真实发布的 `0.2.1-rc.1`，
+ * 所以这个错比较器从未被触发 —— 「看起来是围栏，实际不挡」的又一例。
+ *
+ * 现在两件事一起修：比较器按规范实现，夹具补上真实的 rc 版本。
  */
-function compareVersions(a: string, b: string): -1 | 0 | 1 {
-  const parse = (value: string): { nums: number[], pre: (string | number)[] } => {
-    const [core, ...rest] = value.split('-')
-    const pre = rest.join('-')
-    const nums = (core ?? '').split('.').map(part => {
-      const n = Number(part)
-      if (!Number.isInteger(n) || n < 0) throw new Error(`not a version core: ${JSON.stringify(value)}`)
-      return n
-    })
-    if (nums.length !== 3) throw new Error(`not a full x.y.z version: ${JSON.stringify(value)}`)
-    return {
-      nums,
-      pre: pre === '' ? [] : pre.split('.').map(id => (/^\d+$/.test(id) ? Number(id) : id)),
-    }
+function satisfiesRange(version: string, range: string): boolean {
+  const parts = range.trim().split(/\s+/)
+  if (parts.length !== 2) throw new Error(`unsupported range shape: ${JSON.stringify(range)}`)
+  const [lower, upper] = parts as [string, string]
+  if (!lower.startsWith('>=') || !upper.startsWith('<')) {
+    throw new Error(`unsupported range shape: ${JSON.stringify(range)}`)
   }
-  const left = parse(a)
-  const right = parse(b)
+  const candidate = parseVersion(version)
+  const lowerV = parseVersion(lower.slice(2))
+  const upperV = parseVersion(upper.slice(1))
+  if (compareParsed(candidate, lowerV) < 0) return false
+  if (compareParsed(candidate, upperV) >= 0) return false
+
+  // The prerelease cliff: a prerelease candidate is admitted only when some
+  // comparator in the set carries a prerelease on the SAME [major, minor,
+  // patch] tuple.
+  if (candidate.pre.length === 0) return true
+  return [lowerV, upperV].some(
+    bound => bound.pre.length > 0 && sameTuple(bound, candidate),
+  )
+}
+
+/** One parsed semver version. */
+interface ParsedVersion {
+  nums: [number, number, number]
+  pre: (string | number)[]
+}
+
+/** Parse `x.y.z` or `x.y.z-pre.N`; throw rather than silently mis-compare. */
+function parseVersion(value: string): ParsedVersion {
+  const [core, ...rest] = value.split('-')
+  const pre = rest.join('-')
+  const nums = (core ?? '').split('.').map(part => {
+    const n = Number(part)
+    if (!Number.isInteger(n) || n < 0) throw new Error(`not a version core: ${JSON.stringify(value)}`)
+    return n
+  })
+  if (nums.length !== 3) throw new Error(`not a full x.y.z version: ${JSON.stringify(value)}`)
+  return {
+    nums: nums as [number, number, number],
+    pre: pre === '' ? [] : pre.split('.').map(id => (/^\d+$/.test(id) ? Number(id) : id)),
+  }
+}
+
+/** Same `[major, minor, patch]` tuple. */
+function sameTuple(a: ParsedVersion, b: ParsedVersion): boolean {
+  return a.nums[0] === b.nums[0] && a.nums[1] === b.nums[1] && a.nums[2] === b.nums[2]
+}
+
+/** Total order over parsed versions (build metadata is ignored, as in semver). */
+function compareParsed(left: ParsedVersion, right: ParsedVersion): -1 | 0 | 1 {
   for (let i = 0; i < 3; i += 1) {
-    const l = left.nums[i] ?? 0
-    const r = right.nums[i] ?? 0
+    const l = left.nums[i] as number
+    const r = right.nums[i] as number
     if (l !== r) return l < r ? -1 : 1
   }
-  // 有预发布段的低于无预发布段的（1.0.0-rc.1 < 1.0.0）。
+  // A prerelease sorts BELOW the same-numbered release (1.0.0-rc.1 < 1.0.0).
   if (left.pre.length === 0 && right.pre.length === 0) return 0
   if (left.pre.length === 0) return 1
   if (right.pre.length === 0) return -1
@@ -110,38 +170,11 @@ function compareVersions(a: string, b: string): -1 | 0 | 1 {
     const lNum = typeof l === 'number'
     const rNum = typeof r === 'number'
     if (lNum && rNum) return l < r ? -1 : 1
-    if (lNum) return -1 // 数字标识符低于字母标识符
+    if (lNum) return -1 // numeric identifiers sort below alphanumeric ones
     if (rNum) return 1
     return l < r ? -1 : 1
   }
   return 0
-}
-
-/** 每个声明了 `dsh-*` peer 的包名与其范围。 */
-function dshPeers(section: 'peerDependencies' | 'devDependencies'): Array<[string, string]> {
-  const deps = manifest()[section] ?? {}
-  return Object.entries(deps).filter(
-    ([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'),
-  )
-}
-
-/**
- * 判定一个版本是否落在 `>= 下界 < 上界` 形态的范围里。
- *
- * 存在的理由：下面「上界真的挡得住」那几条**必须对声明本身求值**，而不是对
- * 测试里另写一遍的字面量求值。否则声明与断言各自漂移也照样全绿——那正是本
- * 套件要防的那类「看起来是围栏、实际不挡」的缺陷，只不过换了一层。
- *
- * 只接受本插件实际使用的形态；遇到别的形态就抛错，绝不静默放过。
- */
-function satisfiesRange(version: string, range: string): boolean {
-  const parts = range.trim().split(/\s+/)
-  if (parts.length !== 2) throw new Error(`unsupported range shape: ${JSON.stringify(range)}`)
-  const [lower, upper] = parts as [string, string]
-  if (!lower.startsWith('>=') || !upper.startsWith('<')) {
-    throw new Error(`unsupported range shape: ${JSON.stringify(range)}`)
-  }
-  return compareVersions(version, lower.slice(2)) >= 0 && compareVersions(version, upper.slice(1)) < 0
 }
 
 /**
@@ -187,15 +220,38 @@ describe('declared DSH host line', () => {
   })
 
   it('admits the whole 0.2.0 line, including its GA release', () => {
-    // 回归本体：`0.2.0` 曾被 `<0.2.0` 挡在门外，而 `0.2.0-rc.1` 能过——
-    // 「预发布能用、正式版不能用」的悬崖。这里把两者一起钉住。
+    // 回归本体：`0.2.0` 曾被 `<0.2.0` 挡在门外——「GA 放不进来」的悬崖。
+    // 这件事对**正式版**成立：`0.2.0` / `0.2.1` 都被现声明放行。
     //
     // 关键：对**声明里的那条范围**求值，而不是对测试自己另写的字面量求值。
     // 否则清单与断言各自漂移也能全绿。
+    //
+    // ⚠️ 本用例原先还把 `0.2.0-rc.1` / `0.2.0-rc.9` 也列为 admitted。那是**错的**：
+    // npm semver 对两者都判 false（元组 `0.2.0` 上没有任何预发布比较符）。
+    // 旧比较器判 true，才让这条错误夹具一直是绿的。它们现在归到下面的
+    // 「已知预发布悬崖」用例里，作为应被记录的偏差。
     const declared = declaredRange()
-    for (const host of ['0.1.7-rc.1', '0.1.7-rc.2', '0.2.0-rc.1', '0.2.0-rc.9', '0.2.0', '0.2.1', '0.2.99']) {
+    for (const host of ['0.1.7-rc.1', '0.1.7-rc.2', '0.2.0', '0.2.1', '0.2.99']) {
       expect(satisfiesRange(host, declared), `${host} in ${JSON.stringify(declared)}`).toBe(true)
     }
+  })
+
+  it('records the known 0.2.x-prerelease cliff rather than hiding it', () => {
+    // 已知偏差，**不是**通过项：现声明 `>=0.1.7-rc.1 <0.3.0-0` 在 npm semver
+    // 下**不**放行 `0.2.1-rc.1` 这类序号 > 0.2.0 的预发布（元组上没有预发布
+    // 比较符）。这条用例把这个事实**钉成期望值**，于是：
+    //   - 若有人把范围改对（例如逐补丁追加 rc 窗口），这条会变红，提醒同步
+    //     更新说明，而不是静默漂移；
+    //   - 若有人「修」比较器把它判成 true，这条同样变红。
+    //
+    // 为什么可以接受：宿主 `evaluatePluginCompatibility()` 只校验
+    // `@deepseek-ai/dsh*` 命名空间；本机 profile 用 `link:` + 默认不自动装
+    // peer，所以 rc 宿主上插件照常加载。等宿主发 `0.2.1` GA，现声明即放行。
+    const declared = declaredRange()
+    expect(satisfiesRange('0.2.1-rc.1', declared)).toBe(false)
+    expect(satisfiesRange('0.2.0-rc.1', declared)).toBe(false)
+    // GA 是被放行的 —— 这正是「等 GA」策略成立的前提。
+    expect(satisfiesRange('0.2.1', declared)).toBe(true)
   })
 
   it('the upper bound actually stops the next line, prereleases included', () => {
@@ -301,20 +357,43 @@ describe('the GitHub Release step stays in the release flow', () => {
 })
 
 describe('version-comparator self-check', () => {
-  // 上面全部断言都建立在 compareVersions 上；它自己错了，整套守卫就是装饰品。
+  // 上面全部断言都建立在比较器上；它自己错了，整套守卫就是装饰品。
+  //
+  // 这段自检**真的救过一次**：初版的 `satisfiesRange` 只做朴素 `>=`/`<`
+  // 比较，判 `0.2.1-rc.1` 通过，而 npm 实算是 false。下面的悬崖用例就是
+  // 那次缺陷的回归钉。
   it('orders prereleases below their release and compares numeric segments', () => {
-    expect(compareVersions('1.0.0-rc.1', '1.0.0')).toBe(-1)
-    expect(compareVersions('1.0.0', '1.0.0-rc.1')).toBe(1)
-    expect(compareVersions('1.0.0-rc.2', '1.0.0-rc.10')).toBe(-1)
-    expect(compareVersions('0.2.0', '0.3.0-0')).toBe(-1)
-    expect(compareVersions('0.3.0-0', '0.3.0-0')).toBe(0)
-    expect(compareVersions('0.3.0-alpha.1', '0.3.0-0')).toBe(1)
-    expect(compareVersions('1.2.0', '1.10.0')).toBe(-1)
-    expect(compareVersions('0.1.7-rc.1', '0.1.7-rc.1')).toBe(0)
+    expect(compareParsed(parseVersion('1.0.0-rc.1'), parseVersion('1.0.0'))).toBe(-1)
+    expect(compareParsed(parseVersion('1.0.0'), parseVersion('1.0.0-rc.1'))).toBe(1)
+    expect(compareParsed(parseVersion('1.0.0-rc.2'), parseVersion('1.0.0-rc.10'))).toBe(-1)
+    expect(compareParsed(parseVersion('0.2.0'), parseVersion('0.3.0-0'))).toBe(-1)
+    expect(compareParsed(parseVersion('0.3.0-0'), parseVersion('0.3.0-0'))).toBe(0)
+    expect(compareParsed(parseVersion('0.3.0-alpha.1'), parseVersion('0.3.0-0'))).toBe(1)
+    expect(compareParsed(parseVersion('1.2.0'), parseVersion('1.10.0'))).toBe(-1)
+    expect(compareParsed(parseVersion('0.1.7-rc.1'), parseVersion('0.1.7-rc.1'))).toBe(0)
   })
 
   it('rejects malformed versions instead of treating them as equal', () => {
-    expect(() => compareVersions('0.2', '0.2.0')).toThrow()
-    expect(() => compareVersions('x.y.z', '0.2.0')).toThrow()
+    expect(() => parseVersion('0.2')).toThrow()
+    expect(() => parseVersion('x.y.z')).toThrow()
+  })
+
+  it('applies the prerelease cliff exactly as npm semver does', () => {
+    // These five lines are literal transcriptions of npm semver 7.x output.
+    // The first one is the defect the old comparator had: it said `true`.
+    const range = '>=0.1.7-rc.1 <0.3.0-0'
+    expect(satisfiesRange('0.2.1-rc.1', range)).toBe(false)
+    expect(satisfiesRange('0.2.0-rc.1', range)).toBe(false)
+    expect(satisfiesRange('0.1.7-rc.1', range)).toBe(true)
+    expect(satisfiesRange('0.2.1', range)).toBe(true)
+
+    // A comparator carrying a prerelease on the SAME tuple admits it...
+    expect(satisfiesRange('0.2.1-rc.1', '>=0.2.1-rc.1 <0.3.0-0')).toBe(true)
+    // ...and one on a DIFFERENT tuple does not.
+    expect(satisfiesRange('0.2.5-rc.1', '>=0.2.1-rc.1 <0.3.0-0')).toBe(false)
+    // The `-0` upper bound still bites the next line, prereleases included.
+    for (const host of ['0.3.0-0', '0.3.0-alpha.1', '0.3.0-rc.1', '0.3.0']) {
+      expect(satisfiesRange(host, range), host).toBe(false)
+    }
   })
 })

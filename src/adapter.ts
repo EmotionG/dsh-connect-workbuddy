@@ -148,7 +148,27 @@ export function workBuddyDisplayName(info: WorkBuddyModelInfo): string {
     : `${info.name} · x${info.creditMultiplier.toFixed(2)}`
 }
 
-/** Map only levels advertised by WorkBuddy; undeclared DSH levels stay unavailable. */
+/**
+ * Map only levels advertised by WorkBuddy; undeclared DSH levels stay unavailable.
+ *
+ * `off` is offered EXACTLY when `canDisableThinking === true` and withheld
+ * (mapped to `null`) otherwise. `null` is pi-ai's "this level is not
+ * supported": `getSupportedThinkingLevels` filters on `mapped === null`, and
+ * `openai-completions` reads `thinkingLevelMap?.off !== null` to decide whether
+ * it may send a thinking-disabled request.
+ *
+ * This condition used to be inverted (`!== true` set the null), which locked
+ * `off` OFF for precisely the models that CAN disable thinking while leaving it
+ * ON for those that cannot. It stayed invisible because the only test probed
+ * the `canDisableThinking: false` half, which the inverted form also passes.
+ *
+ * The value read here is already the EFFECTIVE one: the runtime catalog is
+ * stamped by `withEffectiveOff()` before it reaches the adapter, so this is the
+ * user's `off` selection when they made one (and the upstream declaration,
+ * minus `REFUSES_OFF_MODEL_IDS`, when they never did). Absence is "unknown" and
+ * stays unoffered, matching how the rest of the plugin treats undeclared
+ * capability.
+ */
 export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyThinkingLevelMap | undefined {
   const supported = info.reasoning?.supportedEfforts?.filter((effort): effort is WorkBuddyThinkingLevel =>
     (THINKING_LEVELS as readonly string[]).includes(effort),
@@ -157,7 +177,8 @@ export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyTh
   const map: WorkBuddyThinkingLevelMap = Object.fromEntries(
     THINKING_LEVELS.map(level => [level, supported.includes(level) ? level : null]),
   )
-  if (info.reasoning?.canDisableThinking !== true) map.off = null
+  if (info.reasoning?.canDisableThinking === true) map.off = 'off'
+  else map.off = null
   return map
 }
 
@@ -237,6 +258,14 @@ function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, providerId: string
  *   text is empty but which carries `toolsAdded` still folds its TOOLS up; the
  *   placeholder for the missing prompt then comes from `ensureSystemHead` at
  *   the wire (the last of the three layers).
+ *
+ * LEGACY-ONLY. This is the inverse direction from {@link foldModernContext}:
+ * it produces the FLAT `{systemPrompt, tools, messages}` shape that ONLY
+ * pi-ai 0.85 reads. Never hand its result to a 1.x api — 1.x reads tools from
+ * `messages[].toolsAdded` and would see none (issues #25/#26). Type note: the
+ * parameter is the 0.85 `Context`; pi-ai 1.1.0 types the api's second parameter
+ * as `TranscriptContext`, so this function cannot be called with 1.x typings —
+ * that is intentional, and it is why the modern branch below does not touch it.
  */
 export function adaptLegacyPiAiContext(context: Context): Context {
   if (context === null || typeof context !== 'object') return context
@@ -326,30 +355,135 @@ function systemTextOf(message: Message): string {
 }
 
 /**
+ * Fold a RAW context into the normalized transcript the modern generation
+ * consumes: a leading `system` message carrying the prompt AND the tool
+ * declarations in its `toolsAdded` field.
+ *
+ * WHY THIS IS NEEDED AT ALL (the 0.2.1-rc.1 regression). This used to be
+ * unnecessary: the modern branch returned pi-ai's api UNWRAPPED, on the belief
+ * that the modern generation normalized for itself. It does not.
+ * `dsh-llm-pi-ai` — both the 0.1.7 and the 0.2.1 lines — hands every provider a
+ * RAW envelope (`piContext()` builds `{systemPrompt, messages, tools}` and
+ * never calls `normalizeContext`), while:
+ *
+ *   - pi-ai 0.85.x READS that raw shape (its request builder consults
+ *     `context.systemPrompt` / `context.tools` directly), and
+ *   - pi-ai 1.x READS ONLY `context.messages` (it resolves the transcript and
+ *     collapses system messages; the top-level fields are consulted nowhere).
+ *
+ * On pi-ai 1.x a pass-through request therefore went upstream with NO system
+ * prompt and NO tool declarations, silently: the model stopped calling tools,
+ * and the domestic gateway tolerated the prompt-less body. Same failure class
+ * as issues #24/#25/#26, reached from the opposite side — 4.4.2 fixed "1.x
+ * misjudged as legacy and folded"; this fixes "1.x judged modern and NOT
+ * folded, though nothing had normalized".
+ *
+ * Built inline rather than by importing pi-ai's `normalizeContext`, which does
+ * not exist in 0.85.x: a static import would be `undefined` there, and this
+ * module deliberately never imports pi-ai statically (see `pi-ai-runtime.ts` —
+ * that doctrine is what lets the standalone `bin` run in a profile where the
+ * peer is never installed). The folded shape matches what `normalizeContext`
+ * produces for the same input: `{role:'system', content, toolsAdded, timestamp:0}`.
+ *
+ * The top-level `systemPrompt`/`tools` fields are DROPPED, exactly as
+ * `normalizeContext` drops them, so a raw transcript and an already-normalized
+ * one converge on the same object.
+ */
+function foldModernContext(context: Context): Context {
+  const prompt = context.systemPrompt
+  const tools = context.tools
+  const hasPrompt = prompt !== undefined && prompt !== ''
+  const hasTools = Array.isArray(tools) && tools.length > 0
+  // Nothing to fold: an already-normalized transcript (its system message is in
+  // `messages` already). Folding again would prepend a SECOND, empty one.
+  if (!hasPrompt && !hasTools) return context
+  const system = {
+    role: 'system',
+    content: prompt ?? '',
+    ...(hasTools ? { toolsAdded: tools } : {}),
+    timestamp: 0,
+  } as unknown as Message
+  const { systemPrompt: _prompt, tools: _tools, ...rest } = context as Context & {
+    systemPrompt?: string
+    tools?: Context['tools']
+  }
+  return { ...rest, messages: [system, ...context.messages] } as Context
+}
+
+/**
  * Wrap one pi-ai API module so both stream entry points receive a context this
- * build can actually consume (see {@link adaptLegacyPiAiContext}) — but only
- * when the module RESOLVED for this plugin is the legacy generation.
+ * generation can actually consume.
  *
  * The gate is the plugin's own module, resolved via {@link piAiRuntimeInfo}
- * (manifest version of the copy this plugin resolves — no pi-ai import): a
- * modern (0.87+) api consumes the normalized
- * transcript natively — its request builder reads the prompt from the leading
- * system message and the tools from that message's `toolsAdded`, and never
- * reads the top-level `systemPrompt`/`tools` fields at all. Folding for it
- * would delete the only carrier of both (issues #25/#26: the international
- * gateway answers the prompt-less body with 400 / 11128, the domestic one
- * accepts it and the model fabricates tool calls it can never actually make).
- * The unwrapped modern api is returned AS-IS — byte-for-byte pass-through.
+ * (manifest version of the copy this plugin resolves — no pi-ai import):
+ *
+ * - `legacy` (0.85) wants the flat `{systemPrompt, tools, messages}` shape, so
+ *   a normalized transcript is UN-folded by {@link adaptLegacyPiAiContext}.
+ * - `modern` (0.87+, incl. 1.x) wants the normalized transcript, so a raw
+ *   envelope is FOLDED by {@link foldModernContext}. Passing it through
+ *   unnormalized is what silently deleted the prompt and the tools on pi-ai
+ *   1.x — the regression this branch now prevents.
+ *
+ * Both branches are idempotent, so a future seam that starts normalizing on its
+ * own side changes nothing here.
  *
  * The deferred-fetch entry points take no context and are passed through as-is
  * in both branches.
  */
+/**
+ * Present an adapted context as the type the api's parameter currently expects.
+ *
+ * pi-ai 1.x BRANDS its provider-facing context (`TranscriptContext`, a
+ * `unique symbol` field) precisely so a raw `Context` cannot reach provider
+ * code by accident; the brand's stated sole producer is `normalizeContext()`.
+ * On a 1.x typings surface BOTH branches below receive that branded type, so
+ * merely returning a plain `Context` fails `tsc` with TS2345 — an error that
+ * only appears when the peer TYPES are 1.x, which is why the 0.85 checkout
+ * never saw it.
+ *
+ * The cast is a deliberate, documented assertion of exactly what the brand
+ * protects, and it is true after the call site has done the work:
+ *
+ * - modern: {@link foldModernContext} has already performed
+ *   `normalizeContext`'s job — prompt and tools live on the leading system
+ *   message, top-level fields gone;
+ * - legacy: {@link adaptLegacyPiAiContext} produced the FLAT 0.85 shape, which
+ *   is only ever observed on a 0.85 checkout, where this type is a plain
+ *   `Context` and the cast is an upcast.
+ *
+ * Do NOT "fix" this by importing `normalizeContext`: it does not exist in
+ * 0.85, so that import would be `undefined` at runtime on the very hosts this
+ * code must keep working — the same reason `pi-ai-runtime.ts` documents why
+ * this module never imports pi-ai statically.
+ */
+function transcript<T>(context: Context): T {
+  return context as unknown as T
+}
+
 function withLegacyContext(api: ProviderStreams, generation: PiAiGeneration): ProviderStreams {
-  if (generation === 'modern') return api
+  if (generation === 'modern') {
+    return {
+      ...api,
+      stream: (model, context, options) =>
+        api.stream(model, transcript<Parameters<typeof api.stream>[1]>(foldModernContext(context)), options),
+      streamSimple: (model, context, options) =>
+        api.streamSimple(
+          model,
+          transcript<Parameters<typeof api.streamSimple>[1]>(foldModernContext(context)),
+          options,
+        ),
+    }
+  }
   return {
     ...api,
-    stream: (model, context, options) => api.stream(model, adaptLegacyPiAiContext(context), options),
-    streamSimple: (model, context, options) => api.streamSimple(model, adaptLegacyPiAiContext(context), options),
+    stream: (model, context, options) =>
+      api.stream(model, transcript<Parameters<typeof api.stream>[1]>(adaptLegacyPiAiContext(context)), options),
+    streamSimple: (model, context, options) =>
+      api.streamSimple(
+        model,
+        transcript<Parameters<typeof api.streamSimple>[1]>(adaptLegacyPiAiContext(context)),
+        options,
+      ),
   }
 }
 

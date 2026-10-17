@@ -2,7 +2,7 @@
   "name": "dsh-connect-workbuddy",
   "displayName": "DSH Connect WorkBuddy",
   "description": "把本机登录的 WorkBuddy 模型接入 DeepSeek Harness，并提供只读的积分概览与模型管理。",
-  "version": "4.6.7",
+  "version": "4.7.0",
   "author": "dingminhua",
   "copyright": "Copyright (c) 2026 LaoDing",
   "license": "MIT",
@@ -91,7 +91,7 @@
     "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-settings": ">=0.1.7-rc.1 <0.3.0-0",
     "@deepseek-ai/schemastery": ">=3.18.1-rc.1 <4.0.0 || >=3.18.2 <4.0.0",
-    "@earendil-works/pi-ai": ">=0.85.0 <0.88.0",
+    "@earendil-works/pi-ai": ">=0.85.0 <0.88.0 || >=1.0.0-0 <2.0.0",
     "react": "^18.2.0"
   },
   "devDependencies": {
@@ -110,7 +110,7 @@
     "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-settings": ">=0.1.7-rc.1 <0.3.0-0",
     "@deepseek-ai/schemastery": ">=3.18.1 <4.0.0 || >=3.18.2 <4.0.0",
-    "@earendil-works/pi-ai": ">=0.85.0 <0.88.0",
+    "@earendil-works/pi-ai": ">=0.85.0 <0.88.0 || >=1.0.0-0 <2.0.0",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.31",
     "@types/react-dom": "18.3.7",

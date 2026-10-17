@@ -2,9 +2,9 @@
  * Which `@earendil-works/pi-ai` copy THIS plugin actually resolves at runtime.
  *
  * WHY THIS EXISTS (issues #24 / #25 / #26). The plugin declares pi-ai as a
- * peer (`>=0.85.0 <0.88.0`), so the module it imports is whatever the host
- * environment provides — and the two generations consume DIFFERENT context
- * shapes:
+ * peer (`>=0.85.0 <0.88.0 || >=1.0.0-0 <2.0.0`), so the module it imports is
+ * whatever the host environment provides — and the two generations consume
+ * DIFFERENT context shapes:
  *
  * - 0.87 hands providers a normalized transcript: `{ messages: [ {role:
  *   'system', content, toolsAdded}, … ] }`. The system prompt and the tool
@@ -147,8 +147,9 @@ function readVersion(moduleFile: string | undefined): string | undefined {
  * doctor shows it as unreadable, so the guess is visible rather than silent).
  *
  * The 1.x line MUST land on `modern`, and it is not a hypothetical: DSH
- * 0.2.1-alpha.2 ships `@earendil-works/pi-ai@1.0.2`, while npm currently
- * publishes 1.1.0. Both 0.87.1 and 1.0.2/1.1.0 read tools from the same place
+ * 0.2.1-alpha.2 ships `@earendil-works/pi-ai@1.0.2`, and DSH 0.2.1-rc.1 ships
+ * 1.1.0 (which is the version this plugin is now tested against). Both 0.87.1
+ * and 1.0.2/1.1.0 read tools from the same place
  * (`context.messages` → the leading system message's `toolsAdded`; see
  * pi-ai's `resolveTranscriptTools`). Matching only `0.<minor>.` classified
  * 1.0.2 as `legacy`, so `withLegacyContext` folded the transcript into the
@@ -164,6 +165,13 @@ function readVersion(moduleFile: string | undefined): string | undefined {
  * observed 1.x line (including current 1.1.0) without assuming an uninspected
  * future major such as 2.x keeps the same transcript contract. The declared
  * peer range remains the plugin's supported-version boundary.
+ *
+ * ⚠️ Being on `modern` is necessary but NOT sufficient. The modern branch must
+ * also FOLD a raw seam envelope: `dsh-llm-pi-ai` never normalizes, and 1.x
+ * reads only `context.messages`. Between 4.4.2 (which taught this function
+ * about major 1) and the 0.2.1-rc.1 fix, `withLegacyContext` returned the
+ * modern api UNWRAPPED, so every request on pi-ai 1.x went upstream with no
+ * prompt and no tool declarations. See `foldModernContext` in `adapter.ts`.
  */
 function generationOf(version: string | undefined): PiAiGeneration {
   if (version === undefined) return 'legacy'
