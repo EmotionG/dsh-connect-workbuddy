@@ -368,15 +368,35 @@ function retryDue(
  *
  * 1. **Usability.** Only accounts that can be billed right now are candidates;
  *    they always outrank every excluded one.
- * 2. **Credits, highest first.** Spend the account that has the most, so an
- *    account running low is conserved rather than drained first.
- * 3. **Credits expiring soonest first.** Points about to expire are worth
- *    exactly zero after they do, so using them earlier is strictly better than
- *    saving them.
- * 4. **Freshest credential.** Tie-break so a stale token never wins a draw.
- * 5. **Account id.** Final tie-break, making the order TOTAL: two accounts
+ * 2. **Expiring credits first, soonest first.** Points about to expire are
+ *    worth exactly zero after they do, so spending them before they lapse is
+ *    strictly better than saving them.
+ * 3. **Largest expiring amount.** Between two accounts that both have expiring
+ *    points, the one with more at risk goes first.
+ * 4. **Credits, highest first.** Among accounts with nothing expiring, spend the
+ *    one with the most, so a nearly-drained account is conserved.
+ * 5. **Freshest credential.** Tie-break so a stale token never wins a draw.
+ * 6. **Account id.** Final tie-break, making the order TOTAL: two accounts
  *    equal on every ranking key would otherwise keep the caller's array order,
  *    so the same pool could rotate differently between two runs.
+ *
+ * WHY EXPIRY OUTRANKS SIZE (issue #70). These used to be strict lexicographic
+ * keys: total, THEN expiry. Since totals are almost never exactly equal, the
+ * expiry rule was unreachable — a live report had an account with 196 points
+ * lapsing that day ranked LAST, behind two accounts that expire weeks later,
+ * simply because it held ~1,200 fewer points overall. It was never selected, so
+ * the 196 points always lapsed. A "use it or lose it" rule that another rule
+ * completely shadows is not a tie-break, it is dead code.
+ *
+ * WHY SPENDING THE SMALL EXPIRING ACCOUNT IS STILL RIGHT. Ordering by expiry
+ * does mean an account with 1 point lapsing outranks one holding 50,000. That
+ * looks wrong and is not: credits are fungible, so using the rich account
+ * instead does not preserve the 1 point — it spends the 1 point's chance and
+ * loses it. Using the expiring account spends a point that was going to be lost
+ * anyway, and the rich account is still there for the next request. The only
+ * real cost is a failover round-trip if the expiring account cannot cover a
+ * whole request, which the exclusion/failover path already absorbs. Ordering by
+ * total instead loses the expiring points with certainty.
  *
  * Excluded accounts are still RETURNED (sorted after the candidates) so the
  * card can explain why each is out; they differ from candidates by
@@ -398,14 +418,33 @@ export function rankPool(
       ...excludedBy === undefined ? {} : { excludedBy },
       // Ordering keys below the primary score; not part of the public row.
       _usable: excludedBy === undefined,
+      // Whether ANYTHING lapses within the window, and how much.
+      //
+      // `expiringSoon` is the amount (credits); `nearestExpiryMs` is a
+      // timestamp. Comparing them directly would be a units error, so they
+      // stay two separate keys: `_expiring` now means "has something at risk"
+      // (the old key reused the name for the raw timestamp, which is why the
+      // amount was never consultable at all).
+      _atRisk: (member.credits?.expiringSoon ?? 0) > 0,
+      _expiringAmount: member.credits?.expiringSoon ?? 0,
       _expiring: member.credits?.nearestExpiryMs ?? Number.POSITIVE_INFINITY,
       _tokenExpiresAtMs: member.tokenExpiresAtMs ?? 0,
     }
   })
   rows.sort((left, right) => {
     if (left._usable !== right._usable) return left._usable ? -1 : 1
+    // Expiring credits before anything else among usable accounts (issue #70).
+    if (left._atRisk !== right._atRisk) return left._atRisk ? -1 : 1
+    // Both at risk: whichever lapses FIRST goes first.
+    if (left._atRisk && right._atRisk && left._expiring !== right._expiring) {
+      return left._expiring - right._expiring
+    }
+    // Same expiry (or neither at risk): the larger amount at stake wins, which
+    // for accounts with nothing expiring falls through to total credits.
+    if (left._expiringAmount !== right._expiringAmount) {
+      return right._expiringAmount - left._expiringAmount
+    }
     if (left.score !== right.score) return right.score - left.score
-    if (left._expiring !== right._expiring) return left._expiring - right._expiring
     if (left._tokenExpiresAtMs !== right._tokenExpiresAtMs) {
       return right._tokenExpiresAtMs - left._tokenExpiresAtMs
     }

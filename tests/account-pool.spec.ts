@@ -250,9 +250,14 @@ describe('rankPool', () => {
   })
 
   it('prefers the account whose credits expire soonest when totals tie', () => {
+    // Both must carry points genuinely AT RISK (`expiringSoon`), because that is
+    // what "expiring" means to the ranking since issue #70. The old key compared
+    // the raw `nearestExpiryMs` timestamp and never consulted the amount, so this
+    // fixture passed while carrying `expiringSoon: 0` on BOTH accounts — it was
+    // asserting a path the old rule reached only by ignoring the amount.
     const ranked = rankPool([
-      member('late', { credits: 100, nearestExpiryMs: NOW + 30 * 86_400_000 }),
-      member('soon', { credits: 100, nearestExpiryMs: NOW + 86_400_000 }),
+      member('late', { credits: 100, expiringSoon: 100, nearestExpiryMs: NOW + 30 * 86_400_000 }),
+      member('soon', { credits: 100, expiringSoon: 100, nearestExpiryMs: NOW + 86_400_000 }),
     ], NOW)
     expect(ranked[0]?.account.id).toBe('soon')
   })
@@ -260,7 +265,7 @@ describe('rankPool', () => {
   it('ranks an account with no expiry after one that expires', () => {
     const ranked = rankPool([
       member('never', { credits: 100 }),
-      member('expires', { credits: 100, nearestExpiryMs: NOW + 86_400_000 }),
+      member('expires', { credits: 100, expiringSoon: 100, nearestExpiryMs: NOW + 86_400_000 }),
     ], NOW)
     expect(ranked[0]?.account.id).toBe('expires')
   })
@@ -271,6 +276,81 @@ describe('rankPool', () => {
       member('fresh', { credits: 100, tokenExpiresAtMs: NOW + 86_400_000 }),
     ], NOW)
     expect(ranked[0]?.account.id).toBe('fresh')
+  })
+
+  describe('expiring credits outrank a larger balance (issue #70)', () => {
+    /**
+     * The live case from the report, reproduced with its real numbers.
+     *
+     * C held 196.40 points expiring the same day but ~1,200 fewer points than
+     * A and B, whose packages expire weeks later. Under the old lexicographic
+     * keys (total, then expiry) C ranked LAST every time, so it was never
+     * selected and its 196.40 points always lapsed.
+     */
+    it('ranks the account whose points lapse today above bigger accounts that lapse later', () => {
+      const ranked = rankPool([
+        member('A', { credits: 2596.88, expiringSoon: 0, nearestExpiryMs: NOW + 31 * 86_400_000 }),
+        member('B', { credits: 2594.73, expiringSoon: 0, nearestExpiryMs: NOW + 31 * 86_400_000 }),
+        member('C', { credits: 1396.40, expiringSoon: 196.40, nearestExpiryMs: NOW + 13 * 3_600_000 }),
+      ], NOW)
+      expect(ranked.map(row => row.account.id)).toEqual(['C', 'A', 'B'])
+    })
+
+    it('still spends the LARGEST balance when nothing is expiring', () => {
+      // The change must not disturb the ordinary case: no expiry ⇒ highest
+      // total first, exactly as before.
+      const ranked = rankPool([
+        member('small', { credits: 10, expiringSoon: 0, nearestExpiryMs: NOW + 86_400_000 }),
+        member('large', { credits: 900, expiringSoon: 0, nearestExpiryMs: NOW + 31 * 86_400_000 }),
+      ], NOW)
+      expect(ranked.map(row => row.account.id)).toEqual(['large', 'small'])
+    })
+
+    it('ranks a smaller expiring balance above a much larger one that is not expiring', () => {
+      // Deliberate, and the part that reads wrong at first glance: credits are
+      // fungible, so saving the big balance costs the 1 point with certainty,
+      // whereas spending the small account loses nothing (the big one is still
+      // there next request). Guarded so nobody "fixes" it back to a total-first
+      // order thinking it is a bug.
+      const ranked = rankPool([
+        member('rich-no-expiry', { credits: 50_000, expiringSoon: 0, nearestExpiryMs: NOW + 30 * 86_400_000 }),
+        member('tiny-expiring', { credits: 1, expiringSoon: 1, nearestExpiryMs: NOW + 86_400_000 }),
+      ], NOW)
+      expect(ranked.map(row => row.account.id)).toEqual(['tiny-expiring', 'rich-no-expiry'])
+    })
+
+    it('ranks the sooner lapsing account first when both have points at risk', () => {
+      const ranked = rankPool([
+        member('in-two-days', { credits: 2000, expiringSoon: 300, nearestExpiryMs: NOW + 2 * 86_400_000 }),
+        member('today', { credits: 1396, expiringSoon: 196, nearestExpiryMs: NOW + 3_600_000 }),
+      ], NOW)
+      expect(ranked.map(row => row.account.id)).toEqual(['today', 'in-two-days'])
+    })
+
+    it('ranks the larger amount at risk first when both lapse at the same moment', () => {
+      const same = NOW + 86_400_000
+      const ranked = rankPool([
+        member('less-at-risk', { credits: 900, expiringSoon: 10, nearestExpiryMs: same }),
+        member('more-at-risk', { credits: 500, expiringSoon: 400, nearestExpiryMs: same }),
+      ], NOW)
+      expect(ranked.map(row => row.account.id)).toEqual(['more-at-risk', 'less-at-risk'])
+    })
+
+    it('never promotes an account whose points are expiring but which cannot be billed', () => {
+      // Usability still comes first: an account in cooldown cannot spend its
+      // lapsing points either, so promoting it would strand every request.
+      const ranked = rankPool([
+        member('expiring-but-limited', {
+          credits: 500,
+          expiringSoon: 500,
+          nearestExpiryMs: NOW + 3_600_000,
+          probe: { outcome: 'rate-limited', atMs: NOW, retryAtMs: NOW + 60_000 },
+        }),
+        member('ok-no-expiry', { credits: 10, expiringSoon: 0, nearestExpiryMs: NOW + 30 * 86_400_000 }),
+      ], NOW)
+      expect(ranked[0]?.account.id).toBe('ok-no-expiry')
+      expect(ranked[1]?.excludedBy).toBe('rate-limited')
+    })
   })
 
   it('ranks unreadable credits as zero, never first', () => {
