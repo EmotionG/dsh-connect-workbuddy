@@ -201,6 +201,13 @@ export interface RecoveryGate {
   /** Tool names this request offered. Empty means recovery is off (gate 3). */
   declaredNames: ReadonlySet<string>
   /**
+   * Parameter names each declared tool accepts, from its JSON schema
+   * (`properties`). Read by the schema-gated recovery below and by nothing
+   * else; absent means "unknown", which refuses that recovery rather than
+   * guessing.
+   */
+  acceptedParameters?: ReadonlyMap<string, ReadonlySet<string>>
+  /**
    * Required parameter names per tool, from each tool's JSON schema.
    *
    * Gate 4's second half: a declared tool whose required parameter is missing
@@ -215,6 +222,41 @@ export interface RecoveryGate {
    * caller asked for exactly that tool and nothing else may be recovered.
    */
   pinnedToolName?: string
+  /**
+   * Opt in to naming a call from its ARGUMENTS when the opener names no tool.
+   *
+   * Captured from `session-333b5f2d` (turns 8–10, 2026-10-18): the model wrote
+   *
+   *     <｜DSML｜ invoke>
+   *     <｜DSML｜ parameter name="command">grep …</｜DSML｜ parameter>
+   *     <｜DSML｜ parameter name="description">…</｜DSML｜ parameter>
+   *     </｜DSML｜ invoke>
+   *
+   * with no `name` anywhere. Gate 2 cannot accept it there is no name to check,
+   * and gate 4 correctly refused to invent one — so the user received the raw
+   * markup as the answer, four times in one session.
+   *
+   * The recovery that fixes this does NOT invent a name either. It picks a
+   * declared tool only when the evidence is the model's own: every parameter
+   * tag the block carries is accepted by that tool's schema, every required
+   * parameter is present, and exactly ONE declared tool satisfies both. Two
+   * tools that fit, or an unknown parameter, or a missing schema: the block is
+   * returned untouched, exactly as gate 4 says.
+   *
+   * Off unless the caller turns it on, and only ever consulted for a block
+   * with NO opener attributes at all.
+   */
+  inferFromSchema?: boolean
+  /**
+   * Called once per withheld block, when the stream declined to recover AND
+   * declined to show what it found.
+   *
+   * A hook rather than a second return channel because the reason belongs to
+   * the response, not the buffer: one notice per turn, whatever the number of
+   * blocks. The plugin never throws through this — a diagnostic must not fail
+   * a chat request.
+   */
+  onWithheld?: (reason: 'unnamed-invoke' | 'stray-markup') => void
 }
 
 /** What one {@link DsmlStreamBuffer.add} call produced. */
@@ -232,6 +274,26 @@ export interface BufferOutcome {
    * retry-when-the-turn-produced-nothing rule checkable rather than guessed.
    */
   prose: boolean
+  /**
+   * True when {@link text} WITHHELD something the model wrote: an unanswered
+   * name-less `<｜DSML｜ invoke>` block, or a marker-bearing tag that was
+   * dropped from otherwise-ordinary prose.
+   *
+   * This is not a recovery, and the caller must not treat it as one. It exists
+   * because gate 4's "show it, do not hide it" rule only applies where the
+   * block might be content a person would want (the `validate` shape, a
+   * quotation). A partial invocation — parameters, no name — is a defect being
+   * surfaced in the answer, not an answer, and the caller reports it as
+   * {@link RecoveryGate.onWithheld} instead of printing the markup. See
+   * `docs/DSML-RECOVERY-PLAN.md` §6 for the session that forced this split.
+   */
+  withheld: boolean
+  /**
+   * Why content was withheld, for the caller's notice. Only the FIRST reason
+   * ever observed is kept: the user needs to know the turn was interfered
+   * with, and repeating the same cause per block is noise.
+   */
+  withheldReason?: 'unnamed-invoke' | 'stray-markup'
 }
 
 // ---------------------------------------------------------------------------
@@ -662,7 +724,7 @@ function nestedOrText(value: string): ParameterValue {
  * This is where gates 2 and 4 live. Returning nothing is the COMMON case for
  * mistaken input and is not an error: callers must show the block verbatim.
  */
-function parseBlock(block: string, gate: RecoveryGate): RecoveredToolCall[] {
+function parseBlock(block: string, gate: RecoveryGate, seen: Withheld): RecoveredToolCall[] {
   const calls: RecoveredToolCall[] = []
   const spans = ignoredSpans(block)
   let index = 0
@@ -675,6 +737,16 @@ function parseBlock(block: string, gate: RecoveryGate): RecoveredToolCall[] {
       if (close === undefined) break
       const call = parseInvoke(tag, close, block, gate)
       if (call !== undefined) calls.push(call)
+      // A complete invocation the gates refused AND that names no tool is not
+      // something the model intended the user to read. It is either a defect
+      // (see `inferFromSchema`) or, if unrecoverable, something to withhold and
+      // report — never something to hand the user as an answer. Gate 4 still
+      // shows every REFUSAL that carries a tool name, exactly as before.
+      //
+      // Only when a report can actually be delivered: the caller showing the
+      // block instead is the safe outcome, and marking it withheld while
+      // printing it would make the notice a lie.
+      else if (tag.attributes.trim() === '' && gate.onWithheld !== undefined) seen.reason ??= 'unnamed-invoke'
       index = close.end + 1
       continue
     }
@@ -682,6 +754,11 @@ function parseBlock(block: string, gate: RecoveryGate): RecoveredToolCall[] {
   }
 
   return calls
+}
+
+/** The first reason anything was withheld anywhere in one outcome. */
+interface Withheld {
+  reason?: 'unnamed-invoke' | 'stray-markup'
 }
 
 /** One `<invoke>` element → a call, or nothing when a gate refuses it. */
@@ -692,19 +769,33 @@ function parseInvoke(
   gate: RecoveryGate,
 ): RecoveredToolCall | undefined {
   const attributes = parseAttributes(open.attributes)
-  const name = attributes['name']
-  if (name === undefined || name === '') return undefined
+  const declared = attributes['name']
+  const parameters = parseParameters(block.slice(open.end + 1, close.start))
 
-  // Gate 2: a name the request never offered is not a call we may invent.
-  if (!gate.declaredNames.has(name)) return undefined
+  let name: string | undefined
+  if (declared !== undefined && declared !== '') {
+    // Gate 2: a name the request never offered is not a call we may invent.
+    if (!gate.declaredNames.has(declared)) return undefined
+    name = declared
+  } else if (open.attributes.trim() === '') {
+    // No attributes at all — the shape the upstream produced in
+    // session-333b5f2d. If the caller turned on `inferFromSchema`, the name is
+    // read from the model's own evidence (its parameter tags) under the
+    // request's schemas; anything less than certainty returns undefined and
+    // the block keeps its gate-4 fate.
+    name = inferNameFromSchema(parameters, gate)
+    if (name === undefined) return undefined
+  } else {
+    // A name-bearing opener with an empty `name=""` is a refused call, not an
+    // inference candidate: there is no parameter evidence that could repair it.
+    return undefined
+  }
 
   // Gate 2, pinned form: the caller asked for one tool by name.
   const pinned = gate.pinnedToolName
   if (pinned !== undefined && pinned !== 'auto' && pinned !== 'required' && pinned !== 'none' && pinned !== name) {
     return undefined
   }
-
-  const parameters = parseParameters(block.slice(open.end + 1, close.start))
 
   // Gate 4: a declared tool missing a required parameter is a truncated call.
   const required = gate.requiredParameters?.get(name)
@@ -715,6 +806,40 @@ function parseInvoke(
     name,
     arguments: JSON.stringify(parameters),
   }
+}
+
+/**
+ * Name a call from its ARGUMENTS when the opener names no tool — or refuse.
+ *
+ * The evidence is the model's own parameter tags; the constraint is the
+ * request's schemas. A tool qualifies only when every tag the block carries is
+ * accepted by its schema AND every required parameter is already present, and
+ * exactly ONE declared tool qualifies. Everything less certain refuses:
+ *
+ *   - a block with no parameter tags at all (no evidence to read);
+ *   - a tool whose schema is unknown here (it cannot be cleared — silence must
+ *     not let an unverified tool win or lose);
+ *   - a parameter no accepted set lists;
+ *   - two tools that both fit ("the only tool on offer" was the whole point).
+ */
+function inferNameFromSchema(
+  parameters: Record<string, ParameterValue>,
+  gate: RecoveryGate,
+): string | undefined {
+  const tags = Object.keys(parameters)
+  if (tags.length === 0) return undefined
+
+  let fit: string | undefined
+  for (const tool of gate.declaredNames) {
+    const accepted = gate.acceptedParameters?.get(tool)
+    if (accepted === undefined) return undefined
+    if (tags.some(tag => !accepted.has(tag))) continue
+    const required = gate.requiredParameters?.get(tool)
+    if (required !== undefined && required.some(parameter => parameters[parameter] === undefined)) continue
+    if (fit !== undefined) return undefined
+    fit = tool
+  }
+  return fit
 }
 
 /**
@@ -734,15 +859,18 @@ export function parseToolCalls(text: string, gate: RecoveryGate): RecoveredToolC
   if (gate.declaredNames.size === 0) return []
 
   const calls: RecoveredToolCall[] = []
+  const seen: Withheld = {}
   let remaining = text
 
   // One response can carry several blocks, and all of them are recovered.
   while (remaining !== '') {
     const found = findFirstOpener(remaining, ignoredSpans(remaining))
     if (found === undefined || found.close === undefined) break
-    calls.push(...parseBlock(remaining.slice(found.open.start, found.close.end + 1), gate))
+    calls.push(...parseBlock(remaining.slice(found.open.start, found.close.end + 1), gate, seen))
     remaining = remaining.slice(found.close.end + 1)
   }
+
+  if (seen.reason !== undefined) gate.onWithheld?.(seen.reason)
 
   return calls
 }
@@ -791,6 +919,82 @@ export function stripMarkup(text: string): string {
   }
 
   return result
+}
+
+/**
+ * Drop stray marker-bearing tags from otherwise-ordinary prose, and say so.
+ *
+ * This is the OTHER half of "the user must never see protocol debris": a block
+ * is handled by {@link parseBlock} (recovered, withheld, or shown verbatim by
+ * gate 4), but lone tags outside every block — `</｜DSML｜｜ calls>` closing a
+ * wrapper whose opener belonged to a withheld call, `<｜DSML｜ validate>` —
+ * arrive as plain text and used to be forwarded raw. They are markup, not the
+ * answer: {@link stripMarkup} already knows exactly which bytes those are
+ * (marker-bearing tags only, quoted ones inside fences and code spans kept),
+ * so this runs it and records the removal. The record makes it reportable —
+ * silence about removing content is the failure mode this whole module exists
+ * to avoid.
+ *
+ * Gate 4's "show it verbatim" applies to BLOCKS (which may be content); a lone
+ * marker tag has no content of its own to lose, only the name it wears.
+ */
+function stripStray(text: string, seen: Partial<Withheld>): string {
+  const cleaned = stripMarkup(text)
+  if (cleaned !== text) seen.reason ??= 'stray-markup'
+  return cleaned
+}
+
+/**
+ * Drop a marker-bearing tag fragment that the stream held and can never finish.
+ *
+ * {@link holdFrom} keeps back a tail that could still become a block opener, so
+ * at end of stream that held tail is by construction an unterminated `<…`. Two
+ * outcomes, and the difference is the marker:
+ *
+ *   - it carries the marker (`<｜DSM`, `</｜DSML｜ invo`): the marker is what
+ *     makes it protocol debris rather than prose. Its close is never coming, so
+ *     forwarding it hands the user half a tag — the `</｜DSML｜ invo` that
+ *     trailed a killed stream. It goes, and says so.
+ *   - it does not (`<`, `</`, `<tool`): a bare `<` is doubt, not evidence, and
+ *     is kept. A person may have meant the character, and half a word is a
+ *     worse lie than a stray bracket.
+ *
+ * Only the LAST `<` is examined. Everything before it was already cleared by
+ * `holdFrom`, and an earlier `<` inside ordinary prose must not be dragged out
+ * along with the fragment that happens to follow it.
+ */
+function dropUnfinishedMarkerTail(text: string, seen: Partial<Withheld>): string {
+  const lastLt = text.lastIndexOf('<')
+  if (lastLt === -1) return text
+  if (!isLateMarkerFragment(text.slice(lastLt))) return text
+  seen.reason ??= 'stray-markup'
+  return text.slice(0, lastLt)
+}
+
+/**
+ * Is this unterminated tag fragment a marker-bearing one?
+ *
+ * Deliberately narrow, for the same reason {@link looksLikeTagStart} is: it must
+ * still be open (`>` never arrived, which is what "held at end of stream" means)
+ * and, once the `<` and an optional `/` are stripped, the rest must BE a partial
+ * marker or be a complete marker followed by a partial name. `<tool` fails the
+ * second test and survives; so does `<`, which is not evidence of anything.
+ */
+function isLateMarkerFragment(tail: string): boolean {
+  if (!tail.startsWith('<')) return false
+  if (tail.includes('>')) return false
+
+  let body = tail.slice(1)
+  if (body.startsWith('/')) body = body.slice(1)
+  if (body === '') return false
+
+  // `<｜`, `<｜DSM`, `<|DSML|` — the marker itself is still arriving.
+  if (isPartialMarker(body)) return true
+
+  // `<｜DSML｜ invo` — the marker is complete, the name after it is not.
+  const prefixLength = prefixLengthAt(body, 0)
+  if (prefixLength === 0) return false
+  return /^[A-Za-z_-]*$/.test(body.slice(prefixLength).trim())
 }
 
 /**
@@ -861,6 +1065,11 @@ function looksLikeTagStart(tail: string): boolean {
   if (body === '' || isPartialMarker(body)) return true
 
   const prefixLength = prefixLengthAt(body, 0)
+  // A COMPLETE marker means this fragment is protocol markup, whatever name is
+  // still arriving, so the whole tag must be judged at once: holding it is the
+  // difference between "one debris tag" and "half a tag printed, then the other
+  // half a moment later" — the split-tag leak this rule exists to close.
+  if (prefixLength > 0) return true
   body = body.slice(prefixLength).trim().toLowerCase()
   if (body === '' || isPartialMarker(body)) return true
 
@@ -915,6 +1124,22 @@ function normalizeFullwidth(text: string): string {
 export class DsmlStreamBuffer {
   private pending = ''
   private readonly gate: RecoveryGate
+  /** The first withholding reason observed in this stream, reported once. */
+  private withHeld: Partial<Withheld> = {}
+  /**
+   * Set once anything has been withheld from this response.
+   *
+   * It gates the debris sweep, and that is the whole point: gate 4 promises a
+   * REFUSED block is shown verbatim, so marker text must survive the stream
+   * untouched in every response that withheld nothing. Only after a block has
+   * been removed can the tags left around it be known to belong to markup the
+   * reader is no longer seeing — the wrapper's own `calls` closer, the opener
+   * the withheld call never got. Before that, a marker tag in the text may be
+   * the answer itself.
+   */
+  private withheldOnce = false
+  /** Whether the one notice allowed per response has gone out. See `takeWithheld`. */
+  private noticeSent = false
 
   constructor(gate: RecoveryGate) {
     this.gate = gate
@@ -931,14 +1156,14 @@ export class DsmlStreamBuffer {
     if (this.gate.declaredNames.size === 0) {
       const text = this.pending
       this.pending = ''
-      return { text, prose: hasProse(text) }
+      return { text, prose: hasProse(text), withheld: false }
     }
 
     for (;;) {
       const found = findFirstOpener(this.pending, ignoredSpans(this.pending))
       if (found === undefined) break
 
-      const head = this.pending.slice(0, found.open.start)
+      const head = this.stripDebris(this.pending.slice(0, found.open.start))
       if (head !== '') parts.push(head)
 
       // Gate 1: the close has not arrived, so nothing may be committed. The
@@ -946,14 +1171,24 @@ export class DsmlStreamBuffer {
       // the rest finally arrives.
       if (found.close === undefined) {
         this.pending = this.pending.slice(found.open.start)
-        return finish(parts, calls)
+        return finish(parts, calls, this.takeWithheld())
       }
 
       const body = this.pending.slice(found.open.start, found.close.end + 1)
-      const recovered = parseBlock(body, this.gate)
+      const recovered = parseBlock(body, this.gate, this.withHeld)
       if (recovered.length > 0) calls.push(...recovered)
-      // Gate 4: refused, so the block is shown exactly as it arrived.
-      else parts.push(body)
+      // Gate 4: refused, so the block is shown exactly as it arrived — EXCEPT
+      // the name-less invocation, which is a defect rather than content. That
+      // one is withheld and reported instead; see `withheldOn`. The exception
+      // is keyed on a missing `name` attribute only, so a block whose name is
+      // present but refused (undeclared tool, pinned tool_choice, missing
+      // required parameter) is still shown verbatim, exactly as gate 4 says.
+      //
+      // Withholding needs somewhere to REPORT to. With no `onWithheld` the
+      // removal would be silent, and a silently deleted answer is worse than
+      // the markup it replaced: so the block keeps its gate-4 fate and the
+      // reader at least sees what the model actually wrote.
+      else if (!isUnnamedInvoke(body) || this.gate.onWithheld === undefined) parts.push(body)
 
       this.pending = this.pending.slice(found.close.end + 1)
     }
@@ -961,24 +1196,104 @@ export class DsmlStreamBuffer {
     // Nothing committable left: emit everything except a tail that could still
     // turn into a tag, or that sits inside an unclosed code span.
     const hold = holdFrom(this.pending, ignoredSpans(this.pending))
-    if (hold > 0) parts.push(this.pending.slice(0, hold))
+    if (hold > 0) {
+      const tail = this.stripDebris(this.pending.slice(0, hold))
+      if (tail !== '') parts.push(tail)
+    }
     this.pending = this.pending.slice(hold)
 
-    return finish(parts, calls)
+    return finish(parts, calls, this.takeWithheld())
   }
 
-  /** End of stream: hand back everything still held, verbatim. */
+  /** End of stream: hand back everything still held — minus the debris. */
   flush(): BufferOutcome {
-    const text = this.pending
+    let text = this.pending
     this.pending = ''
-    return { text, prose: hasProse(text) }
+
+    // Gate 2, last chance: a block whose close never arrived is still a block
+    // attempt, and when its opener is the unnamed invocation it is the same
+    // defect as the complete one. Everything from that opener to the end of
+    // the stream is block content (the hold starts at the opener), so the
+    // whole of it goes and is reported, exactly like the complete case.
+    if (isUnnamedInvoke(text)) {
+      this.withHeld.reason ??= 'unnamed-invoke'
+      text = ''
+    }
+
+    // The tail that `holdFrom` kept back can never become a tag now. Once this
+    // response has withheld a block, an unterminated marker fragment in that
+    // tail is the same debris — the `</｜DSML｜ invo` that trailed a killed
+    // stream. A response that withheld nothing keeps its tail: there a fragment
+    // like `<｜DSM` is a block that simply ran out of bytes, and gate 4 says it
+    // is shown rather than swallowed.
+    if (this.debris()) {
+      text = dropUnfinishedMarkerTail(text, this.withHeld)
+      text = stripStray(text, this.withHeld)
+    }
+
+    const state = this.takeWithheld()
+    const outcome: BufferOutcome = { text, prose: hasProse(text), withheld: state.withheld }
+    if (state.withheldReason !== undefined) outcome.withheldReason = state.withheldReason
+    return outcome
+  }
+
+  /**
+   * Apply the debris sweep, but only to a response that has withheld something.
+   *
+   * See {@link withheldOnce}: before the first withhold, marker text in the
+   * prose is the caller's to show, not this layer's to delete.
+   */
+  private stripDebris(text: string): string {
+    return this.debris() ? stripStray(text, this.withHeld) : text
+  }
+
+  /** Has anything been withheld from this response, yet or already? */
+  private debris(): boolean {
+    return this.withheldOnce || this.withHeld.reason !== undefined
+  }
+
+  /**
+   * Hand the accumulated reason to exactly one outcome.
+   *
+   * Exactly one, because the notice it drives is emitted once per response. A
+   * reason reported on two outcomes would print the same sentence twice.
+   */
+  private takeWithheld(): { withheld: boolean; withheldReason?: 'unnamed-invoke' | 'stray-markup' } {
+    const reason = this.withHeld.reason
+    if (reason === undefined) return { withheld: false }
+    this.withHeld = {}
+    this.withheldOnce = true
+    // One NOTICE per response, however many blocks were withheld: the user
+    // needs to know the turn was interfered with, and a sentence per block is
+    // the noise that makes them stop reading them. Later outcomes still report
+    // `withheld` — the fact is per-outcome, the sentence is not.
+    if (this.noticeSent) return { withheld: true }
+    this.noticeSent = true
+    this.gate.onWithheld?.(reason)
+    return { withheld: true, withheldReason: reason }
   }
 }
 
+/**
+ * Is this block an invocation the model wrote without naming a tool?
+ *
+ * Deliberately narrow: no attribute at all on the opener. `<invoke name="">`
+ * is a REFUSED call with a name the gates can judge, and gate 4 shows it.
+ */
+function isUnnamedInvoke(body: string): boolean {
+  const open = scanTag(body, 0)
+  return open !== undefined && !open.closing && open.name === 'invoke' && open.attributes.trim() === ''
+}
+
 /** Assemble one `add()` outcome without ever emitting a `calls: undefined` key. */
-function finish(parts: readonly string[], calls: readonly RecoveredToolCall[]): BufferOutcome {
+function finish(
+  parts: readonly string[],
+  calls: readonly RecoveredToolCall[],
+  state: { withheld: boolean; withheldReason?: 'unnamed-invoke' | 'stray-markup' },
+): BufferOutcome {
   const text = parts.join('')
-  const outcome: BufferOutcome = { text, prose: hasProse(text) }
+  const outcome: BufferOutcome = { text, prose: hasProse(text), withheld: state.withheld }
+  if (state.withheldReason !== undefined) outcome.withheldReason = state.withheldReason
   if (calls.length > 0) outcome.calls = [...calls]
   return outcome
 }

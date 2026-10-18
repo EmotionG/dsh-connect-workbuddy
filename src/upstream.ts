@@ -841,6 +841,15 @@ function normalizeToolChoice(obj: Record<string, unknown>): void {
 export function declaredTools(bodyJson: string): {
   names: Set<string>
   requiredParameters: Map<string, string[]>
+  /**
+   * Every parameter name each declared tool's schema accepts, from
+   * `parameters.properties`. The entry exists for every tool whose `parameters`
+   * is an object — possibly EMPTY, which is a fact ("accepts nothing") and not
+   * an absence, so the schema-gated recovery can clear a tool rather than
+   * refuse on all of them. It is absent only when the schema itself is not an
+   * object, which refuses that recovery instead of guessing.
+   */
+  acceptedParameters: Map<string, Set<string>>
   pinnedToolName?: string
 } | undefined {
   let body: unknown
@@ -857,6 +866,7 @@ export function declaredTools(bodyJson: string): {
 
   const names = new Set<string>()
   const requiredParameters = new Map<string, string[]>()
+  const acceptedParameters = new Map<string, Set<string>>()
 
   for (const value of tools) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
@@ -870,7 +880,22 @@ export function declaredTools(bodyJson: string): {
 
     const parameters = definition['parameters']
     if (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters)) continue
-    const required = (parameters as Record<string, unknown>)['required']
+    const schema = parameters as Record<string, unknown>
+
+    // Every parameter name this schema accepts. A schema with no `properties`
+    // accepts nothing (not "unknown") — the map entry EXISTS so the
+    // schema-gated recovery can clear the tool, and only a schema that is not
+    // an object at all stays absent, which refuses that recovery outright.
+    const accepted = new Set<string>()
+    const properties = schema['properties']
+    if (typeof properties === 'object' && properties !== null && !Array.isArray(properties)) {
+      for (const key of Object.keys(properties)) {
+        if (key !== '') accepted.add(key)
+      }
+    }
+    acceptedParameters.set(name, accepted)
+
+    const required = schema['required']
     if (!Array.isArray(required)) continue
     const list = required.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
     if (list.length > 0) requiredParameters.set(name, list)
@@ -886,6 +911,7 @@ export function declaredTools(bodyJson: string): {
   return {
     names,
     requiredParameters,
+    acceptedParameters,
     ...pinnedToolName === undefined ? {} : { pinnedToolName },
   }
 }

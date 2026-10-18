@@ -1574,6 +1574,10 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     const gate: RecoveryGate | undefined = declared === undefined ? undefined : {
       declaredNames: declared.names,
       requiredParameters: declared.requiredParameters,
+      acceptedParameters: declared.acceptedParameters,
+      // The name-less invoke (session-333b5f2d) is recovered from the model's
+      // own parameter tags against these schemas — see `inferFromSchema`.
+      inferFromSchema: true,
       ...declared.pinnedToolName === undefined ? {} : { pinnedToolName: declared.pinnedToolName },
     }
 

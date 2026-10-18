@@ -239,9 +239,9 @@ describe('DsmlStreamBuffer', () => {
     // and the bytes must go straight through.
     const head = `<${MARK}invoke name="bash">`
     const buffer = new DsmlStreamBuffer(none)
-    expect(buffer.add(head)).toEqual({ text: head, prose: false })
+    expect(buffer.add(head)).toEqual({ text: head, prose: false, withheld: false })
     expect(buffer.add('still arriving').text).toBe('still arriving')
-    expect(buffer.flush()).toEqual({ text: '', prose: false })
+    expect(buffer.flush()).toEqual({ text: '', prose: false, withheld: false })
   })
 
   it('is chunk-boundary independent (byte-by-byte equals one shot)', () => {
