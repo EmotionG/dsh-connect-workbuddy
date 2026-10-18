@@ -185,23 +185,28 @@ describe('MARKUP_RE', () => {
   })
 })
 
-describe('DsmlStreamBuffer', () => {
-  /** Everything the buffer emitted across a chunk sequence, plus the calls. */
-  function run(chunks: readonly string[], recoveryGate = gate()): {
-    text: string
-    calls: RecoveredToolCall[]
-    outcomes: BufferOutcome[]
-  } {
-    const buffer = new DsmlStreamBuffer(recoveryGate)
-    const outcomes = chunks.map(chunk => buffer.add(chunk))
-    outcomes.push(buffer.flush())
-    return {
-      text: outcomes.map(outcome => outcome.text).join(''),
-      calls: outcomes.flatMap(outcome => outcome.calls ?? []),
-      outcomes,
-    }
+/**
+ * Everything the buffer emitted across a chunk sequence, plus the calls.
+ *
+ * Module scope, not a describe-local: a later describe feeds the same buffer a
+ * name-less invocation and needs the identical reading of an outcome sequence.
+ */
+function run(chunks: readonly string[], recoveryGate = gate()): {
+  text: string
+  calls: RecoveredToolCall[]
+  outcomes: BufferOutcome[]
+} {
+  const buffer = new DsmlStreamBuffer(recoveryGate)
+  const outcomes = chunks.map(chunk => buffer.add(chunk))
+  outcomes.push(buffer.flush())
+  return {
+    text: outcomes.map(outcome => outcome.text).join(''),
+    calls: outcomes.flatMap(outcome => outcome.calls ?? []),
+    outcomes,
   }
+}
 
+describe('DsmlStreamBuffer', () => {
   it('holds a half-arrived block and commits it when the close lands (gate 1)', () => {
     const head = `<${MARK}invoke name="bash"><${MARK}parameter name="command">ls`
     const tail = `</${MARK}parameter></${MARK}invoke>`
@@ -293,5 +298,65 @@ describe('DsmlStreamBuffer', () => {
     expect(buffer.add('回答如下。').prose).toBe(true)
     const residue = new DsmlStreamBuffer(gate())
     expect(residue.add(`<${MARK} invoke>`).prose).toBe(false)
+  })
+})
+
+/**
+ * A `<invoke>` with no `name` attribute — the session-333b5f2d defect.
+ *
+ * The model wrote a complete, well-formed invocation that names no tool. Gate 4
+ * says a refused block is shown verbatim, which is right for a tool it may not
+ * call; for this one it printed a half-sentence of markup as if it were the
+ * answer. These cases pin the two halves of the fix: recover it when the schema
+ * says which tool it must have meant, otherwise withhold it AND say so — and
+ * withhold nothing when there is nobody to tell.
+ */
+describe('a name-less invocation', () => {
+  /** The marker form with no `name` attribute on the invoke. */
+  const nameless = (value: string): string =>
+    `<${MARK}invoke><${MARK}parameter name="command">${value}</${MARK}parameter></${MARK}invoke>`
+
+  it('is withheld, while the prose around it survives intact', () => {
+    // The transcript that produced this: a stray close tag, the answer's prose,
+    // then a wrapped block the model forgot to name.
+    const seen: string[] = []
+    const leak = `</apm='search'/>\n关键发现：小面板不知道谁在用。\n\n<${MARK}tool_calls>${nameless('grep -n x')}</${MARK}tool_calls>`
+    // Five characters at a time: the block has to be withheld across a chunk
+    // boundary, which is the case the streaming path actually meets.
+    const result = run(leak.match(/[\s\S]{1,5}/g) ?? [], gate({ onWithheld: reason => seen.push(reason) }))
+    expect(result.text).toContain('关键发现')
+    expect(result.text).not.toContain('DSML')
+    expect(result.calls).toEqual([])
+    expect(seen, 'the removal is reported, not silent').toEqual(['unnamed-invoke'])
+  })
+
+  it('is recovered as a call when the schema names exactly one tool', () => {
+    // `acceptedParameters` is what makes this possible: every declared tool's
+    // parameter names, so a block whose tags fit exactly one of them must have
+    // meant that one.
+    const result = run([nameless('ls')], {
+      declaredNames: new Set(['bash', 'read']),
+      requiredParameters: new Map([['read', ['path']]]),
+      acceptedParameters: new Map([
+        ['bash', new Set(['command'])],
+        ['read', new Set(['path'])],
+      ]),
+      inferFromSchema: true,
+    })
+    expect(result.calls).toHaveLength(1)
+    expect(result.calls[0]!.name).toBe('bash')
+    expect(result.text).not.toContain('DSML')
+  })
+
+  it('keeps gate 4 for a block that DOES name a tool it may not call', () => {
+    const result = run([wrapped('read', { p: 'x' })])
+    expect(result.text).toContain('invoke name="read"')
+  })
+
+  it('is shown verbatim when no listener could report the withhold', () => {
+    // The interlock: with no `onWithheld` the block would vanish silently, and a
+    // silently deleted answer is worse than the markup it replaced. Shown instead.
+    const result = run([nameless('ls')])
+    expect(result.text).toContain(`${MARK}invoke>`)
   })
 })

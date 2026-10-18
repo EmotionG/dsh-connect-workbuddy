@@ -724,8 +724,23 @@ function nestedOrText(value: string): ParameterValue {
  * This is where gates 2 and 4 live. Returning nothing is the COMMON case for
  * mistaken input and is not an error: callers must show the block verbatim.
  */
-function parseBlock(block: string, gate: RecoveryGate, seen: Withheld): RecoveredToolCall[] {
+function parseBlock(block: string, gate: RecoveryGate, seen: Withheld): {
+  calls: RecoveredToolCall[]
+  /**
+   * True when this block held a refused invocation that named no tool AND there
+   * was a listener to report it to — i.e. the caller must drop the block.
+   *
+   * Returned rather than re-derived by the caller. It used to be re-derived
+   * (`isUnnamedInvoke(body)`), and the two disagreed on a block written without
+   * a single newline: the body's first tag is then the `tool_calls` wrapper, so
+   * the caller saw a named tag, printed the whole block, and *simultaneously*
+   * reported "withheld" from in here — a notice for a removal that did not
+   * happen. One judgement, one answer.
+   */
+  withheld: boolean
+} {
   const calls: RecoveredToolCall[] = []
+  let withheld = false
   const spans = ignoredSpans(block)
   let index = 0
 
@@ -746,14 +761,17 @@ function parseBlock(block: string, gate: RecoveryGate, seen: Withheld): Recovere
       // Only when a report can actually be delivered: the caller showing the
       // block instead is the safe outcome, and marking it withheld while
       // printing it would make the notice a lie.
-      else if (tag.attributes.trim() === '' && gate.onWithheld !== undefined) seen.reason ??= 'unnamed-invoke'
+      else if (tag.attributes.trim() === '' && gate.onWithheld !== undefined) {
+        seen.reason ??= 'unnamed-invoke'
+        withheld = true
+      }
       index = close.end + 1
       continue
     }
     index = tag.end + 1
   }
 
-  return calls
+  return { calls, withheld }
 }
 
 /** The first reason anything was withheld anywhere in one outcome. */
@@ -866,7 +884,7 @@ export function parseToolCalls(text: string, gate: RecoveryGate): RecoveredToolC
   while (remaining !== '') {
     const found = findFirstOpener(remaining, ignoredSpans(remaining))
     if (found === undefined || found.close === undefined) break
-    calls.push(...parseBlock(remaining.slice(found.open.start, found.close.end + 1), gate, seen))
+    calls.push(...parseBlock(remaining.slice(found.open.start, found.close.end + 1), gate, seen).calls)
     remaining = remaining.slice(found.close.end + 1)
   }
 
@@ -1175,20 +1193,22 @@ export class DsmlStreamBuffer {
       }
 
       const body = this.pending.slice(found.open.start, found.close.end + 1)
-      const recovered = parseBlock(body, this.gate, this.withHeld)
-      if (recovered.length > 0) calls.push(...recovered)
+      const parsed = parseBlock(body, this.gate, this.withHeld)
+      if (parsed.calls.length > 0) calls.push(...parsed.calls)
       // Gate 4: refused, so the block is shown exactly as it arrived — EXCEPT
       // the name-less invocation, which is a defect rather than content. That
-      // one is withheld and reported instead; see `withheldOn`. The exception
-      // is keyed on a missing `name` attribute only, so a block whose name is
-      // present but refused (undeclared tool, pinned tool_choice, missing
-      // required parameter) is still shown verbatim, exactly as gate 4 says.
+      // one is withheld and reported instead. A block whose name is present but
+      // refused (undeclared tool, pinned tool_choice, missing required
+      // parameter) is still shown verbatim, exactly as gate 4 says.
       //
-      // Withholding needs somewhere to REPORT to. With no `onWithheld` the
-      // removal would be silent, and a silently deleted answer is worse than
-      // the markup it replaced: so the block keeps its gate-4 fate and the
-      // reader at least sees what the model actually wrote.
-      else if (!isUnnamedInvoke(body) || this.gate.onWithheld === undefined) parts.push(body)
+      // The decision is parseBlock's to make, not re-derived here: it is the
+      // only place that knows WHICH invocation inside the block was refused.
+      //
+      // Withholding needs somewhere to REPORT to, and parseBlock already folded
+      // that in: with no listener the removal would be silent, and a silently
+      // deleted answer is worse than the markup it replaced. There the block
+      // keeps its gate-4 fate and the reader at least sees what the model wrote.
+      else if (!parsed.withheld) parts.push(body)
 
       this.pending = this.pending.slice(found.close.end + 1)
     }
@@ -1215,7 +1235,7 @@ export class DsmlStreamBuffer {
     // defect as the complete one. Everything from that opener to the end of
     // the stream is block content (the hold starts at the opener), so the
     // whole of it goes and is reported, exactly like the complete case.
-    if (isUnnamedInvoke(text)) {
+    if (isUnnamedInvoke(text) && this.gate.onWithheld !== undefined) {
       this.withHeld.reason ??= 'unnamed-invoke'
       text = ''
     }
