@@ -57,25 +57,64 @@ export const WORKBUDDY_PROVIDERS: Readonly<Record<WorkBuddyRegion, string>> = {
  * byte-identical history, and a compression request that could then never fit
  * the window it was computed for.
  *
- * `provider` is also the KEY pi-ai dispatches on (`models.js:410–416`
- * `requireProvider`), so the identity cannot simply be the shared string: the
- * registry has to keep resolving per region. Both halves of that are already
- * satisfied by pi-ai's own lookup shape — `getModel(provider, id)` is
- * `getModels(provider).find(...)` (`models.js:116–118`), i.e. the KEY is the
- * route id while the STAMPED field is whatever the provider put there — so the
- * route stays `workbuddy`/`workbuddy-global` (each with its own shim, catalog
- * and credential store) while every model it serves advertises THIS id. This
- * plugin's provider registers no `fetchModels`, so nothing downstream derives
- * anything from the stamped field; the openai-completions api uses
- * `model.provider` only for provider-specific quirks (none of which match
- * these ids) and as an error-message label.
+ * The stamp is NOT inert, and reading it as inert is what broke issue #75.
+ * `provider` is the KEY pi-ai dispatches on: `requireProvider` resolves
+ * `this.providers.get(model.provider)` and throws
+ * `Unknown provider: ${model.provider}` when it is absent (`models.js:410–416`
+ * on the host's 1.1.0, `:351–357` on the 0.85.1 this repo resolves), and
+ * `getAuth` resolves the same key, answering `Provider is not configured`
+ * instead (`:334–341` and `:429`; `:275–280` and `:366` on 0.85.1). Both sit on
+ * the LIVE chat path: `dsh-llm-pi-ai` streams through
+ * `snapshot.models.streamSimple(model, …)` (`lib/index.js:1983`), which calls
+ * `requireProvider` before a byte is sent (`models.js:454–459`). Each region
+ * builds its OWN registry from its own adapter — `current()` registers
+ * `profile.piProvider` per profile (`lib/index.js:1852–1862`) — so the
+ * `workbuddy-global` region registered only `workbuddy-global` and could not
+ * dispatch a model stamped `workbuddy`: every request failed with
+ * `Unknown provider: workbuddy` before reaching the gateway.
+ * {@link modelIdentityKeysOf} is the correction: the identity has to be a
+ * registry key of its own in every region, or the stamp cannot be shared.
  *
- * Deliberately NOT the same string as either route: a message is only
+ * Lookup by ROUTE is a separate question and stays intact: `getModel(provider,
+ * id)` is `getModels(provider).find(...)` (`models.js:116–118`), i.e. it goes
+ * through the map key, while the STAMPED field is whatever the provider put
+ * there. So the route stays `workbuddy`/`workbuddy-global` (each with its own
+ * shim, catalog and credential store) while every model it serves advertises
+ * THIS id. The openai-completions api reads `model.provider` only for
+ * provider-specific quirks (none of which match these ids) and as an
+ * error-message label.
+ *
+ * Deliberately NOT the same string as the global route: a message is only
  * same-model when provider, api AND model id all match, so the shared id must
  * not be reachable as a route a user could pick — it names one model, not one
- * gateway.
+ * gateway. It IS reachable as a pi-ai registry key, which is the point: those
+ * are internal and never surface as a route, because `registerAdapter` takes
+ * the route list explicitly (`dsh-llm/lib/index.js:1842–1861`,
+ * `prepareRoutes` `:1867–1885`) and this plugin passes exactly the two region
+ * ids (`src/index.ts:2069–2086`).
  */
 export const WORKBUDDY_MODEL_IDENTITY = 'workbuddy'
+
+/**
+ * Registry keys an adapter serving `providerId` must publish so that every
+ * stamp its models carry resolves inside its own region (issue #75).
+ *
+ * The route id first, then the model identity, de-duplicated — route-first so
+ * `profiles()` opens with the route the adapter actually serves. CN yields one
+ * key (`workbuddy` is both its route and the shared identity) and the global
+ * region yields two (`workbuddy-global`, `workbuddy`); the two regions
+ * therefore publish different key sets, and each must publish the shared one.
+ *
+ * `identity` is a parameter because {@link WorkBuddyAdapterOptions.modelIdentity}
+ * can override the stamp: the keys have to follow the stamp, or a test that
+ * stamps a per-region id would get the production keys back.
+ */
+export function modelIdentityKeysOf(
+  providerId: string | undefined,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+): readonly string[] {
+  return [...new Set([providerId, identity].filter((key): key is string => key !== undefined))]
+}
 
 /** Region a provider route id belongs to. */
 export function regionOfProvider(provider: string): WorkBuddyRegion | undefined {
@@ -142,6 +181,10 @@ export interface WorkBuddyAdapterOptions {
    * Model identity stamped on every model this route serves; defaults to
    * {@link WORKBUDDY_MODEL_IDENTITY}. Tests override it to model a transcript
    * recorded by a host that still stamped per-region ids.
+   *
+   * It also decides the extra registry key this adapter publishes alongside
+   * its route (issue #75) — see {@link modelIdentityKeysOf}, which is what
+   * keeps an overridden stamp resolvable exactly like the production one.
    */
   modelIdentity?: string
   /** Resolve the durable attachment service at request time, when present. */
@@ -233,7 +276,9 @@ export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyTh
  *
  * `identity` — not the route id — is what `provider` carries; see
  * {@link WORKBUDDY_MODEL_IDENTITY} for why the two must differ. The route the
- * model is REACHED by is the registry key the adapter serves, not this field.
+ * model is REACHED by is the registry key the adapter serves, while this
+ * stamped field is what pi-ai resolves the provider BY (issue #75) — so every
+ * key in {@link modelIdentityKeysOf} must be a key this route registers.
  */
 function toPiModel(
   info: WorkBuddyModelInfo,
@@ -617,8 +662,13 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
   const providerId = options.provider ?? WORKBUDDY_PROVIDER
   const providerName = options.displayName ?? 'WorkBuddy'
   // The model identity is shared by both regions on purpose — that is the whole
-  // of issue #59's fix. The route id below is NOT shared: it keys the registry,
-  // and each region's route resolves to that region's own shim.
+  // of issue #59's fix, and it is NOT inert (issue #75): `requireProvider` and
+  // `getAuth` resolve the registry BY the stamped `model.provider`. The route
+  // id below is NOT shared: it keys the registry a user selects from, and each
+  // region's route resolves to that region's own shim. So the identity is
+  // published as an EXTRA registry key of the same route (see
+  // `modelIdentityKeysOf`) instead of replacing the route id — the two halves
+  // of #59 and #75 that way stay true at once.
   const modelIdentity = options.modelIdentity ?? WORKBUDDY_MODEL_IDENTITY
   // The generation gate: what THIS plugin resolves, not what the host runs —
   // a nested 0.85 on disk shadows the host's 0.87 and vice versa, and only
@@ -656,8 +706,17 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
   // provider, while the catalog answer tracks the upstream refresh.
   const provider: Provider = { ...base, getModels: () => buildModels() }
 
-  const profile: ResolvedPiAiProviderProfile = {
-    provider: providerId,
+  // One profile per published registry key. The `piProvider` is what actually
+  // lands in the registry, and `Models.setProvider` keys that map on
+  // `piProvider.id` (`models.js:37` on 0.85.1, `:49` on 1.1.0) — NOT on the
+  // profile's `provider` field — so the identity key needs a provider object
+  // that CLAIMS that id. It is the route's own provider under a second id, so
+  // the models, baseUrl, api and auth the request runs with stay this region's
+  // and nothing about the gateway is duplicated. Sharing the very same object
+  // under both keys would register the route id twice and leave the stamped
+  // identity unresolved, which is exactly issue #75.
+  const profileFor = (key: string): ResolvedPiAiProviderProfile => ({
+    provider: key,
     displayName: providerName,
     streamIdleTimeoutMs: WORKBUDDY_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-connect-workbuddy retryPolicy'),
@@ -669,12 +728,19 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // (Required by ResolvedPiAiProviderProfile since 0.1.5-rc.1.)
     modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
-    piProvider: provider,
-  }
+    piProvider: key === providerId ? provider : { ...provider, id: key },
+  })
+
+  // Single source for BOTH the initial map and `invalidate`: an `invalidate`
+  // that rebuilt only the route key would silently re-break the identity key,
+  // i.e. issue #75 all over again on the first catalog refresh.
+  const buildProfiles = (): Map<string, ResolvedPiAiProviderProfile> =>
+    new Map(modelIdentityKeysOf(providerId, modelIdentity)
+      .map((key): [string, ResolvedPiAiProviderProfile] => [key, profileFor(key)]))
 
   // Replacing (not mutating) the map is what `invalidate` uses to force the
   // adapter's next profiles read to rebuild its snapshot.
-  let profiles = new Map<string, ResolvedPiAiProviderProfile>([[providerId, profile]])
+  let profiles = buildProfiles()
 
   const adapter = new PiAiAdapter({
     profiles: () => profiles,
@@ -690,7 +756,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
   return {
     adapter,
     invalidate: () => {
-      profiles = new Map<string, ResolvedPiAiProviderProfile>([[providerId, profile]])
+      profiles = buildProfiles()
     },
   }
 }

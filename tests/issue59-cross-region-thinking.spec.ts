@@ -23,8 +23,20 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
  *
  * (2) is the reason the shared string is stamped on `model.provider` while the
  * registry KEY stays per region: `Models.getModel(provider, id)` is
- * `getModels(provider).find(...)` (`models.js:116–118`), so the lookup key and
- * the stamped field are independent by construction.
+ * `getModels(provider).find(...)` (`models.js:78`), so the lookup key and the
+ * stamped field are independent by construction.
+ *
+ * CORRECTED BY ISSUE #75. That independence is only half the contract. Chat
+ * dispatch does not go through `getModel`: it goes through
+ * `requireProvider(model)`, which looks the STAMPED field up as a registry key
+ * (`models.js:351–355`) and throws `Unknown provider: workbuddy` when the stamp
+ * names no registered provider. The global region stamped `workbuddy` while
+ * publishing only the key `workbuddy-global`, so it was a total outage. The
+ * identity must therefore ALSO be a key each region publishes — an alias onto
+ * that region's own provider, never a shared one. The alias assertions below
+ * live in `tests/issue75-global-provider-dispatch.spec.ts`; what this file
+ * still owns is that the alias did not turn the shared identity into a shared
+ * DESTINATION.
  */
 
 /** The shape pi-ai itself puts on the wire, built once so both sides agree. */
@@ -188,7 +200,54 @@ describe('issue #59: the shared identity is not a shared destination', () => {
       createWorkBuddyAdapter, 'http://127.0.0.1:42000', WORKBUDDY_GLOBAL_PROVIDER, await catalogWithOneModel('global'),
     )
 
+    // Each adapter still serves its OWN route, and the route is what the FIRST
+    // key is: an adapter whose own route was demoted below the identity alias
+    // would make the region look like it serves `workbuddy` first.
+    //
+    // Deliberately NOT asserted here: that neither map contains the other's
+    // route id. The global map DOES contain `workbuddy` — as the issue #75
+    // alias onto its OWN provider, never as a second destination. Membership
+    // of a key is no longer evidence of a destination; the baseUrl of what a
+    // key resolves to is. That is the next test's job.
+    expect(cn.config.profiles().has(WORKBUDDY_PROVIDER)).toBe(true)
+    expect(global.config.profiles().has(WORKBUDDY_GLOBAL_PROVIDER)).toBe(true)
+    expect([...cn.config.profiles().keys()][0]).toBe(WORKBUDDY_PROVIDER)
+    expect([...global.config.profiles().keys()][0]).toBe(WORKBUDDY_GLOBAL_PROVIDER)
+  })
+
+  it('also publishes the shared IDENTITY as a key, so the stamped field resolves', async () => {
+    // Issue #75. The stamp alone was not enough: dispatch looks the STAMPED
+    // field up as a registry key (`models.js:351–355`), so a region that
+    // stamped the identity but published only its route key threw
+    // `Unknown provider: workbuddy` on every request. Both regions must
+    // therefore ALSO publish the identity — the CN route already IS the
+    // identity, so it has exactly one key to publish.
+    const { createWorkBuddyAdapter, WORKBUDDY_PROVIDER, WORKBUDDY_GLOBAL_PROVIDER, WORKBUDDY_MODEL_IDENTITY } =
+      await import('../src/adapter.ts')
+    const cn = adapterFor(
+      createWorkBuddyAdapter, 'http://127.0.0.1:41000', WORKBUDDY_PROVIDER, await catalogWithOneModel('cn'),
+    )
+    const global = adapterFor(
+      createWorkBuddyAdapter, 'http://127.0.0.1:42000', WORKBUDDY_GLOBAL_PROVIDER, await catalogWithOneModel('global'),
+    )
+
+    expect(cn.config.profiles().has(WORKBUDDY_MODEL_IDENTITY)).toBe(true)
+    expect(global.config.profiles().has(WORKBUDDY_MODEL_IDENTITY)).toBe(true)
+
+    // THE GUARD, restated against the alias itself: the identity entry is an
+    // alias onto THAT region's own provider — same baseUrl, same region — and
+    // not the other region's. Publishing the identity without this check is how
+    // a fix for one outage would cause the other.
+    const globalAlias = global.config.profiles().get(WORKBUDDY_MODEL_IDENTITY)
+    expect(globalAlias).toBeDefined()
+    expect(globalAlias?.piProvider.getModels()[0]?.baseUrl).toBe('http://127.0.0.1:42000/v1')
+    expect(globalAlias?.piProvider.getModels()[0]?.baseUrl)
+      .not.toBe('http://127.0.0.1:41000/v1')
+
+    const cnAlias = cn.config.profiles().get(WORKBUDDY_MODEL_IDENTITY)
+    expect(cnAlias?.piProvider.getModels()[0]?.baseUrl).toBe('http://127.0.0.1:41000/v1')
+
+    // The CN route IS the identity, so CN must not publish the identity twice.
     expect([...cn.config.profiles().keys()]).toEqual([WORKBUDDY_PROVIDER])
-    expect([...global.config.profiles().keys()]).toEqual([WORKBUDDY_GLOBAL_PROVIDER])
   })
 })

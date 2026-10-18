@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.9.2 (2026-10-19)
+
+> 版本号是 **patch**：只改 `profiles` 里多登记一个注册表键，外加文档与注释；发往上游的请求体、路由 id、模型 id、模型选择器、目录与凭据一律未变。但**它修的是一个整区不可用的故障**——4.9.0/4.9.1 期间国际版（`workbuddy-global`）的每一个请求都在发出前失败。
+
+### Fixes
+
+- **issue #75：国际版整区报 `Unknown provider: workbuddy`，任何请求都不可能成功**
+  - **原来错在哪**：4.9.0 为修 issue #59 把两条路由的模型身份统一成 `workbuddy`（`WORKBUDDY_MODEL_IDENTITY`），理由是「只有让 `isSameModel` 判等，跨区的 thinking 才不会降级成正文」。当时的论证是：pi-ai 的 `getModel(provider, id)` 取 `providers.get(provider).getModels()`（`models.js:116–118`），**查表的键**与**模型上盖的 `provider` 字段**是分开的，所以盖上 `workbuddy` 无害。**这条论证只对按参数查表的那条路径成立，漏掉了真正跑聊天的那条**：`models.streamSimple(model, …)` 的第一帧就是 `requireProvider(model)` = `this.providers.get(model.provider)`（`models.js:351–355`），查的正是模型上盖的那个字段。而每条路由的注册表里只登记过它自己的路由 id（宿主 `dsh-llm-pi-ai` 对每个 profile 调一次 `models.setProvider(profile.piProvider)`，键取 **provider 对象的 `id`**）。于是国内版（路由 `workbuddy`、盖 `workbuddy`）自洽，国际版（路由 `workbuddy-global`、盖 `workbuddy`）在一个只有 `workbuddy-global` 的注册表里查 `workbuddy` —— 抛 `ModelsError("provider", "Unknown provider: workbuddy")`，**在请求发出之前**。
+  - **为什么测试没抓住**：#59 配的守卫测试断言的是 `getModel(provider, id)` 这种**按参数**的查表，恰好是不看盖上字段的那一种形状；于是它可以全绿，而聊天路径已经整区死掉。报错文案里也不含 "WorkBuddy" 字样，用户看到的是宿主状态一个无关的 provider 名。
+  - **现在的形状**：新增 `modelIdentityKeysOf(providerId, identity)`（`src/adapter.ts`），返回一条路由要在自己的注册表里登记的全部键。每条路由把**同一个** shim 的 provider **按两个 id 各建一个对象**登记：路由 id（`workbuddy-global`，含它自己的 shim 地址、目录、凭据）＋共享身份（`workbuddy`）。国内版路由 id 与身份相同，去重后仍只登记一个。这段构造抽成 `buildProfiles()`，初始发布与 `invalidate()`（目录刷新后重建）**共用同一份**——旧代码在 `invalidate()` 里按单键重建，刷新一次就会把国际版重新打回故障。
+  - **一个必须说破的细节**：`Models.setProvider(provider)` 存的是 `this.providers.set(provider.id, provider)`（`models.js:35–38`），键取的是**provider 对象的 `id`**，不是 `profiles` 映射的键。因此「把同一个 provider 对象发布两次」是**静默无效**的，必须给身份那个键一个 `id` 改为身份的 provider 对象。`ResolvedPiAiProviderProfile.provider` 上游注释称自己就是「`Models` 集合的键」，只有 `piProvider.id === profile.provider` 时才成立——按对象拆开后这个不变式回来了。
+  - **顺带覆盖的第二处失败点**：`Models.getAuth(providerOrModel)` 同样用 `providers.get(providerOrModel.provider)` 取 provider（`models.js:275–280`，宿主侧 `:334–341`），修之前国际版即使过了 `requireProvider` 也会以 `Provider is not configured` 倒在取凭据一步；同一个键一并覆盖。
+  - **刻意没做的**：报告者提议的一行改法（`modelIdentity = options.modelIdentity ?? providerId`）**不能采纳**——它把身份拆回按路由区分，等于回退 #59（跨区 thinking 又整批降级成正文、计费跳变重现）。也没必要把身份做成「第二条 provider 条目」：`Models.providers` 本来就是 `Map`，多一个键不影响路由集合，模型选择器、目录、凭据、`registerAdapter` 的 routes 数组全都没有变化。上游的真修法仍是让 `isSameModel` 认「provider 等价组」声明（`earendil-works/pi#6167`）。
+  - **测试**：新增 `tests/issue75-global-provider-dispatch.spec.ts`，不用 `profiles()` 的字面量断言，而是**照宿主的构造方式**建注册表（`createModels()` + 每个 profile 一次 `setProvider`）再走 `streamSimple`。其中包含：国际版真实服务的模型能在国际版注册表里被 `requireProvider` 解析且拿到**国际版自己的** `baseUrl`（不是国内版的）；国内版不被连累；**一个反证用例**手工重建 4.9.1 的单键注册表，断言它仍然失败于 `Unknown provider: workbuddy`，防止上面几条变成空转通过；`invalidate()` 之后上述性质仍在；以及 #59 的两条性质（两边盖同一个身份、跨区 thinking 仍是 `thinking`）不回退。把 `buildProfiles` 临时改回单键重跑，这组测试会以 `ModelsError: Unknown provider: workbuddy` 失败——已实测确认判别力。
+  - **文档**：`README.md` 的 issue #59 那一段原文把上述错误论证当成了依据，已改正并写明 #75 的成因与 4.9.2 的做法；`docs/audit/ISSUE59-OPTIONS.md` 的「O1′ SHIPPED」一节补了「#75 CORRECTION」，说明当时为什么论证错了、以及为什么「按你推理的那条查表路径写的测试，无法证伪从同一条路径得出的结论」。
+
 ## 4.9.1 (2026-10-19)
 
 > 版本号是 **patch**：只改账号池里两枚「当前使用」徽章的配色，外加一处 CHANGELOG 排序修正；不改请求、响应、计费、排序规则或任何配置项。发往上游的请求体与 4.9.0 逐字节相同。
