@@ -286,7 +286,24 @@ export const WORKBUDDY_CARD_CSS = `
  * space-between, so it stays on the right edge even if a future change adds a
  * child or removes one. */
 .dsm-workbuddy-pool-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.dsm-workbuddy-pool-current-badge{margin-left:auto;padding:2px 10px;border-radius:999px;background:rgba(86,134,254,.16);color:var(--dsw-alias-brand-primary,#5686fe);font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
+/* SOLID badge: white ink on the success green itself, plus a matching hairline.
+ *
+ * This is deliberately a stronger stop than a tinted pill. Green TEXT on the old
+ * pale-blue tint still read as a quiet annotation — and a comment that has to be
+ * looked for is not doing its job when the badge's whole point is "THIS row is
+ * the one serving". Filled also matches how the host marks primary affordances.
+ *
+ * Both halves now come from the SAME token, so they cannot drift apart the way
+ * they did when the ink was --dsw-alias-brand-primary — the host's CONTRAST
+ * colour, which painted near-BLACK on light themes (see the checkbox note at
+ * line ~118). Theme-following: #22c55e dark / #16a34a light.
+ *
+ * Contrast: white on #22c55e ≈ 2.2:1, on #16a34a ≈ 3.3:1 — under the 4.5:1 bar
+ * for body text, which is why the badge stays 11-12px and BOLD and never carries
+ * a sentence: it is read as a shape first, a word second. The border keeps the
+ * pill from bleeding into the row tint if a theme remaps success to something
+ * dark. */
+.dsm-workbuddy-pool-current-badge{margin-left:auto;padding:2px 10px;border-radius:999px;background:var(--dsw-alias-state-success-primary,#22c55e);border:1px solid rgba(34,197,94,.55);color:#fff;font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
 /* Sits under the header block, before the batch buttons: account discovery is
    the first step of using the pool, so it reads above the actions it enables. */
 /* Manual-mode account picker: shares the settings row layout (.pool-set), and
@@ -333,7 +350,7 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-account-name span{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999)}
 /* Declared AFTER the blanket span rule so it wins: the badge must not inherit
    the muted 11px tertiary treatment the membership line uses. */
-.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-current-tag{align-self:flex-start;margin-top:2px;padding:1px 6px;border-radius:999px;background:rgba(86,134,254,.16);color:var(--dsw-alias-brand-primary,#5686fe);font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-current-tag{align-self:flex-start;margin-top:2px;padding:1px 6px;border-radius:999px;background:var(--dsw-alias-state-success-primary,#22c55e);border:1px solid rgba(34,197,94,.55);color:#fff;font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}
 /* Manual-priority chrome (order badge + up/down arrows). The rank badge is a SPAN,
    not a button: it only DESCRIBES the current order and must not read as a
    control (nor join the row's button list). The solid vs dashed distinction is

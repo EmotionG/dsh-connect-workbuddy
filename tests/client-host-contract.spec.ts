@@ -143,6 +143,42 @@ describe('WORKBUDDY_CARD_CSS template literal', () => {
     expect(css).toContain('.dsm-workbuddy-veil-card{')
     expect(css).toContain('.dsm-workbuddy-veil-spinner{')
   })
+
+  it('paints both "current" badges as solid green with white ink', () => {
+    // The defect this guards, in two steps.
+    //
+    // 1. Both badges used a HARDCODED pale-blue tint (rgba(86,134,254,.16)) but
+    //    took their ink from --dsw-alias-brand-primary, the host's CONTRAST
+    //    colour — near-BLACK on light themes. The badge read as a disabled label
+    //    instead of the one row that is actually serving.
+    // 2. Green TEXT on that pale-blue pill was still a quiet annotation, so the
+    //    pill was filled instead: white ink on the success green itself.
+    //
+    // What must not come back: brand-primary (the contrast colour), and the
+    // tinted-blue backdrop that made the green look accidental.
+    //
+    // Asserted per selector, on the extracted rule, because a blanket "the file
+    // mentions success-primary" check would still pass if the other badge
+    // quietly reverted.
+    const css = cardCss()
+    for (const selector of [
+      '.dsm-workbuddy-pool-current-badge{',
+      '.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-current-tag{',
+    ]) {
+      const start = css.indexOf(selector)
+      expect(start, `${selector} disappeared from the stylesheet`).toBeGreaterThanOrEqual(0)
+      const rule = css.slice(start, css.indexOf('}', start))
+      // Filled pill: the success green IS the backdrop now.
+      expect(rule, `${selector} lost its filled green pill`).toContain('background:var(--dsw-alias-state-success-primary')
+      // White ink, stated literally: a token here would re-open the exact
+      // drift between ink and backdrop this test exists to prevent.
+      expect(rule, `${selector} ink is not white`).toContain('color:#fff')
+      // The regression itself.
+      expect(rule, `${selector} went back to the contrast colour`).not.toContain('brand-primary')
+      // The old tinted-blue backdrop must be gone, not merely supplemented.
+      expect(rule, `${selector} still carries the pale-blue tint`).not.toContain('rgba(86,134,254,.16)')
+    }
+  })
 })
 
 describe('dsh.client.inject', () => {
