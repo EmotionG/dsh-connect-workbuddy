@@ -44,6 +44,39 @@ export const WORKBUDDY_PROVIDERS: Readonly<Record<WorkBuddyRegion, string>> = {
   global: WORKBUDDY_GLOBAL_PROVIDER,
 }
 
+/**
+ * Model identity BOTH regions stamp on their models — the fix for issue #59.
+ *
+ * pi-ai keeps a historical thinking block as `thinking` only when the message
+ * that carried it names the SAME provider, api and model id as the request in
+ * flight (`transform-messages.js:68`); every other block is downgraded to plain
+ * `text` (`:88–96`) — downgraded, not dropped, which is why no byte count ever
+ * explained the 1.94× regional jump. The two gateways are two provider STRINGS
+ * for ONE model, so a transcript recorded in one region was replayed as text in
+ * the other, and issue #59's reporter measured exactly that: 708K → 1.374M on
+ * byte-identical history, and a compression request that could then never fit
+ * the window it was computed for.
+ *
+ * `provider` is also the KEY pi-ai dispatches on (`models.js:410–416`
+ * `requireProvider`), so the identity cannot simply be the shared string: the
+ * registry has to keep resolving per region. Both halves of that are already
+ * satisfied by pi-ai's own lookup shape — `getModel(provider, id)` is
+ * `getModels(provider).find(...)` (`models.js:116–118`), i.e. the KEY is the
+ * route id while the STAMPED field is whatever the provider put there — so the
+ * route stays `workbuddy`/`workbuddy-global` (each with its own shim, catalog
+ * and credential store) while every model it serves advertises THIS id. This
+ * plugin's provider registers no `fetchModels`, so nothing downstream derives
+ * anything from the stamped field; the openai-completions api uses
+ * `model.provider` only for provider-specific quirks (none of which match
+ * these ids) and as an error-message label.
+ *
+ * Deliberately NOT the same string as either route: a message is only
+ * same-model when provider, api AND model id all match, so the shared id must
+ * not be reachable as a route a user could pick — it names one model, not one
+ * gateway.
+ */
+export const WORKBUDDY_MODEL_IDENTITY = 'workbuddy'
+
 /** Region a provider route id belongs to. */
 export function regionOfProvider(provider: string): WorkBuddyRegion | undefined {
   for (const [region, id] of Object.entries(WORKBUDDY_PROVIDERS) as [WorkBuddyRegion, string][]) {
@@ -105,6 +138,12 @@ export interface WorkBuddyAdapterOptions {
   provider?: string
   /** pi-ai provider name and profile display name; defaults to the CN name. */
   displayName?: string
+  /**
+   * Model identity stamped on every model this route serves; defaults to
+   * {@link WORKBUDDY_MODEL_IDENTITY}. Tests override it to model a transcript
+   * recorded by a host that still stamped per-region ids.
+   */
+  modelIdentity?: string
   /** Resolve the durable attachment service at request time, when present. */
   resolveAttachments?: () => AttachmentStore | undefined
   /**
@@ -189,14 +228,24 @@ export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyTh
   return map
 }
 
-/** Build one pi-ai model descriptor pointing at the loopback shim. */
-function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, providerId: string): Model<Api> {
+/**
+ * Build one pi-ai model descriptor pointing at the loopback shim.
+ *
+ * `identity` — not the route id — is what `provider` carries; see
+ * {@link WORKBUDDY_MODEL_IDENTITY} for why the two must differ. The route the
+ * model is REACHED by is the registry key the adapter serves, not this field.
+ */
+function toPiModel(
+  info: WorkBuddyModelInfo,
+  baseUrl: string,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+): Model<Api> {
   const thinkingLevelMap = workBuddyThinkingLevelMap(info)
   return {
     id: info.id,
     name: workBuddyDisplayName(info),
     api: 'openai-completions',
-    provider: providerId,
+    provider: identity,
     baseUrl,
     input: workBuddyModelInput(info),
     cost: NO_COST,
@@ -567,6 +616,10 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
   const { shim, store, catalog, resolveAttachments } = options
   const providerId = options.provider ?? WORKBUDDY_PROVIDER
   const providerName = options.displayName ?? 'WorkBuddy'
+  // The model identity is shared by both regions on purpose — that is the whole
+  // of issue #59's fix. The route id below is NOT shared: it keys the registry,
+  // and each region's route resolves to that region's own shim.
+  const modelIdentity = options.modelIdentity ?? WORKBUDDY_MODEL_IDENTITY
   // The generation gate: what THIS plugin resolves, not what the host runs —
   // a nested 0.85 on disk shadows the host's 0.87 and vice versa, and only
   // the resolved copy decides which context shape the api below can consume.
@@ -577,7 +630,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => toPiModel(info, baseUrl, providerId))
+    return catalog.current().map(info => toPiModel(info, baseUrl, modelIdentity))
   }
 
   const base = createProvider({
