@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.8.2 (2026-10-18)
+
+> 版本号是 **patch**：只改积分面板第二行的文字配色，不改请求、响应、计费、排序或任何配置项。`stateTone` 的判定、圆点的颜色规则、行的顺序都与本版之前完全相同。
+
+### Changes
+
+- **积分面板第二行的「当前选用」改成绿色**
+  - **原来错在哪**：`ComposerCredits.tsx` 把那两个事实拼成**一个** span —— `detailLine(当前选用, 被限流 · 约 6 小时后)`。一个 span 只能有一种颜色，而它挂的是 `.dsm-workbuddy-composer-panel-mark`，颜色是原因用的琥珀色 `--dsw-alias-state-warn-primary`。于是「当前选用」这句陈述事实的话，被涂成了问题的颜色：在一张「被限流」的表格里，它看起来像第三种警告。
+  - **现在的形状**：第二行拆成两个 span，各得各的语气 ——
+    | 片段 | 类名 | 颜色 | 出现在 |
+    | --- | --- | --- | --- |
+    | 当前选用 | `.dsm-workbuddy-composer-panel-mark-current` | `--dsw-alias-state-success-primary`（绿） | 正在服务本 tab 的那一行 |
+    | 被限流 · 约 X 小时后 | `.dsm-workbuddy-composer-panel-mark-reason` | `--dsw-alias-state-warn-primary`（琥珀，**未变**） | 用不了的行 |
+  - **分隔符改由 CSS 画**：两个 span 之间的 ` · ` 来自相邻兄弟选择器 `-current + -reason::before{content:" · "}`，所以把这一行当**纯文本**读出来仍是 `当前选用 · 被限流 · 约 6 小时后` —— 行 `title` 的悬浮提示、`th` 的 `aria-label`、以及既有的字符串断言都不受影响。这也是没有把两段文案在 TS 里拼成一个字符串的原因：拼了就没法给它们分别上色。
+  - **刻意没动的**：圆点的颜色规则（能用=绿、不能用=红、未测=灰）与 `stateTone` 的判定一行未改。选哪个颜色回答的是「能不能用」，第二行回答的是「是不是我在用的那个」，这两条规则各自独立 —— 4.8.1 之前那一版正是因为把颜色同时用于两件事才读不出来。
+  - **测试**：`tests/composer-credits-render.spec.tsx` 新增用例钉住「选中为独立绿色 span、原因为独立琥珀 span、两者共存仍不合并」，颜色断言直接从 `WORKBUDDY_COMPOSER_CSS` 里读规则，而不是断言类名存在就算过。
+
 ## 4.8.1 (2026-10-18)
 
 > 版本号是 **patch**：只改卡片界面的样式与排版，不改请求、响应、计费或任何配置项。发往上游的请求体与本版之前逐字节相同。

@@ -731,10 +731,16 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                       const usable = stateTone(availability) === 'ok'
                       // Printed: "当前选用" for the selected row, and/or the reason
                       // it cannot serve, in the short form ("被限流 · 约 6 小时后").
-                      const mark = detailLine(
-                        live ? t('composer.current') : undefined,
-                        usable ? undefined : availabilityMark(t, availability),
-                      )
+                      //
+                      // TWO spans, not one line: these two facts are different
+                      // kinds of message and the owner asked for the selection to
+                      // be green. In one span both inherited the mark's amber, so
+                      // "当前选用" — a statement of fact, not a problem — was
+                      // painted in the problem colour. Each gets its own class
+                      // and its own tone; the separator is drawn in CSS so the
+                      // plain-text reading of the line is unchanged.
+                      const currentMark = live ? t('composer.current') : undefined
+                      const reasonMark = usable ? undefined : availabilityMark(t, availability)
                       // Whispered: the same facts with the absolute instant, so
                       // hovering still answers "when exactly" and a screen reader
                       // on the row header hears the whole sentence.
@@ -762,9 +768,18 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                               <span className={dotClass(availability)} aria-hidden="true" />
                               <span className="dsm-workbuddy-composer-panel-who">
                                 <span className="dsm-workbuddy-composer-panel-name">{row.accountName}</span>
-                                {mark === undefined
+                                {currentMark === undefined && reasonMark === undefined
                                   ? null
-                                  : <span className="dsm-workbuddy-composer-panel-mark">{mark}</span>}
+                                  : (
+                                      <span className="dsm-workbuddy-composer-panel-mark">
+                                        {currentMark === undefined
+                                          ? null
+                                          : <span className="dsm-workbuddy-composer-panel-mark-current">{currentMark}</span>}
+                                        {reasonMark === undefined
+                                          ? null
+                                          : <span className="dsm-workbuddy-composer-panel-mark-reason">{reasonMark}</span>}
+                                      </span>
+                                    )}
                               </span>
                             </button>
                           </th>

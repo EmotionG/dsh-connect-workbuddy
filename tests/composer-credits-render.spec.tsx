@@ -708,6 +708,66 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
     await m.unmount()
   })
 
+  it('paints the selection green and the refusal in its own tone', async () => {
+    // The owner's follow-up, pointing at the boxed line in a screenshot:
+    //
+    //   "框出来的，当前选用用绿色的字"
+    //
+    // "当前选用" and "被限流" used to share ONE span and therefore one colour --
+    // the reason's amber -- so a statement of fact was painted like a problem.
+    // They are two facts and now two spans, each with its own class, joined by a
+    // separator drawn in CSS so the plain-text reading of the line is unchanged.
+    const markPartsOf = (name: string): { current?: Element | undefined; reason?: Element | undefined } => {
+      const who = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-who'))
+        .find(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === name)
+      return {
+        current: who?.querySelector('.dsm-workbuddy-composer-panel-mark-current') ?? undefined,
+        reason: who?.querySelector('.dsm-workbuddy-composer-panel-mark-reason') ?? undefined,
+      }
+    }
+
+    const m = await openPanel(poolUsage)
+    // A healthy selected row: the selection span exists alone.
+    expect(markPartsOf('A One').current?.textContent).toBe('composer.current')
+    expect(markPartsOf('A One').reason, 'a healthy row has no refusal to print').toBeUndefined()
+    // An unusable row that is NOT selected: only the reason.
+    expect(markPartsOf('A Two').reason?.textContent).toContain('row.poolExcludedRateLimited')
+    expect(markPartsOf('A Two').current).toBeUndefined()
+    await m.unmount()
+
+    // Both facts on one row: the in-use account that is rate limited.
+    const both = await openPanel(() => ({
+      ...usageOf('cn', 1072),
+      pool: {
+        enabled: true,
+        targetModelId: '',
+        checkinSupported: true,
+        modelId: 'deepseek-v4.1-flash',
+        accounts: [
+          {
+            accountId: 'a-1',
+            accountName: 'A One',
+            credits: 1072,
+            current: true,
+            member: true,
+            probe: { outcome: 'rate-limited', atMs: Date.now() - 60_000, retryAtMs: Date.now() + 3_600_000 },
+            excludedBy: 'rate-limited',
+          },
+        ],
+      },
+    }))
+    // The dots of both rows stay driven by usability -- this change is about the
+    // second line's colours, not the dot's.
+    expect(markPartsOf('A One').current?.textContent).toBe('composer.current')
+    expect(markPartsOf('A One').reason?.textContent).toContain('row.poolExcludedRateLimited')
+    // And the rule each one gets, read from the real stylesheet.
+    const ruleOf = (name: string): string =>
+      new RegExp(`\\.dsm-workbuddy-composer-panel-mark-${name}\\{([^}]*)\\}`).exec(WORKBUDDY_COMPOSER_CSS)?.[1] ?? ''
+    expect(ruleOf('current'), 'the selection is green').toContain('--dsw-alias-state-success-primary')
+    expect(ruleOf('reason'), 'the refusal keeps the warn tone').toContain('--dsw-alias-state-warn-primary')
+    await both.unmount()
+  })
+
   it('falls back to the credits row when the Host has no pool document', async () => {
     // An older Host answers the credits route but not the pool route; the panel
     // must still warn about a rate-limited account instead of silently hiding it.

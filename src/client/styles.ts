@@ -655,11 +655,24 @@ export const WORKBUDDY_COMPOSER_CSS = `
    instead of the name. */
 .dsm-workbuddy-composer-panel-who{display:flex;flex-direction:column;min-width:0;gap:1px}
 .dsm-workbuddy-composer-panel-name{overflow:hidden;text-overflow:ellipsis}
-/* Why the account cannot serve right now ("被限流"), in the warn colour the pool
-   table uses for the same fact — so one measurement reads the same on both. */
+/* The second line under the name: TWO facts, two tones.
+   .dsm-workbuddy-composer-panel-mark-current -- "当前选用", green: it says which
+     account is serving this tab, which is not a problem and must not be painted
+     like one. The owner asked for exactly this ("框出来的，当前选用用绿色的字").
+   .dsm-workbuddy-composer-panel-mark-reason -- why it cannot serve ("被限流"),
+     in the warn colour the pool table uses for the same fact, so one
+     measurement reads the same on both surfaces.
+   The two are siblings in a flex line and the separator between them is drawn
+   here, not in the text: rendered text stays exactly "当前选用 · 被限流 · 约 6
+   小时后" for anything that reads the DOM as a string. */
 .dsm-workbuddy-composer-panel-mark{
+  display:flex;flex-wrap:wrap;align-items:baseline;
   font-size:11px;line-height:15px;
-  color:var(--dsw-alias-state-warn-primary,#f59e0b);
+}
+.dsm-workbuddy-composer-panel-mark-current{color:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-workbuddy-composer-panel-mark-reason{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.dsm-workbuddy-composer-panel-mark-current+.dsm-workbuddy-composer-panel-mark-reason::before{
+  content:" · ";color:var(--dsw-alias-label-dimmed,rgba(127,127,127,.6));
 }
 /* Hover belongs to the switch, not the row: the number cell is not clickable,
    so lighting it up would promise an action it cannot perform. */
