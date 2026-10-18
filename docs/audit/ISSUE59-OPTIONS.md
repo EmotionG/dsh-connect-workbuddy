@@ -28,7 +28,7 @@ The chain that produces the jump (each link confirmed):
    and at `:88-96` a replayed non-empty thinking block is returned **as-is when `isSameModel`** and otherwise **flattened to `{type:"text", text: block.thinking}`** (billed text).
 4. **Disparity:** the plugin registers **two** provider ids (`workbuddy` CN, `workbuddy-global` intl — `src/adapter.ts:36,39`, registered as two adapters at `src/index.ts:2049-2050`) that serve the **same** model id `deepseek-v4.1-flash`. So for that model the **only differing leg** of `isSameModel` is `assistantMsg.provider !== model.provider` when the history was produced on the other region.
 
-Result: thinking produced on the other region is replayed as **plain text**, landing in the billed `text` bucket. Body-composition evidence (`docs` + `src/body-report.ts:7-15`, paired same-session capture) shows the same history being counted `CN reasoning 72,270 / text 741,952` vs `GL reasoning 627,994 / text 184,821` — a ~0.9995 body-byte ratio but a large bucket drift. The 4.8.0 `context-rescue` only prevents the *overflow/deadlock* symptom; it does not touch the counting jump.
+Result: thinking produced on the other region is replayed as **plain text**, landing in the billed `text` bucket. Body-composition evidence (`docs` + `src/body-report.ts:7-15`, paired same-session capture) shows the same history being counted `CN reasoning 72,270 / text 741,687` vs `GL reasoning 627,994 / text 184,821` — a ~0.9995 body-byte ratio but a large bucket drift. The 4.8.0 `context-rescue` only prevents the *overflow/deadlock* symptom; it does not touch the counting jump.
 
 ---
 
@@ -91,7 +91,7 @@ Keep `src/context-rescue.ts` (4.8.0 chunked fold on confirmed overflow) as the l
 
 **What the documentation must say (for DSH-0.2.x RELEASE notes / README troubleshooting):**
 - The user-visible symptom verbatim: **「切个区，余额掉一半」** — switching WorkBuddy region re-bills prior thinking as plain text because pi-ai treats the two workbuddy provider ids as different models, so cross-region history thinking leaves the (unbilled) reasoning bucket and enters the billed text bucket.
-- It is a **counting/display behavior change, not a leak or a lost-credit bug**: the same bytes are re-labelled, not double-spent. Bridge it to the body-report numbers (CN text 741,952 vs GL 184,821; reasoning 72,270 vs 627,994).
+- It is a **counting/display behavior change, not a leak or a lost-credit bug**: the same bytes are re-labelled, not double-spent. Bridge it to the body-report numbers (CN text 741,687 vs GL 184,821; reasoning 72,270 vs 627,994).
 - The 30–94% is **direction-dependent**: whichever region produced the bulk of the history, switching to the other region down-replays its thinking to text.
 - Guidance: avoid toggling region on history-heavy sessions; if you must, expect a one-off number jump and that `/compact` may need a fresh pass; 4.8.0's rescue keeps the session alive through the overflow so a deadlock is no longer expected.
 - Clearly flag it as a pi-ai-level behavioral artifact, with the O1 proposal as the intended fix.
@@ -172,6 +172,6 @@ stamped "workbuddy" (O1)
 
 That is a feature-sized change with a region-outage failure mode, needing its own tests (both regions still route to their own baseUrl/credentials; picker unchanged; cross-region replay keeps thinking). It is not a patch to smuggle into a documentation release.
 
-**Also note the incompleteness of the premise itself:** `docs/audit/ISSUE59-VERIFY.md` (C7) records that "the gateway bills downgraded text but not `reasoning_content`" is **unmeasurable from this machine** and still marked 尚未测定 in `docs/reasoning-investigation.md`. An O1′ would be a code change premised on a step nobody has measured directly; O4's documentation-first order is the correct sequencing regardless of feasibility.
+**The premise, now updated (2026-10-18 evening).** `docs/audit/ISSUE59-VERIFY.md` C7 originally recorded "the gateway bills downgraded text but not `reasoning_content`" as unmeasurable from this machine, and `docs/reasoning-investigation.md` still marked it 尚未测定. The reporter has since measured it with a same-region same-model increment (see `docs/reasoning-investigation.md` §11.7 and `docs/audit/ISSUE59-BILLING.md`), and this repo's own coefficient arithmetic corroborates it: the international side's tool blocks alone account for 97.7% of its `promptTokens`, which leaves no budget at all for 628K reasoning characters. So the step is no longer a guess — but it is still **his measurement plus our arithmetic**, not a controlled A/B run on this machine. O1′ remains a designed-but-unstarted change: the blocker is now the registration semantics (`models.js`'s one-id-one-provider assumption), not the billing question.
 
 **Revised recommendation:** ship **O4** (documentation + the existing 4.8.0 `context-rescue`) now; record O1′ as a designed-but-unstarted change with the blocker above; file **O5** upstream. O2 and O3 remain closed for the reasons this report gives.

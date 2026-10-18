@@ -13,7 +13,7 @@
  * what produced it. A paired capture in one session (4.6.7) measured
  * `bodyBytes` 3,628,068 vs 3,626,374, a ratio of 0.9995: both requests carried
  * the same bytes. What differed was the BUCKET each byte was counted in — CN
- * text 741,952 vs GL 184,821, CN reasoning 72,270 vs GL 627,994, with a
+ * text 741,687 vs GL 184,821, CN reasoning 72,270 vs GL 627,994, with a
  * complementary residual of 0.3%. The gateways did not miscount; the same
  * history was labelled differently on the two sides.
  *

@@ -46,3 +46,24 @@ grep -rn '0.3518' docs/ src/ README.md CHANGELOG.md /Users/dmh2002/.dsh/body-rep
 - The **exact** 496/496 signature count (only the same uniformity is confirmed locally: 790/790 = `reasoning_content` in this session's log).
 - Gateway billing semantics (C7): whether either region's gateway bills `reasoning_content` as prompt tokens, and whether the 1.437× vs 0.696× asymmetry has a single cross-region mechanism. Requires an international-side paired measurement with `promptTokens` attached (the 4.6.6+ body-report feature) — exactly the measurement `docs/reasoning-investigation.md:219` already calls for.
 - The derivation of 0.3518 tok/char.
+---
+
+## 追记（2026-10-18 晚）：C6 / C7 与 `0.3518` 的后续
+
+本节**不改动**上面的判决表（它记录的是当时能核到什么），只补记报告者 2026-10-18T09:40:43Z 回复之后的结果。
+
+| 上表条目 | 当时 | 现在 | 依据 |
+| --- | --- | --- | --- |
+| C6 的 `text` 值 741,952 | 按报告者原数复算 | **改为 741,687**（user 69,431 + assistant 672,256；原数重复计了 265） | 报告者自撤；`src/body-report.ts:16`、`tests/issue59-body-report.spec.ts:27`、`docs/audit/ISSUE59-OPTIONS.md` 已同步 |
+| C6 的「residual 0.3%」与「两侧都等于 812,815」 | 记为两个观察 | **同一个恒等式**（字符守恒）：`741,687 + 72,270 − 1,142 = 812,815 = 184,821 + 627,994` | 报告者接受本报告的意见 |
+| `0.3518 tok/char` | 判为「无法复现，勿公开引用」 | **已解释**：分母串了，真分母是 555,724（两区 reasoning 之差），不是 812,815。该系数本身作废 | 报告者自撤；从未进过公开文档 |
+| **C7（计费前提）** | UNVERIFIABLE-LOCALLY | **可定案：reasoning 不计费** —— 但性质是「报告者实测 + 本仓库系数复算佐证」，**不是本机实测** | `docs/audit/ISSUE59-BILLING.md`（独立对抗性复核）；`docs/reasoning-investigation.md` §11.7 |
+
+C7 定案的两条算式（详见 `ISSUE59-BILLING.md` 的 A1/A4/Q4）：
+
+1. **同区同模型增量**（报告者的机器）：+416 tok 对 +1,290 reasoning 字符 / +892 其他字符 → 计费读法 0.1907 tok/char，不计费读法 0.4664；后者与我们实测的 tool-result 0.4555 相差 2.4%。
+2. **国际侧自己的账**（纯本仓库系数）：tool 块 959,283 字符 × 0.4555 = 436,953 tok = 它 447,306 总账的 **97.7%**，剩下的 10,353 tok 要分给另外 822,343 字符（0.0126 tok/char）——**reasoning 若也计费，这笔账凑不出来**。
+
+**同时撤回本报告用过的一个说法**：我们曾写「若计费，预测比值 0.697」。那是量纲串了 —— 0.697 是两边非 reasoning 密度的比值，不是计费假设的预测。计费假设下两区计费字符几乎相等（差 0.15%），预测比值 **≈1.00**，而实测 **1.4370**，所以计费假设是**被证伪**，不是被吻合。报告者的这一条批评成立。
+
+**仍然未定的**：报告者预测「单区跑完再切区跳变接近 0」在本机无法验证（无 `global.jsonl`，`cn.jsonl` 685 条 `promptTokens` 命中 0）；他的字符总数比本仓库分块表多出恒定 30,507 / 30,772（一个我们没采集的桶），不要当成本仓库的数引用。

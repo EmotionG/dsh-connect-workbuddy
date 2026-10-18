@@ -24,11 +24,13 @@ import {
  * showing that historical `reasoning` never reaches the wire — that reading was
  * wrong. `bodyBytes` then came back at 0.9995 while `promptTokens` came back at
  * 0.696, which is only possible if the same bytes are counted into different
- * buckets: CN text 741,952 vs GL 184,821, CN reasoning 72,270 vs GL 627,994,
- * complementary residual 0.3%. The field a thinking block is replayed under is
- * chosen by pi-ai from the name its upstream stream used, so a transcript built
- * against one gateway's spelling is billed as `text` on one side and
- * `reasoning` on the other. This report is what lets a reporter see that split
+ * buckets: CN text 741,687 vs GL 184,821, CN reasoning 72,270 vs GL 627,994,
+ * complementary residual 0.3%. The buckets follow pi-ai's replay: a thinking
+ * block survives as thinking only when its own `provider`/`api`/`model` all
+ * match the request in flight (`transform-messages.js:68`); every other one is
+ * downgraded to text (`:88–96`) — downgraded, not dropped. Two provider ids for
+ * one model is therefore why a transcript built on one side is billed as text on
+ * the other. This report is what lets a reporter see that split
  * on their own machine, WITHOUT either region needing credit, because the body
  * is assembled locally before `14018 Credits exhausted` can be returned.
  *
