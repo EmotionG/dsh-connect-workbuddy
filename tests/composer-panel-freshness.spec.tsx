@@ -95,6 +95,47 @@ async function openPanel(props: Record<string, unknown> = {}): Promise<Mounted> 
   return m
 }
 
+/**
+ * Answer with a body the component can read as a stream.
+ *
+ * `stubFetch` cannot express the case below: it always answers IMMEDIATELY, and
+ * this test needs one request (the post-batch re-read) to stay open. The shape
+ * is otherwise identical to the shared double, including the `content-type`
+ * header the panel picks its parser from.
+ */
+function streamAnswer(contentType: string, lines: readonly unknown[]): Response {
+  const text = lines.map(line => JSON.stringify(line)).join('\n') + '\n'
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? contentType : null) },
+    json: async () => JSON.parse(text) as unknown,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text))
+        controller.close()
+      },
+    }),
+  } as unknown as Response
+}
+
+const jsonAnswer = (body: unknown): Response => streamAnswer('application/json', [body])
+
+/** The mark a panel row prints, selected by the account name it is drawn beside. */
+function rowMarkOf(name: string): string {
+  return rowOf(name)?.querySelector('.dsm-workbuddy-composer-panel-mark')?.textContent ?? ''
+}
+
+/** The dot's classes, which is where the colour decision lives. */
+function rowDotOf(name: string): string {
+  return rowOf(name)?.querySelector('.dsm-workbuddy-composer-panel-dot')?.className ?? ''
+}
+
+function rowOf(name: string): Element | undefined {
+  return Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-table tbody tr'))
+    .find(row => (row.textContent ?? '').includes(name))
+}
+
 describe('the panel keeps its account rows current while it is open', () => {
   it('re-reads the account table on the CARD cadence, not the readout one', () => {
     // Pinned as a constant, because the value IS the argument: the shortest
@@ -391,6 +432,71 @@ describe('the panel header button tests every account', () => {
     const errors = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-error'))
       .map(node => node.textContent ?? '')
     expect(errors.join(' | '), 'the batch died, so the panel says so').toContain('no target model configured')
+  })
+
+  it('lands each row while the batch is still running', async () => {
+    // The batch is SERIAL: account one is measured seconds before the last one,
+    // and a stuck member can hold the rest for a long time. Waiting for the end
+    // of the stream therefore leaves the row the user is watching wrong for the
+    // duration of the batch — the dead-looking panel the streamed route exists
+    // to avoid. The post-batch re-read is HELD here (it never answers), so a row
+    // that changes can only have changed on its own line.
+    const poolUsage = {
+      ...usageOf(1072),
+      pool: {
+        enabled: true,
+        checkinSupported: false,
+        targetModelSource: 'free',
+        targetModelId: 'free-1',
+        accounts: [
+          { accountId: 'a-1', accountName: 'A One', current: true, member: true },
+          { accountId: 'a-2', accountName: 'A Two', current: false, member: true },
+        ],
+      },
+    }
+    let usageReads = 0
+    const never = new Promise<Response>(() => {})
+    vi.stubGlobal('fetch', vi.fn(async (url: any) => {
+      const target = String(url)
+      if (target.includes('/pool')) {
+        return streamAnswer('application/x-ndjson', [
+          { action: 'test', modelId: 'free-1' },
+          {
+            row: {
+              accountId: 'a-2',
+              accountName: 'A Two',
+              result: { modelId: 'free-1', outcome: 'rate-limited', retryAtMs: Date.now() + 3_600_000 },
+            },
+          },
+          { row: { accountId: 'a-1', accountName: 'A One', result: { modelId: 'free-1', outcome: 'ok' } } },
+          { done: true },
+        ])
+      }
+      if (target.includes('account-credits')) {
+        return jsonAnswer({
+          accounts: [
+            { id: 'a-1', accountName: 'A One', selected: true, credits: 1072 },
+            { id: 'a-2', accountName: 'A Two', selected: false, credits: 300 },
+          ],
+        })
+      }
+      usageReads += 1
+      return usageReads === 1 ? jsonAnswer(poolUsage) : never
+    }))
+    const m = await openPanel()
+    const button = document.body.querySelector<HTMLButtonElement>('.dsm-workbuddy-composer-panel-refresh')
+    await m.click(button as Element)
+    await m.settle()
+
+    // Mutation: fold the rows only after `readNdjson` resolves → both marks come
+    // back empty, because nothing ever answers the re-read.
+    expect(rowMarkOf('A Two'), 'the limited row says why').toContain('row.poolExcludedRateLimited')
+    expect(rowMarkOf('A One'), 'the usable row claims nothing beyond being in use').toBe('composer.current')
+    expect(rowDotOf('A Two')).toContain('panel-dot-error')
+    expect(rowDotOf('A One')).toContain('panel-dot-ok')
+    // The re-read was issued — and never answered, which is what makes the two
+    // assertions above evidence for the fold rather than for the re-read.
+    expect(usageReads).toBe(2)
   })
 
   it('moves the footer clock when the table is refreshed', async () => {

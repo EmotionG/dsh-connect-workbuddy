@@ -15,9 +15,13 @@
  */
 import type {
   WorkBuddyWebProbeOutcome,
+  WorkBuddyWebProbeResult,
   WorkBuddyWebPoolAccount,
   WorkBuddyWebPoolExclusion,
+  WorkBuddyWebPoolTestRow,
+  WorkBuddyWebUsage,
 } from '../status-paths.ts'
+import { exclusionOf } from '../account-pool.ts'
 import type { Translate } from './searched-paths.ts'
 import { remainingText } from './remaining.ts'
 
@@ -239,4 +243,151 @@ export function stateColor(account: AccountStateInput): string {
     case 'error': return 'var(--dsw-alias-state-error-primary, #ef4444)'
     default: return 'var(--dsw-alias-label-dimmed, #9aa0a6)'
   }
+}
+
+/**
+ * Read one line of the test batch's stream as a test row.
+ *
+ * The stream is `{ action, modelId }`, then one `{ row }` per account, then
+ * `{ done: true }` — or `{ reason, error }` when the batch itself broke. Only the
+ * row shape is recognized here; the rest is the caller's business.
+ *
+ * Every field is validated rather than trusted. This parses a wire the panel did
+ * not write, and a half-shaped row reaching the component's state would render
+ * as a measurement nobody took — worse than ignoring the line, because the
+ * subsequent re-read is what would have quietly corrected it.
+ */
+export function testRowOf(line: Record<string, unknown>): WorkBuddyWebPoolTestRow | undefined {
+  const raw = line['row']
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const row = raw as Record<string, unknown>
+  const accountId = row['accountId']
+  const name = row['accountName']
+  const rawResult = row['result']
+  if (typeof accountId !== 'string' || accountId === '') return undefined
+  if (typeof rawResult !== 'object' || rawResult === null) return undefined
+  const result = probeResultOf(rawResult as Record<string, unknown>)
+  if (result === undefined) return undefined
+  return {
+    accountId,
+    // A row without a name still identifies its account: falling back to the id
+    // keeps a real measurement instead of discarding it over a missing label.
+    accountName: typeof name === 'string' && name !== '' ? name : accountId,
+    result,
+  }
+}
+
+/** The probe result inside a test row, when it is complete enough to render. */
+function probeResultOf(raw: Record<string, unknown>): WorkBuddyWebProbeResult | undefined {
+  const outcome = raw['outcome']
+  const modelId = raw['modelId']
+  // `modelId` is REQUIRED, not optional politeness: the pool tests ONE model per
+  // region, and an outcome without the model it measured is the account-level
+  // claim issue #61 exists to stop the card from making.
+  if (typeof outcome !== 'string' || !isProbeOutcome(outcome)) return undefined
+  if (typeof modelId !== 'string') return undefined
+  const elapsedMs = raw['elapsedMs']
+  const status = raw['status']
+  const message = raw['message']
+  const retryAtMs = raw['retryAtMs']
+  const retrySource = raw['retrySource']
+  return {
+    modelId,
+    outcome,
+    ...(typeof elapsedMs === 'number' ? { elapsedMs } : {}),
+    ...(typeof status === 'number' ? { status } : {}),
+    ...(typeof message === 'string' ? { message } : {}),
+    ...(typeof retryAtMs === 'number' ? { retryAtMs } : {}),
+    ...isRetrySource(retrySource) ? { retrySource } : {},
+  }
+}
+
+/** The outcome vocabulary, as a value — the type alone cannot be tested against a wire. */
+const PROBE_OUTCOMES: readonly WorkBuddyWebProbeOutcome[] = [
+  'ok',
+  'rate-limited',
+  'model-busy',
+  'out-of-credit',
+  'credential-rejected',
+  'policy-rejected',
+  'unavailable',
+  'not-found',
+  'failed',
+]
+
+function isProbeOutcome(value: string): value is WorkBuddyWebProbeOutcome {
+  return (PROBE_OUTCOMES as readonly string[]).includes(value)
+}
+
+function isRetrySource(value: unknown): value is NonNullable<WorkBuddyWebProbeResult['retrySource']> {
+  return value === 'retry-after'
+    || value === 'upstream-message'
+    || value === 'quota-refresh'
+    || value === 'upstream-tips'
+}
+
+/**
+ * Fold ONE streamed test row into the usage document the panel is rendering.
+ *
+ * Why fold at all, when the batch is followed by a re-read: the batch is SERIAL
+ * and a stuck member can take seconds, so a panel that changes nothing until the
+ * LAST account answers is exactly the dead-looking button the streamed batch was
+ * built to avoid. Folding each row as it lands makes the row change the moment
+ * its measurement exists; the re-read afterwards then replaces the fold with the
+ * same facts, this time from the Host's own store.
+ *
+ * The exclusion is RE-DERIVED here rather than left as it was: it is derived
+ * state (`exclusionOf`), so copying the previous one forward would keep a
+ * just-measured-good account red until the re-read — and would keep a
+ * just-measured-limited one green, which is the more expensive error.
+ */
+export function withTestRow(
+  usage: WorkBuddyWebUsage,
+  row: WorkBuddyWebPoolTestRow,
+  nowMs: number,
+): WorkBuddyWebUsage {
+  if (!('pool' in usage) || usage.pool === undefined) return usage
+  const pool = usage.pool
+  const index = indexOfTestedAccount(pool.accounts, row)
+  if (index === undefined) return usage
+  const measured = pool.accounts[index]
+  if (measured === undefined) return usage
+  // Dropped rather than overwritten: `exclusionOf` may now say "usable", and
+  // leaving the field out is the only way to say that on a type whose property
+  // admits no `undefined` under `exactOptionalPropertyTypes`.
+  const { excludedBy: _previous, ...account } = measured
+  const probe = {
+    outcome: row.result.outcome,
+    atMs: nowMs,
+    source: 'test-batch' as const,
+    modelId: row.result.modelId,
+    ...(row.result.retryAtMs === undefined ? {} : { retryAtMs: row.result.retryAtMs }),
+    ...(row.result.message === undefined ? {} : { message: row.result.message }),
+  }
+  const excludedBy = exclusionOf(probe, nowMs)
+  const folded: WorkBuddyWebPoolAccount = {
+    ...account,
+    probe,
+    ...(excludedBy === undefined ? {} : { excludedBy }),
+  }
+  const accounts = pool.accounts.map((candidate, at) => (at === index ? folded : candidate))
+  return { ...usage, pool: { ...pool, accounts } }
+}
+
+/**
+ * Which listed account a test row measured, or `undefined` when it measured none
+ * of them.
+ *
+ * Matched by ID first. The NAME is only a fallback for a row whose id this
+ * document no longer lists, and only when exactly one listed account carries it:
+ * two accounts sharing a name must never have one measurement written onto both.
+ */
+function indexOfTestedAccount(
+  accounts: readonly WorkBuddyWebPoolAccount[],
+  row: WorkBuddyWebPoolTestRow,
+): number | undefined {
+  const byId = accounts.findIndex(account => account.accountId === row.accountId)
+  if (byId >= 0) return byId
+  const matches = accounts.flatMap((account, at) => (account.accountName === row.accountName ? [at] : []))
+  return matches.length === 1 ? matches[0] : undefined
 }

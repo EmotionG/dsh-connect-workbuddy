@@ -32,7 +32,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPosition, useDismissOnOutsidePointer } from './popover.ts'
 import { applyManualOrder, readOrderAccountIds } from './manual-order'
-import { availabilityLine, availabilityMark, stateTone } from './account-state.ts'
+import {
+  availabilityLine,
+  availabilityMark,
+  stateTone,
+  testRowOf,
+  withTestRow,
+} from './account-state.ts'
 import type { AccountStateInput } from './account-state.ts'
 import {
   WORKBUDDY_ACCOUNT_CREDITS_PATH,
@@ -500,6 +506,19 @@ export function ComposerCredits(props: ComposerCreditsProps) {
           failure = poolFailureText(t, { status: response.status })
         } else {
           await readNdjson(response.body, line => {
+            // Land each measurement the moment it exists. The batch is serial,
+            // so waiting for the whole stream leaves the row the user is watching
+            // wrong for as long as the SLOWEST account takes — the dead-looking
+            // panel the streamed batch was built to avoid. The re-read in
+            // `finally` then confirms the same facts from the Host's own store,
+            // so a fold is a shortcut, never the record.
+            const row = testRowOf(line)
+            if (row !== undefined) {
+              if (mounted.current) {
+                setUsage(previous => (previous === undefined ? previous : withTestRow(previous, row, Date.now())))
+              }
+              return
+            }
             const reason = line['reason']
             if (typeof reason !== 'string') return
             failure = poolFailureText(t, {
