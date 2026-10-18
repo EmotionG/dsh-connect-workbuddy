@@ -17,24 +17,53 @@
  * complementary residual of 0.3%. The gateways did not miscount; the same
  * history was labelled differently on the two sides.
  *
- * The labelling is pi-ai's replay, not this plugin's. `openai-completions.js`
- * records the reasoning field name the upstream stream actually used into
- * `thinkingSignature` (`:428`), and on the way back out writes
- * `assistantMsg[<that name>] = <the thinking text>` (`:1006`), so a
- * transcript produced against a gateway that says `reasoning` is replayed as
- * `reasoning` and one that says `reasoning_content` as `reasoning_content`.
- * This plugin sets only `compat.supportsReasoningEffort` (`src/adapter.ts:200`),
- * so the `else` branch is taken and the field goes out raw rather than folded
- * into text.
+ * The labelling is pi-ai's replay — which assistant messages it lets survive as
+ * thinking at all. `transform-messages.js:68` (1.1.0, the version the host
+ * bundles) computes
  *
- * An earlier revision of this comment claimed the opposite — that historical
- * `reasoning` never reaches the wire, because `requiresThinkingAsText` is unset
- * and the `reasoning_details` route needs a signature the parser never writes.
- * Both halves are wrong under pi-ai 0.85.1: the unset flag is precisely what
- * routes thinking out as a raw field, and the parser does write the
- * `reasoning_details` signature (`:188–193`). The correction matters because it
- * turns `reasoning` into a bucket that can be non-zero — and diffing it across
- * regions is the direct measurement of the drift.
+ *     isSameModel = assistantMsg.provider === model.provider
+ *                && assistantMsg.api      === model.api
+ *                && assistantMsg.model    === model.id;
+ *
+ * and for a message that fails it, `:88–96` returns the surviving thinking as
+ * `{ type: "text", text: block.thinking }` — downgraded, not dropped — while
+ * `:76` drops redacted thinking and `:103` strips tool-call `thoughtSignature`.
+ * `buildParams` runs that transform at `openai-completions.js:896`, before
+ * anything is assembled, so a thinking block only stays a thinking block when
+ * its message was recorded under the same provider AND the same model id as the
+ * request now in flight. Survivors leave as the raw field: `:1002–1008` writes
+ * `assistantMsg[signature] = <thinking>`, `signature` being the field name the
+ * stream used, recorded per block at `:399–416` (`reasoning_content` for this
+ * vendor, uniformly — 790 replay records in one real session held that value
+ * and no other). Non-survivors are text by the time `:964–971` collects
+ * `assistantText`, so they land in `assistantMsg.content` instead. This plugin
+ * sets only `compat.supportsReasoningEffort` (`src/adapter.ts:200`), which
+ * leaves `requiresThinkingAsText` at its `false` default (`:1270`), so the raw
+ * field route is the live one rather than the fold-into-content route at `:983`.
+ *
+ * Two provider ids for one model is therefore two identities for one model, and
+ * a region switch flips the sign for the entire other side at once: everything
+ * that side ever thought is replayed as content instead of as a reasoning field,
+ * and the gateways count content. That is the 1.94× above; the same formula read
+ * in the other direction is the 0.696× the reverse switch produces (text
+ * 642,800 vs 447,306 across the same bytes). The model-id leg of `isSameModel`
+ * matters for the same reason — switching models inside ONE region has the same
+ * effect — which is why the symptom belongs in `README`'s 已知限制, where users
+ * meet it, and not only here.
+ *
+ * The retraction trail, because this header has misled twice. The first version
+ * claimed historical `reasoning` never reaches the wire, because
+ * `requiresThinkingAsText` is unset and the `reasoning_details` route needs a
+ * signature the parser never writes. Both halves are wrong: the unset flag is
+ * precisely what routes thinking out as a raw field. The second version — the
+ * one this paragraph replaces — claimed the difference was the field NAME,
+ * signature-driven, citing 0.85.1's `:428`/`:1006` and concluding that a gateway
+ * saying `reasoning` replays as `reasoning`. That cannot be right either: both
+ * gateways say `reasoning_content`, so a name-keyed story predicts NO difference
+ * between them, and the host ships 1.1.0, not 0.85.1. What differs is survival,
+ * not naming. The file keeps both dead ends on purpose — each one shaped what
+ * this report measures, and the third version only settled the question because
+ * the report could show bytes equal while buckets were not.
  *
  * This module exists to settle exactly that, and it can do it WITHOUT either
  * region having credit: the body is assembled locally, before the upstream ever
