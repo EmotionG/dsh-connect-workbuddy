@@ -143,7 +143,14 @@ describe('the panel keeps its account rows current while it is open', () => {
 
     // Mutation: drop the interval, or restore the open-only effect → still empty.
     expect(panelText()).toContain('row.poolExcludedModelBusy')
-    expect(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark')).toHaveLength(1)
+    // Two lines: the selected row always names itself, and the newly benched one
+    // now carries its reason. Before the refresh there was one; the interval is
+    // what adds the second.
+    const marks = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark'))
+      .map(node => node.textContent ?? '')
+    expect(marks).toContain('composer.current')
+    expect(marks.some(line => line.includes('row.poolExcludedModelBusy')), 'the new reason is drawn').toBe(true)
+    expect(marks).toHaveLength(2)
   })
 
   it('stops reading the table once the panel closes', async () => {

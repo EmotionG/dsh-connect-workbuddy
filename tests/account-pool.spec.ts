@@ -388,6 +388,126 @@ describe('rankPool', () => {
   it('handles an empty pool', () => {
     expect(rankPool([], NOW)).toEqual([])
   })
+
+  /**
+   * Manual priority (`orderAccountIds`), the user's own "who serves next".
+   *
+   * The order sits BELOW usability and the at-risk flag and ABOVE every
+   * credit-derived key. Every test here pins one clause of that sentence,
+   * because each clause is a decision someone will otherwise try to "fix":
+   * the expiry guard in particular looks like a bug until you read issue #70.
+   */
+  describe('manual order (orderAccountIds)', () => {
+    it('falls back to the credit policy when no order is given', () => {
+      // Regression guard for the whole feature: an absent (or empty) order must
+      // reproduce the pre-feature ranking exactly. If this ever changes, every
+      // profile that never touched the card silently starts rotating accounts
+      // in a new sequence.
+      const members = [
+        member('low', { credits: 10 }),
+        member('high', { credits: 1_000 }),
+        member('mid', { credits: 500 }),
+      ]
+      const withNone = rankPool(members, NOW).map(row => row.account.id)
+      const withEmpty = rankPool(members, NOW, []).map(row => row.account.id)
+      expect(withNone).toEqual(['high', 'mid', 'low'])
+      expect(withEmpty).toEqual(withNone)
+    })
+
+    it('puts the user\'s order ahead of the credit policy', () => {
+      // The headline promise: the account the user dragged to the top is the
+      // one selected even though it holds the LEAST credit. Ranking by balance
+      // here would mean the manual order never actually wins anything, because
+      // totals are almost never exactly equal (see the issue #70 note).
+      const ranked = rankPool([
+        member('rich', { credits: 50_000 }),
+        member('middle', { credits: 500 }),
+        member('poor', { credits: 1 }),
+      ], NOW, ['poor', 'middle', 'rich'])
+      expect(ranked.map(row => row.account.id)).toEqual(['poor', 'middle', 'rich'])
+    })
+
+    it('sorts members missing from the order after every ordered one', () => {
+      // An order that names a subset (the user checked in a new account after
+      // sorting) must not interleave: the unlisted account goes last, where
+      // the card also draws it (`sortAccountsByOrder` uses the same rule).
+      // Were the two to disagree, the number on the badge would name a
+      // position the ranking does not use.
+      const ranked = rankPool([
+        member('unlisted-rich', { credits: 9_000 }),
+        member('second', { credits: 10 }),
+        member('first', { credits: 1 }),
+      ], NOW, ['first', 'second'])
+      expect(ranked.map(row => row.account.id)).toEqual(['first', 'second', 'unlisted-rich'])
+    })
+
+    it('never lets the manual order float an excluded account above a usable one', () => {
+      // Usability outranks everything, including the user's own order: an
+      // account in cooldown cannot serve, so putting it first would only make
+      // every request fail over before reaching the account that can answer.
+      const ranked = rankPool([
+        member('limited-but-first', {
+          credits: 5,
+          probe: { outcome: 'rate-limited', atMs: NOW, retryAtMs: NOW + 60_000 },
+        }),
+        member('usable-second', { credits: 1 }),
+      ], NOW, ['limited-but-first', 'usable-second'])
+      expect(ranked.map(row => row.account.id)).toEqual(['usable-second', 'limited-but-first'])
+      expect(ranked[1]?.excludedBy).toBe('rate-limited')
+    })
+
+    it('expiring credits still outrank the manual order (issue #70 wins)', () => {
+      // DELIBERATE, and the most likely clause to be mistaken for a bug. The
+      // user's order is a preference that may be stale or sloppy; credits
+      // lapsing are real money about to vanish. A single mis-drag must never
+      // cost the points, so `_atRisk` sits ABOVE `_order` in the comparator.
+      // If someone reorders those two lines, this test is the one that says why
+      // that was wrong — do not "fix" it by adjusting the expectation.
+      const ranked = rankPool([
+        member('user-first-no-expiry', { credits: 9_000, expiringSoon: 0 }),
+        member('user-second-expiring', { credits: 100, expiringSoon: 100, nearestExpiryMs: NOW + 3_600_000 }),
+      ], NOW, ['user-first-no-expiry', 'user-second-expiring'])
+      expect(ranked.map(row => row.account.id)).toEqual(['user-second-expiring', 'user-first-no-expiry'])
+    })
+
+    it('ignores ids in the order that belong to no member', () => {
+      // The saved order outlives accounts (a sign-in removed from the desktop
+      // app leaves its id behind, exactly like `memberAccountIds`). A ghost id
+      // sitting in position 0 must not push every real member down a place, or
+      // the card's "第 1 位" would describe an empty slot.
+      const ranked = rankPool([
+        member('b', { credits: 2 }),
+        member('a', { credits: 1 }),
+      ], NOW, ['ghost', 'a', 'b'])
+      expect(ranked.map(row => row.account.id)).toEqual(['a', 'b'])
+    })
+
+    it('uses the FIRST position for a duplicated id, so ranks do not drift', () => {
+      // A hand-edited list can repeat an id. Taking the LAST occurrence would
+      // let a stray duplicate silently demote the account it names, so the row
+      // would jump away from the badge that claims to describe it.
+      const ranked = rankPool([
+        member('first', { credits: 1 }),
+        member('second', { credits: 100 }),
+      ], NOW, ['first', 'first', 'second'])
+      expect(ranked.map(row => row.account.id)).toEqual(['first', 'second'])
+    })
+
+    it('is stable when the order and the credit keys both tie', () => {
+      // Two ordered accounts identical on credits, expiry and token age: the
+      // user's own order must decide, and the result must not depend on the
+      // caller's array order. Without the `_order` key this fell through to the
+      // account id, so the manual order was unreachable for exact ties.
+      const rows = [
+        member('b', { credits: 5, tokenExpiresAtMs: NOW }),
+        member('a', { credits: 5, tokenExpiresAtMs: NOW }),
+      ]
+      const forward = rankPool(rows, NOW, ['b', 'a']).map(row => row.account.id)
+      const reversed = rankPool([...rows].reverse(), NOW, ['b', 'a']).map(row => row.account.id)
+      expect(forward).toEqual(['b', 'a'])
+      expect(reversed).toEqual(forward)
+    })
+  })
 })
 
 describe('pickAccount', () => {

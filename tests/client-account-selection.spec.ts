@@ -270,6 +270,11 @@ describe('writePoolPreferences', () => {
     enabled: true,
     targetModelId: 'glm-5.3',
     memberAccountIds: ['a', 'b'],
+    // No manual priority yet: an empty list is a real, saveable state meaning
+    // "let the credit policy decide". The field is REQUIRED rather than optional
+    // so a caller cannot forget it — a forgotten order would silently wipe a
+    // saved sort on the next membership edit.
+    orderAccountIds: [] as string[],
   }
 
   it('stores the preferences under the region slot', async () => {
@@ -340,7 +345,10 @@ describe('writePoolPreferences', () => {
     await writePoolPreferences(scope, 'cn', { ...PREFERENCES })
     const pool = (document()['regions'] as Record<string, { pool?: Record<string, unknown> }>).cn?.pool
     expect(pool).not.toHaveProperty('probeInputTokens')
-    expect(Object.keys(pool ?? {}).sort()).toEqual(['enabled', 'memberAccountIds', 'targetModelId'])
+    // `orderAccountIds` IS present, as `[]`: unlike `probeInputTokens` it is
+    // never omitted, because the positional read-back check needs a real array
+    // to compare. An empty list is the "no manual order" state.
+    expect(Object.keys(pool ?? {}).sort()).toEqual(['enabled', 'memberAccountIds', 'orderAccountIds', 'targetModelId'])
   })
 
   it('accepts a stored probe size of 0 for a request that omitted it', async () => {
@@ -392,6 +400,7 @@ describe('coexisting writers on one region slot', () => {
       enabled: true,
       targetModelId: '',
       memberAccountIds: ['a'],
+      orderAccountIds: [],
     })
     const slot = (document()['regions'] as Record<string, Record<string, unknown>>).cn
     expect(slot?.['lastCatalog']).toEqual([{ id: 'm' }])
@@ -422,6 +431,7 @@ describe('coexisting writers on one region slot', () => {
       enabled: false,
       targetModelId: '',
       memberAccountIds: [],
+      orderAccountIds: [],
     })
     const regions = document()['regions'] as Record<string, Record<string, unknown>>
     expect(regions.global).toEqual({ lastCatalog: [{ id: 'g' }], pool: { enabled: false } })

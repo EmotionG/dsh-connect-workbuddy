@@ -257,7 +257,15 @@ describe('the model list no longer folds', () => {
     // click-to-hide section, which reads as a different kind of section.
     const m = await openCard()
     expect(m.container.querySelector('details.dsm-workbuddy-models-fold')).toBeNull()
-    expect(m.container.querySelector('summary')).toBeNull()
+    // Scoped to the MODEL section on purpose. This used to assert that the whole
+    // card contained no <summary> at all, which was only ever true because the
+    // models fold was its sole disclosure. The pool's account table has since
+    // gained an unrelated one (the ordering-rule section), and a card-wide
+    // "no summary anywhere" would now fail for a reason that has nothing to do
+    // with this section. The guarantee that matters is: the model list, in its
+    // own section, does not fold.
+    expect(m.container.querySelector('.dsm-workbuddy-models summary')).toBeNull()
+    expect(m.container.querySelector('.dsm-workbuddy-models details')).toBeNull()
     expect(m.container.querySelector('.dsm-workbuddy-models-chevron')).toBeNull()
     expect(m.container.querySelector('.dsm-workbuddy-models-fold-hint')).toBeNull()
     // The header and the list are both still rendered, and the header still says

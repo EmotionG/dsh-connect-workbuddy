@@ -433,6 +433,8 @@ export async function writePoolPreferences(
      */
     probeInputTokens?: number
     memberAccountIds: readonly string[]
+    /** Manual priority order for member accounts; always a real array. */
+    orderAccountIds: readonly string[]
   },
 ): Promise<void> {
   // The merge starts from the EXISTING slot, read here rather than taken from
@@ -449,6 +451,7 @@ export async function writePoolPreferences(
     enabled: preferences.enabled,
     targetModelId: preferences.targetModelId,
     memberAccountIds: preferences.memberAccountIds,
+    orderAccountIds: preferences.orderAccountIds,
   }
   if (preferences.probeInputTokens !== undefined) {
     slot['probeInputTokens'] = preferences.probeInputTokens
@@ -478,6 +481,13 @@ export async function writePoolPreferences(
     if (!Array.isArray(stored) || stored.length !== preferences.memberAccountIds.length) return false
     const wanted = new Set(preferences.memberAccountIds)
     if (!stored.every(id => typeof id === 'string' && wanted.has(id))) return false
+    // Order is compared POSITIONALLY, unlike membership above. Ordering is
+    // order-sensitive: a set comparison would call a partially-applied write a
+    // success — and since success is what discards the draft, the user would
+    // see "I sorted it but it didn't save".
+    const storedOrder = pool['orderAccountIds']
+    if (!Array.isArray(storedOrder) || storedOrder.length !== preferences.orderAccountIds.length) return false
+    if (!storedOrder.every((id, index) => id === preferences.orderAccountIds[index])) return false
     // Everything compared above matched. Returning `undefined` here (which is
     // what a trailing `if` without a final `return` would do) reads as "did not
     // land" and would leave the draft on screen after a successful save.

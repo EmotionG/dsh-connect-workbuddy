@@ -410,6 +410,21 @@ export interface WorkBuddyPoolPreferences {
    * the pool covers nothing and both buttons stay disabled.
    */
   memberAccountIds?: string[]
+  /**
+   * The user's hand-ordered pool order, as a list of account ids.
+   *
+   * SEPARATE FROM MEMBERSHIP: this is purely a display/preference of what the
+   * user wants the pool to prefer, and it is independent of which accounts are
+   * checked in. An id here need not be in {@link memberAccountIds} — the
+   * ranking only consults this order for accounts that are actually members,
+   * and ids that are not listed simply sort last. Keeping them separate lets
+   * the user reorder first and check accounts in later without the ordering
+   * being destroyed by an unrelated membership edit (see `poolPreferencesOf`,
+   * which must always carry this list through alongside membership). Ids that
+   * no longer resolve to a listed account are dropped on transmit, never
+   * silently merged into membership.
+   */
+  orderAccountIds?: string[]
 }
 
 /** Plugin configuration. */
@@ -479,6 +494,7 @@ const poolConfig = z.object({
    */
   probeInputTokens: z.number().step(1).default(0).description('Input tokens each test probe sends: 10000 / 20000 / 30000 / 50000 / 100000. Bigger probes catch a rate limit real conversations would hit, but cost more credit per test and may mark an account unusable for large requests only. 0 uses the measured default (25000)'),
   memberAccountIds: z.array(z.string()).default([]).description('Account ids checked into this pool (opt-in; empty means the pool covers nothing)'),
+  orderAccountIds: z.array(z.string()).default([]).description('The user\'s hand-ordered pool order, as account ids. Independent of membership: an id need not be checked in (it only takes effect once the account is a member), and ids not listed sort last. Separate from memberAccountIds so reordering never conflicts with, or is destroyed by, a membership edit.'),
 })
 
 const regionStateConfig = z.object({
@@ -1492,7 +1508,10 @@ export function apply(ctx: Context, config: Config): void {
   ): Promise<WorkBuddyCredential | undefined> => {
     if (!poolPreferencesOf(current(), region).enabled) return undefined
     const tried = new Set(triedAccountIds)
-    for (const row of rankPool(await localPoolMembers(region), Date.now())) {
+    // The saved manual order, so failover honors the user's preference order
+    // (issue #70's expiry guard still outranks it, inside `rankPool`).
+    const order = poolPreferencesOf(current(), region).orderAccountIds
+    for (const row of rankPool(await localPoolMembers(region), Date.now(), order)) {
       // `excludedBy` carries the reason a measurement rules an account out.
       // Skipping on it is what makes "try until none is usable" mean usable
       // rather than merely "not yet tried": re-hitting an account the upstream
@@ -1723,7 +1742,7 @@ export function apply(ctx: Context, config: Config): void {
       store.setRotatedAccount(undefined)
       return
     }
-    const winner = rankPool(await localPoolMembers(region), Date.now())
+    const winner = rankPool(await localPoolMembers(region), Date.now(), poolPreferencesOf(current(), region).orderAccountIds)
       .find(row => row.excludedBy === undefined)
     // Nobody usable is NOT "no account": clearing the override hands the REQUEST
     // to the saved selection, and the failure is then reported honestly instead of
@@ -1748,7 +1767,7 @@ export function apply(ctx: Context, config: Config): void {
     const credential = await stacks[region].store.current().catch(() => undefined)
     if (credential === undefined) return false
     const servingId = workbuddyAccountId(credential)
-    const row = rankPool(await localPoolMembers(region), Date.now())
+    const row = rankPool(await localPoolMembers(region), Date.now(), poolPreferencesOf(current(), region).orderAccountIds)
       .find(candidate => candidate.account.id === servingId)
     // Not a member at all (unchecked, or the pool is empty) means the pool has no
     // opinion, so it must not assert one.
@@ -1852,6 +1871,7 @@ export function apply(ctx: Context, config: Config): void {
       // consumers of this type rely on absence meaning "never chose".
       ...probeInputTokens === undefined ? {} : { probeInputTokens },
       memberAccountIds: pool?.memberAccountIds ?? [],
+      orderAccountIds: pool?.orderAccountIds ?? [],
     }
   }
 

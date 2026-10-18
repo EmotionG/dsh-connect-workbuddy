@@ -371,12 +371,24 @@ function retryDue(
  * 2. **Expiring credits first, soonest first.** Points about to expire are
  *    worth exactly zero after they do, so spending them before they lapse is
  *    strictly better than saving them.
- * 3. **Largest expiring amount.** Between two accounts that both have expiring
+ * 3. **User's manual order.** When the user has hand-ordered the pool (see
+ *    `orderAccountIds`), that order breaks ties among accounts that are equal
+ *    on the keys above AND below. It is the one place the user's own preference
+ *    influences "who serves next": the manual picker on the card drags these
+ *    ids into place, and the ranking honors the result.
+ *    WHY EXPIRY STILL OUTRANKS THE MANUAL ORDER: this rule sits strictly BELOW
+ *    the at-risk flag (rule #2), so an account with ANY expiring credits always
+ *    beats the manual order even when the user dragged it to the bottom. That
+ *    is deliberate (issue #70): a manual order that is unsaved, stale, or
+ *    sloppily edited must never cause credits to lapse unspent — expiring
+ *    credits are real money about to vanish, while the manual order is just a
+ *    preference that might be wrong. This is not a bug, and a test pins it.
+ * 4. **Largest expiring amount.** Between two accounts that both have expiring
  *    points, the one with more at risk goes first.
- * 4. **Credits, highest first.** Among accounts with nothing expiring, spend the
+ * 5. **Credits, highest first.** Among accounts with nothing expiring, spend the
  *    one with the most, so a nearly-drained account is conserved.
- * 5. **Freshest credential.** Tie-break so a stale token never wins a draw.
- * 6. **Account id.** Final tie-break, making the order TOTAL: two accounts
+ * 6. **Freshest credential.** Tie-break so a stale token never wins a draw.
+ * 7. **Account id.** Final tie-break, making the order TOTAL: two accounts
  *    equal on every ranking key would otherwise keep the caller's array order,
  *    so the same pool could rotate differently between two runs.
  *
@@ -409,7 +421,16 @@ function retryDue(
 export function rankPool(
   members: readonly WorkBuddyPoolMember[],
   nowMs: number,
+  orderAccountIds?: readonly string[],
 ): WorkBuddyPoolRanked[] {
+  // The user's manual order, as a position lookup so missing ids (and accounts
+  // never listed) map consistently to "sorted last". Position 0 is "first".
+  // Duplicate ids keep the FIRST occurrence's position — hand lists often have
+  // a stray duplicate, and whichever the user intended first must win.
+  const order = new Map<string, number>()
+  for (const [index, id] of (orderAccountIds ?? []).entries()) {
+    if (!order.has(id)) order.set(id, index)
+  }
   const rows = members.map(member => {
     const excludedBy = exclusionOf(member.probe, nowMs)
     return {
@@ -418,6 +439,8 @@ export function rankPool(
       ...excludedBy === undefined ? {} : { excludedBy },
       // Ordering keys below the primary score; not part of the public row.
       _usable: excludedBy === undefined,
+      // The user's manual order position; Infinity = not listed = sorted last.
+      _order: order.get(member.account.id) ?? Number.POSITIVE_INFINITY,
       // Whether ANYTHING lapses within the window, and how much.
       //
       // `expiringSoon` is the amount (credits); `nearestExpiryMs` is a
@@ -435,6 +458,9 @@ export function rankPool(
     if (left._usable !== right._usable) return left._usable ? -1 : 1
     // Expiring credits before anything else among usable accounts (issue #70).
     if (left._atRisk !== right._atRisk) return left._atRisk ? -1 : 1
+    // The user's manual order, only among accounts equal on usability & the
+    // at-risk flag — see the doc note about why expiry still outranks it.
+    if (left._order !== right._order) return left._order - right._order
     // Both at risk: whichever lapses FIRST goes first.
     if (left._atRisk && right._atRisk && left._expiring !== right._expiring) {
       return left._expiring - right._expiring
@@ -499,8 +525,9 @@ export function effectiveMembersOf(
 export function pickAccount(
   members: readonly WorkBuddyPoolMember[],
   nowMs: number,
+  orderAccountIds?: readonly string[],
 ): WorkBuddyPoolAccount | undefined {
-  return rankPool(members, nowMs).find(row => row.excludedBy === undefined)?.account
+  return rankPool(members, nowMs, orderAccountIds).find(row => row.excludedBy === undefined)?.account
 }
 
 /**

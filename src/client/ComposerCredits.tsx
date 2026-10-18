@@ -31,6 +31,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPosition, useDismissOnOutsidePointer } from './popover.ts'
+import { applyManualOrder, readOrderAccountIds } from './manual-order'
+import { availabilityLine, availabilityMark, stateTone } from './account-state.ts'
+import type { AccountStateInput } from './account-state.ts'
 import {
   WORKBUDDY_ACCOUNT_CREDITS_PATH,
   WORKBUDDY_USAGE_PATH,
@@ -38,7 +41,6 @@ import {
 } from '../status-paths.ts'
 import { writeAccountSlot } from './account-selection.ts'
 import { formatCredits } from './credit-format.ts'
-import { exclusionText } from './exclusion-text.ts'
 import { WORKBUDDY_COMPOSER_CSS } from './styles.ts'
 import type { WorkBuddyWebAccountCredit, WorkBuddyWebRegion, WorkBuddyWebUsage } from '../status-paths.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
@@ -152,6 +154,60 @@ export function hostCreditsShownOf(usage: WorkBuddyWebUsage | undefined): boolea
 
 function formatClock(value: number): string {
   return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+/**
+ * The dot's classes, one per tone.
+ *
+ * Written out in full instead of `\`…-dot-${tone}\`` on purpose: the panel's
+ * CSS-contract test harvests class names from this file with
+ * /dsm-workbuddy-composer-[a-z-]+/ and a template literal would contribute a
+ * dangling "…-dot-" prefix that no rule defines.
+ */
+const DOT_CLASS = {
+  ok: 'dsm-workbuddy-composer-panel-dot dsm-workbuddy-composer-panel-dot-ok',
+  error: 'dsm-workbuddy-composer-panel-dot dsm-workbuddy-composer-panel-dot-error',
+  unknown: 'dsm-workbuddy-composer-panel-dot dsm-workbuddy-composer-panel-dot-unknown',
+} as const
+
+/**
+ * The dot class for one row: green when the account can serve, red when it cannot.
+ *
+ * The rule the owner settled on, after three rounds of this: colour answers
+ * "can it be used", and the row's second line answers "is it the one I am
+ * using". Those two questions used to share one channel — an earlier revision
+ * painted green only on the selected account, which made every usable row grey
+ * and the list read as one live row among dead ones ("这样无法知道当前用的是什么"):
+ * true about selection, false about usability, and the panel is opened mainly to
+ * ask the second question.
+ *
+ * So green is now the ordinary state of a usable account, selected or not, and
+ * "当前选用" is printed under the name of the selected one. Red carries the
+ * refusal — including a stated rate limit, which used to be amber; amber read as
+ * "mostly fine", and an account that cannot answer this message is not fine.
+ *
+ * Grey is reserved for an account nobody has measured yet. Painting it green
+ * would assert a health nobody checked, and red would assert a failure nobody
+ * saw; the absence of a reading is its own state.
+ */
+function dotClass(account: AccountStateInput): string {
+  const tone = stateTone(account)
+  if (tone === 'ok') return DOT_CLASS.ok
+  if (tone === 'warn' || tone === 'error') return DOT_CLASS.error
+  return DOT_CLASS.unknown
+}
+
+/**
+ * The row's second line, from the facts that belong in it.
+ *
+ * Two independent ones: whether this is the account serving the tab, and — when
+ * it cannot serve — why, with the wait but never the absolute instant. Joined
+ * with the same separator the rest of this panel uses, and dropped entirely when
+ * there is nothing to say, so a plain usable row stays one line tall.
+ */
+function detailLine(...parts: Array<string | undefined>): string | undefined {
+  const kept = parts.filter((part): part is string => part !== undefined && part !== '')
+  return kept.length === 0 ? undefined : kept.join(' · ')
 }
 
 export function ComposerCredits(props: ComposerCreditsProps) {
@@ -460,6 +516,31 @@ export function ComposerCredits(props: ComposerCreditsProps) {
     return { ...row, credits: total }
   })
   const canSwitch = settingsScope !== undefined && settingsScope.getSnapshot().writable === true
+  // Follow the same manual priority order the pool card shows. Read straight
+  // from the settings snapshot rather than through a new prop: the order is
+  // already persisted there, and threading it through the slot registration
+  // would give the two surfaces independent sources — which is exactly how they
+  // drifted apart. `getSnapshot()` is called at render time so a save made in
+  // the pool card is picked up the next time this panel renders.
+  //
+  // The pool DOCUMENT wins when it carries an order, because that is the very
+  // field the card sorts by. Reading the settings snapshot alone would let the
+  // two lists disagree during the window where a save has reached the Host but
+  // not the settings scope (and forever, on a Host that never reports it).
+  // The settings scope stays as the fallback: it is all an older Host provides.
+  const poolOrder = usage?.status === 'signed-in' ? usage.pool?.orderAccountIds : undefined
+  const manualOrder = poolOrder !== undefined && poolOrder.length > 0
+    ? poolOrder
+    : settingsScope === undefined
+      ? []
+      : readOrderAccountIds(settingsScope.getSnapshot().value, activeRegion)
+  const orderedRows = applyManualOrder(rows, manualOrder)
+  // Keyed by account id, from the SAME document the pool card renders. Absent
+  // when this Host has no pool support, in which case the credits row's own
+  // `excludedBy` is all there is to go on.
+  const poolById = new Map(
+    (usage?.status === 'signed-in' ? usage.pool?.accounts ?? [] : []).map(account => [account.accountId, account]),
+  )
 
   return (
     <span ref={rootRef} className="dsm-workbuddy-composer-credits">
@@ -506,20 +587,74 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map(row => {
+                    {orderedRows.map(row => {
                       const current = row.id === selectedId
+                      // Availability comes from the POOL document, when this
+                      // session has one. That is the same array the pool card
+                      // renders, so the dot and the wording below are derived
+                      // from one object rather than two readings of one fact.
+                      // The credits endpoint's own `excludedBy` is the fallback
+                      // for a Host without pool support.
+                      const poolRow = poolById.get(row.id)
+                      // "Which row is live?" comes from the SAME document as the
+                      // state, when that document exists: the pool card marks its
+                      // current row from `pool.accounts[].current`, and reading the
+                      // credits endpoint's `selected` flag instead would let the
+                      // green dot and the highlighted card row point at two
+                      // different accounts. `current` (the selected-id form) stays
+                      // for the switch button, which must agree with what the
+                      // credits endpoint reports it can switch from.
+                      //
+                      // PREFERRED, not merged: when the two disagree the pool
+                      // document wins, because it is the object the state beside
+                      // the dot came from. OR-ing them would mark two rows live at
+                      // once — which is how a "which one is in use?" question gets
+                      // a wrong answer at exactly the moment it matters.
+                      const live = poolRow === undefined ? current : poolRow.current
+                      const availability = poolRow ?? {
+                        excludedBy: row.excludedBy,
+                        probe: undefined,
+                      }
                       // Why this account cannot serve right now, in the same
-                      // words the pool table uses. Shown so the user can see,
-                      // BEFORE switching, that a row is rate-limited — a table
-                      // that presents an exhausted account as an equally good
-                      // choice is worse than no table.
-                      const excluded = exclusionText(t, row.excludedBy)
+                      // WHAT the row prints, and what it only whispers.
+                      //
+                      // Printed: the reason and the wait — "被限流 · 约 6 小时后".
+                      // The absolute instant used to be printed here too, between
+                      // the two, and the owner asked for it to go: at that width
+                      // the line read as a log entry ("被限流 · 10/19, 01:32 之后
+                      // 可再用 · 约 6 小时后") next to a column that is only trying
+                      // to show a balance, and the date was the part nobody needed
+                      // to act on.
+                      //
+                      // Kept, not deleted: the row's `title` still carries the
+                      // full sentence from `availabilityLine` — absolute instant
+                      // included — so hovering still answers "when exactly". The
+                      // dot alone could not: it is aria-hidden, and a colour is
+                      // not a reason.
+                      const usable = stateTone(availability) === 'ok'
+                      // Printed: "当前选用" for the selected row, and/or the reason
+                      // it cannot serve, in the short form ("被限流 · 约 6 小时后").
+                      const mark = detailLine(
+                        live ? t('composer.current') : undefined,
+                        usable ? undefined : availabilityMark(t, availability),
+                      )
+                      // Whispered: the same facts with the absolute instant, so
+                      // hovering still answers "when exactly" and a screen reader
+                      // on the row header hears the whole sentence.
+                      const spoken = detailLine(
+                        live ? t('composer.current') : undefined,
+                        usable ? undefined : availabilityLine(t, availability),
+                      )
+                      const whoLabel = spoken === undefined
+                        ? row.accountName
+                        : `${row.accountName} — ${spoken}`
                       return (
                         <tr
                           key={row.id}
                           className={current ? 'dsm-workbuddy-composer-panel-row-current' : undefined}
+                          title={spoken}
                         >
-                          <th scope="row">
+                          <th scope="row" aria-label={whoLabel}>
                             <button
                               type="button"
                               className="dsm-workbuddy-composer-panel-switch"
@@ -527,17 +662,12 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                               aria-label={t('composer.switchTo', { account: row.accountName })}
                               onClick={() => { void switchTo(row.id) }}
                             >
-                              <span className="dsm-workbuddy-composer-panel-dot" aria-hidden="true" />
-                              {/* The name and the optional mark share one
-                                  column so the mark sits ON ITS OWN LINE under
-                                  the name rather than widening the row: the
-                                  number column must stay purely numeric, and a
-                                  long name beside a label would push it out. */}
+                              <span className={dotClass(availability)} aria-hidden="true" />
                               <span className="dsm-workbuddy-composer-panel-who">
                                 <span className="dsm-workbuddy-composer-panel-name">{row.accountName}</span>
-                                {excluded === undefined
+                                {mark === undefined
                                   ? null
-                                  : <span className="dsm-workbuddy-composer-panel-mark">{excluded}</span>}
+                                  : <span className="dsm-workbuddy-composer-panel-mark">{mark}</span>}
                               </span>
                             </button>
                           </th>

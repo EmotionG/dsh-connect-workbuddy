@@ -334,7 +334,48 @@ export const WORKBUDDY_CARD_CSS = `
 /* Declared AFTER the blanket span rule so it wins: the badge must not inherit
    the muted 11px tertiary treatment the membership line uses. */
 .dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-current-tag{align-self:flex-start;margin-top:2px;padding:1px 6px;border-radius:999px;background:rgba(86,134,254,.16);color:var(--dsw-alias-brand-primary,#5686fe);font-size:11px;font-weight:600;line-height:16px;white-space:nowrap}
+/* Manual-priority chrome (order badge + up/down arrows). The rank badge is a SPAN,
+   not a button: it only DESCRIBES the current order and must not read as a
+   control (nor join the row's button list). The solid vs dashed distinction is
+   load-bearing — a numeric rank must NOT appear when the credit policy still
+   decides the order, so the -auto modifier is the dashed/grey state. */
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-order{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-rank{display:inline-flex;align-items:center;border-radius:999px;border:1px solid rgba(86,134,254,.32);background:rgba(86,134,254,.12);color:var(--dsw-alias-brand-primary,#5686fe);font-size:11px;font-weight:600;line-height:16px;padding:1px 6px;white-space:nowrap;cursor:default;font-variant-numeric:tabular-nums}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-rank-auto{border:1px dashed var(--dsw-alias-border-l1,#2c2d31);background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-move{display:inline-flex;align-items:center;gap:2px}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-move-btn{width:18px;height:18px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;border:1px solid var(--dsw-alias-border-l1,#2c2d31);background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11px;line-height:1;cursor:pointer}
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-move-btn:disabled{opacity:.4;cursor:default}
+/* Hover/focus must change BOTH halves of the contrast pair.
+   The rule this replaces recoloured only the glyph — to
+   --dsw-alias-label-primary (#e6e6e6) — and left the background as it was. In
+   the LIGHT theme that token is near-WHITE, so on hover the arrow painted
+   white-on-light and vanished under the cursor (reported as "the up arrow
+   disappears when I hover"). Recolouring text without also repainting its
+   backdrop is unsafe whenever the two come from independent tokens, so this
+   sets an explicit tinted background and keeps the glyph on the brand colour,
+   which is legible in both themes. The outline is a third, theme-independent
+   affordance so the target is findable even if a token is remapped. */
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-move-btn:not(:disabled):hover,
+.dsm-workbuddy-pool-account-name .dsm-workbuddy-pool-move-btn:not(:disabled):focus-visible{background:rgba(86,134,254,.16);border-color:rgba(86,134,254,.55);color:var(--dsw-alias-brand-primary,#5686fe);outline:2px solid rgba(86,134,254,.45);outline-offset:1px}
 .dsm-workbuddy-pool-excluded{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+/* The ordering-rule disclosure, placed directly above the member table.
+   A native <details>: the marker is left to the browser so the control keeps
+   its built-in keyboard and screen-reader behaviour. The summary is a full-width
+   row because a 12px grey label on its own is a small click target, and this is
+   the one place a confused user is meant to click. */
+.dsm-workbuddy-pool-order-rules{border:1px solid var(--dsw-alias-border-l1,#2c2d31);border-radius:10px;background:var(--dsw-alias-bg-layer-2,#232529);margin:0 0 10px;overflow:hidden}
+.dsm-workbuddy-pool-order-rules-summary{padding:8px 12px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;font-weight:600;line-height:18px}
+.dsm-workbuddy-pool-order-rules-summary:hover{color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-pool-order-rules-summary:focus-visible{outline:2px solid rgba(86,134,254,.55);outline-offset:-2px}
+.dsm-workbuddy-pool-order-rules-body{display:flex;flex-direction:column;gap:8px;padding:0 12px 12px;border-top:1px solid var(--dsw-alias-border-l1,#2c2d31);padding-top:10px}
+/* The rules already carry their own "1." … "8." inside the sentence, so the <ol>
+   is semantic only. Suppressing the marker keeps a single number on screen
+   instead of "1. 1. …". */
+.dsm-workbuddy-pool-order-rules-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-pool-order-rules-list li{padding-left:2px}
+/* The "why expiring credits win" note is the sentence users push back on, so
+   it is tinted rather than buried in the same grey as the eight rules. */
+.dsm-workbuddy-pool-order-rules-why{margin:0;padding:8px 10px;border-radius:8px;border-left:3px solid var(--dsw-alias-state-warn-primary,#f59e0b);background:rgba(245,158,11,.10);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-pool-credits{display:flex;flex-direction:column;gap:1px;min-width:0;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-pool-credits b{color:var(--dsw-alias-label-primary,#e6e6e6);font-weight:600}
 .dsm-workbuddy-pool-soon{font-size:11px;line-height:16px;color:var(--dsw-alias-state-warn-primary,#f59e0b)}
@@ -633,9 +674,21 @@ export const WORKBUDDY_COMPOSER_CSS = `
   flex:none;width:7px;height:7px;border-radius:50%;
   background:var(--dsw-alias-label-dimmed,rgba(127,127,127,.5));
 }
-.dsm-workbuddy-composer-panel-table tr.dsm-workbuddy-composer-panel-row-current .dsm-workbuddy-composer-panel-dot{
-  background:var(--dsw-state-success,#22a06b);
-}
+/* Availability, matching the pool table's dot EXACTLY (see
+   account-state.ts, stateTone, which is the one place the rule lives).
+   Three states, and colour answers only the first question: can this account
+   serve the next message? The second question -- which account is serving this
+   tab -- is answered in words on the row ("current"), so the colour is free to
+   stay honest about usability. Green for usable (selected or not), red for a
+   refusal of any kind (a stated rate limit included: amber used to sit here and
+   read as "mostly fine"), and the neutral grey above for an account nobody has
+   measured yet, which is neither.
+   NOTE: no backticks in this comment. The whole stylesheet is a template
+   literal, and a stray backtick silently closes it (the file then fails to
+   parse with a misleading "Expected a semicolon"). */
+.dsm-workbuddy-composer-panel-dot-ok{background:var(--dsw-alias-state-success-primary,#22a06b)}
+.dsm-workbuddy-composer-panel-dot-error{background:var(--dsw-alias-state-error-primary,#ef4444)}
+.dsm-workbuddy-composer-panel-dot-unknown{background:var(--dsw-alias-label-dimmed,rgba(127,127,127,.5))}
 .dsm-workbuddy-composer-panel-foot{
   display:flex;justify-content:space-between;gap:8px;
   margin-top:9px;padding-top:7px;

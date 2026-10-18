@@ -20,6 +20,7 @@
  * @module dsh-connect-workbuddy/client/AccountPool
  */
 
+import { applyManualOrder } from './manual-order'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createElement as h } from 'react'
 import type { ReactNode } from 'react'
@@ -39,14 +40,15 @@ import type {
   WorkBuddyWebRegion,
 } from '../status-paths.ts'
 import { exclusionText } from './exclusion-text.ts'
+import { availabilityLine, formatShortClock, outcomeOk, outcomeText, stateColor } from './account-state.ts'
 import { formatCredits } from './credit-format.ts'
 import { BusyOverlay } from './BusyOverlay.tsx'
+import type { WorkBuddySettingsKey } from './locales.ts'
 import type { Translate } from './searched-paths.ts'
 import { readNdjson } from './ndjson.ts'
 import { inlineProbeReason } from './probe-reason.ts'
 import { probeAgeText, probeSourceText } from './probe-age.ts'
 import { PROBE_INPUT_TOKEN_CHOICES } from '../probe.ts'
-import { remainingText } from './remaining.ts'
 import {
   announcedBatchCount,
   draftBaseFor,
@@ -89,6 +91,15 @@ export interface PoolPreferences {
    * account is listed but never touched.
    */
   memberAccountIds: readonly string[]
+  /**
+   * Manual priority order for member ids.
+   *
+   * Unlike membership, ORDER matters: the pool spends these in sequence, so a
+   * swapped pair is a real edit. Empty means "no manual ordering — let the credit
+   * policy decide", which is exactly what an older profile that never persisted
+   * this field reads as.
+   */
+  orderAccountIds: readonly string[]
   /**
    * Per-account test model, keyed by account id (issue #61).
    *
@@ -219,50 +230,20 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.every(id => wanted.has(id))
 }
 
-/** Whether a probe outcome means the model answered. */
-function outcomeOk(outcome: WorkBuddyWebProbeOutcome): boolean {
-  return outcome === 'ok'
-}
-
-/** A short, localizable label for one probe outcome. */
-function outcomeText(t: Translate, outcome: WorkBuddyWebProbeOutcome): string {
-  switch (outcome) {
-    case 'ok': return t('row.probeOk')
-    case 'rate-limited': return t('row.poolExcludedRateLimited')
-    // Its own label: naming the MODEL as the limited party is the point — the
-    // row shows an ACCOUNT, and "被限流" beside an account name is what made
-    // issue #56's reporter hunt for a bad account that did not exist.
-    case 'model-busy': return t('row.poolExcludedModelBusy')
-    case 'out-of-credit': return t('row.poolExcludedOutOfCredit')
-    case 'credential-rejected': return t('row.probeCredentialRejected')
-    case 'not-found': return t('row.probeNotFound')
-    case 'unavailable': return t('row.probeUnavailable')
-    default: return t('row.probeFailed')
-  }
+/**
+ * Whether two id lists are equal IN ORDER.
+ *
+ * Unlike `sameIds`, position matters: manual priority is order-sensitive, so a
+ * swapped pair is a real change and must light up "unsaved changes". A set
+ * comparison here would treat reordering as a no-op and drop the user's sort.
+ */
+function sameOrder(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((id, index) => id === right[index])
 }
 
 function formatNumber(value: number): string {
   return formatCredits(value)
-}
-
-/**
- * `MM/DD, HH:mm` on a 24-hour clock.
- *
- * `hourCycle: 'h23'` is REQUIRED, not decorative: without it `Intl` follows the
- * browser locale's preference, and en-US renders `09/30, 01:23 PM`. A wall-clock
- * glued to "AM/PM" reads as 12-hour no matter what the surrounding UI assumes,
- * and it is the one thing a Chinese user cannot scan past — the card otherwise
- * speaks 24-hour everywhere (see `formatClock`).
- *
- * `h23` rather than `hour12: false`, because the latter maps to `h24` in some
- * engines and would print midnight as `24:00`. `h23` pins 00–23 exactly, which
- * is also the cycle DSH's own timestamps use.
- */
-function formatShort(value: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    hourCycle: 'h23',
-  }).format(new Date(value))
 }
 
 function formatClock(value: number): string {
@@ -270,28 +251,6 @@ function formatClock(value: number): string {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hourCycle: 'h23',
   }).format(new Date(value))
-}
-
-/** A dot colour for one account's state. */
-function stateColor(account: WorkBuddyWebPoolAccount): string {
-  if (account.excludedBy !== undefined) {
-    // Amber for states that resolve on their own, red for states that need the
-    // user to act. `unavailable` is an unreachable upstream — the same
-    // "wait, do not re-auth" class as a rate limit — so painting it red would
-    // assert the account is broken when only the network was.
-    // `model-busy` is in the amber set for the same reason as `rate-limited`:
-    // it clears on its own, and the account is not broken — painting it red
-    // would accuse the account of a fault that belongs to the model.
-    return account.excludedBy === 'rate-limited'
-      || account.excludedBy === 'model-busy'
-      || account.excludedBy === 'unavailable'
-      ? 'var(--dsw-alias-state-warn-primary, #f59e0b)'
-      : 'var(--dsw-alias-state-error-primary, #ef4444)'
-  }
-  if (account.probe === undefined) return 'var(--dsw-alias-label-dimmed, #9aa0a6)'
-  return outcomeOk(account.probe.outcome)
-    ? 'var(--dsw-alias-state-success-primary, #22a06b)'
-    : 'var(--dsw-alias-state-warn-primary, #f59e0b)'
 }
 
 /**
@@ -318,6 +277,12 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
   // Which region the drafts belong to. Switching tabs must not carry one
   // region's unsaved edits onto the other, and the two pools are independent.
   const [draftRegion, setDraftRegion] = useState<WorkBuddyWebRegion | undefined>(undefined)
+  // The ordering rule is reference material, not a setting: collapsed by
+  // default so it cannot push the actual controls below the fold. Held in
+  // component state rather than in the saved draft, because opening it is not
+  // something the user would ever want to "save", and it must survive the
+  // re-renders that a pool refresh causes.
+  const [orderRulesOpen, setOrderRulesOpen] = useState(false)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -341,6 +306,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // touched this" into "I chose this".
     probeInputTokens: pool?.probeInputTokens ?? 0,
     memberAccountIds: pool?.memberAccountIds ?? [],
+    // Defaults to empty (no manual ordering) when the host has never persisted
+    // one: an empty order means "let the credit policy decide" — the same
+    // semantics as an older profile that predates manual sorting.
+    orderAccountIds: pool?.orderAccountIds ?? [],
     // Copied verbatim (issue #61), including entries whose model has left the
     // catalog: the host keeps them for the same reason, and dropping one here
     // would make the next Save delete the user's choice.
@@ -375,6 +344,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // Order-insensitive: the user's clicks decide the set, not its ordering,
     // so re-checking the same accounts in a different order is not a change.
     || !sameIds(draft.memberAccountIds, saved.memberAccountIds)
+    // Order IS a change for the manual sort: swapping two priorities is editing
+    // even though the set is untouched. `sameOrder` compares positionally; the
+    // set-based `sameIds` must NOT be reused here (it would swallow a reorder).
+    || !sameOrder(draft.orderAccountIds, saved.orderAccountIds)
   )
 
   /**
@@ -390,6 +363,19 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
    * the field.
    */
   const listedIds = new Set((pool?.accounts ?? []).map(account => account.accountId))
+  // Manual priority order for the DISPLAYED member rows. `active` is the draft
+  // when the user is mid-edit, so this follows it (see `savedEffective` note
+  // below). Explicit ids that are no longer members are dropped; members with no
+  // explicit rank append in their original list order.
+  const orderIds: string[] = (() => {
+    const members = active.memberAccountIds.filter(id => listedIds.has(id))
+    const explicit = active.orderAccountIds.filter(id => members.includes(id))
+    const rest = members.filter(id => !explicit.includes(id))
+    return [...explicit, ...rest]
+  })()
+  // The user has pinned at least one member explicitly — the sign that they are
+  // sorting manually rather than letting the credit policy pick the order.
+  const orderIsManual = active.orderAccountIds.some(id => active.memberAccountIds.includes(id))
   const savedEffective = pool?.effectiveMemberAccountIds ?? []
   const effectiveMembers = effectiveMemberIds({
     savedEffective,
@@ -570,6 +556,38 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       return { ...current, memberAccountIds: [...set] }
     })
   }, [editDraft])
+
+  /**
+   * Move one member one step up (`-1`) or down (`+1`) in the manual priority.
+   *
+   * The FIRST click is "the user starts sorting manually": it persists the WHOLE
+   * currently-visible order into the draft, not just the one swapped pair. A
+   * click that wrote only the moved id would leave the other rows unsorted (and
+   * `orderIsManual` false), so the draft and the tables they power stay in sync.
+   * `delta` is restricted to ±1 — a single swap per click — which is what makes
+   * the first/last rows' extra buttons (rather than fields) correct.
+   */
+  const moveMember = useCallback((accountId: string, delta: -1 | 1): void => {
+    editDraft(current => {
+      // The visible order, derived exactly like the render-side `orderIds` (which
+      // this deliberately mirrors): explicit ids first, un-pinned members appended
+      // in original order. Deriving it from `current` here — not a render-scoped
+      // `orderIds` — keeps the callback free of that per-render value's identity.
+      const listed = new Set((pool?.accounts ?? []).map(account => account.accountId))
+      const members = current.memberAccountIds.filter(id => listed.has(id))
+      const explicit = current.orderAccountIds.filter(id => members.includes(id))
+      const rest = members.filter(id => !explicit.includes(id))
+      const visible = [...explicit, ...rest]
+      const index = visible.indexOf(accountId)
+      if (index < 0) return current
+      const to = index + delta
+      if (to < 0 || to >= visible.length) return current
+      const next = [...visible]
+      next.splice(index, 1)
+      next.splice(to, 0, accountId)
+      return { ...current, orderAccountIds: next }
+    })
+  }, [editDraft, pool])
 
     /** Check every listed account, or none of them. */
   const selectAll = useCallback((next: boolean): void => {
@@ -1115,6 +1133,36 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
           }, t('row.poolSelectNone')),
         ),
       ),
+      // The full ordering rule, where the ↑/↓ arrows are actually used. A user
+      // who sorts the pool is implicitly asking "so which one gets picked
+      // first?", and the answer is not "the one at the top" — usability and
+      // expiring credits both outrank the manual order. Collapsed by default
+      // so reference text does not push the table down, but present so nobody
+      // has to read the source to find out why a "No. 2" account was skipped.
+      //
+      // A <details>/<summary> pair rather than a stateful button: it is
+      // keyboard-operable and screen-reader-expanded natively, survives the
+      // pool's frequent re-renders without state, and cannot fall out of sync
+      // with what is on screen. `open` is left uncontrolled deliberately.
+      h('details', {
+        className: 'dsm-workbuddy-pool-order-rules',
+        // Controlled so a refresh cannot collapse a section the user just
+        // opened (React would otherwise reset it), and so the toggle text stays
+        // in sync with the disclosure state.
+        open: orderRulesOpen,
+        onToggle: (event: { currentTarget: { open: boolean } }) => setOrderRulesOpen(event.currentTarget.open),
+      },
+        h('summary', { className: 'dsm-workbuddy-pool-order-rules-summary' },
+          t('row.poolOrderRulesTitle')),
+        h('div', { className: 'dsm-workbuddy-pool-order-rules-body' },
+          h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderRulesIntro')),
+          h('ol', { className: 'dsm-workbuddy-pool-order-rules-list' },
+            ...ORDER_RULE_KEYS.map(key => h('li', { key }, t(key))),
+          ),
+          h('p', { className: 'dsm-workbuddy-pool-order-rules-why' }, t('row.poolOrderWhy')),
+          h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderBadgeNote')),
+        ),
+      ),
       h('div', { className: `dsm-workbuddy-pool-table${pool.checkinSupported ? ' dsm-workbuddy-pool-table-checkin' : ''}` },
         h('div', { className: 'dsm-workbuddy-pool-row dsm-workbuddy-pool-row-head' },
           h('span', null, t('row.poolColumnAccount')),
@@ -1124,23 +1172,51 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
           // The per-row actions column: no header text, the buttons speak.
           h('span', null),
         ),
-        ...pool.accounts.map(account => renderAccountRow({
-          t,
-          account,
-          checked: active.memberAccountIds.includes(account.accountId),
-          canEdit: canEditPool,
-          checkinSupported: pool.checkinSupported,
-          onToggle: next => toggleMember(account.accountId, next),
-          // Per-row actions, right side of the row. One busy flag gates both,
-          // so a row's test and another row's removal never interleave.
-          busy: rowBusyAccountId !== undefined,
-          testDisabled: pool.targetModelSource === 'none' || pool.targetModelSource === 'stale',
-          targetHint: pool.targetModelSource === 'none'
-            ? t('row.poolTargetNone')
-            : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
-          onTest: () => { void runRowTest(account.accountId) },
-          onRemove: () => { void runRowRemove(account.accountId, account.accountName) },
-        })),
+        ...(() => {
+          const ordered = sortAccountsByOrder(pool.accounts, orderIds)
+          // `memberSeen` counts how many member rows we've emitted so far, 0-based
+          // among members (not among all rows). The first/last member row needs to
+          // know where it sits to disable the ↑ on the first and ↓ on the last.
+          let memberSeen = 0
+          let memberTotal = 0
+          for (const account of ordered) {
+            if (active.memberAccountIds.includes(account.accountId)) memberTotal += 1
+          }
+          return ordered.map(account => {
+            const isMember = active.memberAccountIds.includes(account.accountId)
+            const left = isMember ? memberSeen : -1
+            const right = isMember ? memberTotal - 1 - memberSeen : -1
+            if (isMember) memberSeen += 1
+            return renderAccountRow({
+              t,
+              account,
+              checked: isMember,
+              canEdit: canEditPool,
+              checkinSupported: pool.checkinSupported,
+              onToggle: next => toggleMember(account.accountId, next),
+              // Per-row actions, right side of the row. One busy flag gates both,
+              // so a row's test and another row's removal never interleave.
+              busy: rowBusyAccountId !== undefined,
+              testDisabled: pool.targetModelSource === 'none' || pool.targetModelSource === 'stale',
+              targetHint: pool.targetModelSource === 'none'
+                ? t('row.poolTargetNone')
+                : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
+              onTest: () => { void runRowTest(account.accountId) },
+              onRemove: () => { void runRowRemove(account.accountId, account.accountName) },
+              // Manual-sort props (see renderAccountRow): the 1-based rank among
+              // members, whether ordering is manual, and whether this row's move
+              // arrows are enabled. First member's ↑ and last member's ↓ are
+              // disabled but still rendered so rows never shift position.
+              orderIndex: isMember && orderIsManual ? left + 1 : undefined,
+              orderIsManual,
+              moveEnabled: pool.enabled === true && isMember && canEditPool,
+              onMoveUp: () => { void moveMember(account.accountId, -1) },
+              onMoveDown: () => { void moveMember(account.accountId, 1) },
+              moveUpDisabled: left <= 0,
+              moveDownDisabled: right <= 0,
+            })
+          })
+        })(),
       ),
       effectiveMembers.length === 0
         ? h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
@@ -1243,36 +1319,37 @@ function renderAccountRow(input: {
   onTest: () => void
     /** Forget this account's plugin-stored credential. */
   onRemove: () => void
+  /** 1-based rank among members; undefined when not a member / not manually ordered. */
+  orderIndex: number | undefined
+  /** Whether the pool order is user-pinned (vs the credit policy picking it). */
+  orderIsManual: boolean
+  /** The ↑/↓ buttons render only when the pool is enabled AND this row is checked. */
+  moveEnabled: boolean
+  onMoveUp: () => void
+  onMoveDown: () => void
+  /** First member's ↑ (and last member's ↓) stay visible but disabled, so rows never shift. */
+  moveUpDisabled: boolean
+  moveDownDisabled: boolean
 }): ReturnType<typeof h> {
-  const { t, account, checked, canEdit, checkinSupported, onToggle, busy, testDisabled, targetHint, onTest, onRemove } = input
+  const {
+    t, account, checked, canEdit, checkinSupported, onToggle, busy, testDisabled,
+    targetHint, onTest, onRemove, orderIndex, orderIsManual, moveEnabled,
+    onMoveUp, onMoveDown, moveUpDisabled, moveDownDisabled,
+  } = input
   const name = account.accountName === '' ? t('row.accountUnnamed') : account.accountName
   const excluded = exclusionText(t, account.excludedBy)
   const probe = account.probe
-  const outcomeLine = probe === undefined
-    ? t('row.poolNeverTested')
-    : probe.retryAtMs !== undefined
-      ? `${outcomeText(t, probe.outcome)} · ${t('row.poolRetryAt', { at: formatShort(probe.retryAtMs) })}`
-      // A limited account with NO stated time says exactly that. Rendering the
-      // bare outcome would leave the user unable to tell "the upstream gave no
-      // time" apart from "this plugin forgot to show it" — and the honest
-      // absence is the same contract `cooldownOf()` already keeps.
-      : probe.outcome === 'rate-limited' || probe.outcome === 'model-busy' || probe.outcome === 'out-of-credit'
-        ? `${outcomeText(t, probe.outcome)} · ${t('row.poolRetryUnknown')}`
-        : outcomeText(t, probe.outcome)
+  // The sentence comes from the SHARED rule (`account-state.ts`) so the
+  // composer credits panel prints the identical words for the identical
+  // measurement. An untested account has nothing to say, and the card supplies
+  // its own "never tested" wording for that case.
+  const outcomeLine = availabilityLine(t, account) ?? t('row.poolNeverTested')
   // The reason worth inlining, from the ONE rule both tables share (see
   // `probe-reason.ts`). It is absent for a limited account — whose body just
   // repeats the reset time printed beside it — and shortened otherwise, because
   // "the request was cancelled" versus "the network is down" is the question
   // this table exists to answer. The full text stays as a tooltip below.
   //
-  // The relative form of the recovery time sits between them: "05:23:27 之后可
-  // 再用 · 约 1 小时后". It is derived from that same instant, so the reader gets
-  // "how long do I wait" without subtracting from the clock in their head, and
-  // the two can never disagree. Empty once the moment has passed — which is
-  // exactly when the account is back and the absolute time is the honest answer.
-  const remaining = probe?.retryAtMs === undefined
-    ? ''
-    : remainingText(t, probe.retryAtMs, Date.now())
   const reason = probe === undefined ? undefined : inlineProbeReason(probe.outcome, probe.message)
   // HOW OLD and WHO WROTE IT, on their OWN line below the outcome.
   //
@@ -1303,7 +1380,11 @@ function renderAccountRow(input: {
       : probe.source === 'live-request'
         ? { text: t('row.poolProbeSourceLive'), className: 'dsm-workbuddy-pool-prov-tag dsm-workbuddy-pool-prov-live' }
         : { text: t('row.poolProbeSourceTest'), className: 'dsm-workbuddy-pool-prov-tag' }
-  const probeLine = [outcomeLine, remaining, reason]
+  // The relative wait ("约 1 小时后") used to be appended HERE, by this call site
+  // only — which is why the composer panel showed the instant without it. It is
+  // now part of `availabilityLine`, so both surfaces get it from one place and
+  // cannot disagree about what "01:32 之后可再用" means.
+  const probeLine = [outcomeLine, reason]
     .filter(part => part !== undefined && part !== '')
     .join(' · ')
 
@@ -1327,6 +1408,52 @@ function renderAccountRow(input: {
       }),
       h('span', { className: 'dsm-workbuddy-pool-account-name' },
         h('b', null, name),
+        // Manual-sort badge + ↑/↓ buttons. Shown only for a CHECKED row: an
+        // unchecked account is not in the pool, so there is nothing to order.
+        // SAFETY: a numeric rank is shown ONLY when `orderIsManual` is true —
+        // never for a credit-policy-ordered pool, whose "order" reshuffles every
+        // refresh and would make a `第 1 位` lie. The non-manual state gets the
+        // dashed "自动排序" badge instead.
+        checked
+          ? h('span', { className: 'dsm-workbuddy-pool-order' },
+              // A SPAN, not a disabled <button>. The badge only DESCRIBES the
+              // order; rendering it as an inert button would tell assistive
+              // technology and the user that a control exists there, and it
+              // would also join the row's button list, so "the pool has exactly
+              // two move arrows" could no longer be stated as a count.
+              orderIsManual
+                ? h('span', {
+                    className: 'dsm-workbuddy-pool-rank',
+                    title: t('row.poolRankManualTitle'),
+                  }, t('row.poolRankLabel', { rank: orderIndex ?? 0 }))
+                : h('span', {
+                    className: 'dsm-workbuddy-pool-rank dsm-workbuddy-pool-rank-auto',
+                    title: t('row.poolRankAutoTitle'),
+                  }, t('row.poolRankAuto')),
+              // Move arrows render only while the pool is ON and this row is
+              // editable; first/last stay visible (disabled) so rows never shift.
+              moveEnabled
+                ? h('span', { className: 'dsm-workbuddy-pool-move' },
+                    h('button', {
+                      type: 'button',
+                      className: 'dsm-workbuddy-pool-move-btn',
+                      title: t('row.poolMoveUpTitle'),
+                      'aria-label': t('row.poolMoveUpAria', { accountName: name }),
+                      disabled: moveUpDisabled,
+                      onClick: onMoveUp,
+                    }, '↑'),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsm-workbuddy-pool-move-btn',
+                      title: t('row.poolMoveDownTitle'),
+                      'aria-label': t('row.poolMoveDownAria', { accountName: name }),
+                      disabled: moveDownDisabled,
+                      onClick: onMoveDown,
+                    }, '↓'),
+                  )
+                : null,
+            )
+          : null,
         // Which account is serving, in WORDS. The row tint alone is a 7%-opacity
         // background: enough to spot when you already know to look, and no help
         // at all when the question is "which one is it?".
@@ -1342,7 +1469,7 @@ function renderAccountRow(input: {
             : 'dsm-workbuddy-pool-not-member',
         }, checked ? t('row.poolMember') : t('row.poolNotMember')),
         excluded === undefined
-          ? probe === undefined ? null : h('span', null, t('row.poolTestedAt', { at: formatShort(probe.atMs) }))
+          ? probe === undefined ? null : h('span', null, t('row.poolTestedAt', { at: formatShortClock(probe.atMs) }))
           : h('span', { className: 'dsm-workbuddy-pool-excluded' }, excluded),
       ),
     ),
@@ -1356,7 +1483,7 @@ function renderAccountRow(input: {
         : account.nearestExpiryMs === undefined
           ? null
           : h('span', { className: 'dsm-workbuddy-pool-soon-plain' },
-              t('row.poolCreditNearest', { at: formatShort(account.nearestExpiryMs) })),
+              t('row.poolCreditNearest', { at: formatShortClock(account.nearestExpiryMs) })),
     ),
     // The full upstream text stays on the element as a tooltip even when the
     // line above suppressed it as redundant. Suppressing it inline must not mean
@@ -1683,4 +1810,66 @@ function renderLog(input: {
           )),
         ),
   )
+}
+
+/**
+ * Sort accounts by the manual priority order, without losing stability.
+ *
+ * Helpers/rows are rendered in this order so a click on ↑/↓ reorders the row
+ * immediately (client-side), before any save + host round-trip. Ids in `orderIds`
+ * that are not actually members are skipped; members not listed fall back to the
+ * END in their original relative order.
+ *
+ * The sort is STABLE: two ids with the same priority rank keep their original
+ * array order. A `rank` lookup returns `orderIds.length` as the sentinel for
+ * "not ordered", which is larger than any real rank, so unlisted members sort
+ * after every listed one. An EMPTY `orderIds` short-circuits: the input order is
+ * already the answer, and we avoid building the rank map / comparator for the
+ * common (never-sorted) case.
+ *
+ * TWO subtleties that a naive rank comparator gets wrong, both of which would
+ * make the table visibly wrong:
+ *
+ * - DUPLICATE ids keep the FIRST occurrence's rank (`if (!rank.has(id))`).
+ *   Overwriting instead would let a stray duplicate silently push the account
+ *   it names to the duplicate's later position, so the row would drift away
+ *   from the badge that claims to describe it.
+ * - The sort key is the PAIR (rank, original index), not rank alone. Ranks are
+ *   unique per id, but the `Infinity` fallback is shared by every unlisted
+ *   account, and `Array.prototype.sort` is NOT guaranteed stable across engines
+ *   for arbitrary inputs; relying on it would let the unlisted tail reshuffle
+ *   between renders. Breaking the tie on the original index makes the result a
+ *   pure function of the input, which is what stops the table from jittering
+ *   when the same snapshot arrives twice.
+ */
+/**
+ * The ordering rules, in EXACTLY the comparator's priority order.
+ *
+ * Kept as one table rather than inline literals so the order is a single thing
+ * a reader can compare against `src/account-pool.ts` — the rule text and the
+ * code must never drift, and a flat list makes that diff trivial. Typed as
+ * `WorkBuddySettingsKey` so a renamed or removed locale key is a compile error
+ * instead of a raw key rendered to the user.
+ */
+const ORDER_RULE_KEYS = [
+  'row.poolOrderRuleUsable',
+  'row.poolOrderRuleExpiring',
+  'row.poolOrderRuleManual',
+  'row.poolOrderRuleNearestExpiry',
+  'row.poolOrderRuleExpiringAmount',
+  'row.poolOrderRuleTotal',
+  'row.poolOrderRuleFreshness',
+  'row.poolOrderRuleId',
+] as const satisfies readonly WorkBuddySettingsKey[]
+
+export function sortAccountsByOrder(
+  accounts: readonly WorkBuddyWebPoolAccount[],
+  orderIds: readonly string[],
+): WorkBuddyWebPoolAccount[] {
+  // Delegates to the shared implementation. The composer credits panel lists
+  // the same accounts, and when each surface owned its own sort the two
+  // disagreed — the pool showed the manual order while the panel showed
+  // whatever the Host returned. One implementation makes that unrepresentable.
+  return applyManualOrder(accounts.map(account => ({ id: account.accountId, account })), orderIds)
+    .map(entry => entry.account)
 }

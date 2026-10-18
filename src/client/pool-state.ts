@@ -34,6 +34,13 @@ export interface PoolPreferencesLike {
    */
   probeInputTokens?: number
   memberAccountIds: readonly string[]
+  /**
+   * Manual priority order for member accounts — the order the pool spends
+   * them in. Unlike `memberAccountIds`, ordering is ORDER-SENSITIVE: swapping
+   * two positions is a meaningful change, so the round-trip verification and
+   * dirty detection must compare positionally, never as a set.
+   */
+  orderAccountIds: readonly string[]
 }
 
 /**

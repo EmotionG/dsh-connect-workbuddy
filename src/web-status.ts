@@ -285,6 +285,14 @@ export interface WorkBuddyPoolDeps {
      */
     probeInputTokens?: number
     memberAccountIds: readonly string[]
+    /**
+     * The user's hand-ordered pool order, as account ids.
+     *
+     * Optional so a Host that never learnt about the setting still satisfies
+     * this interface — its absence then reads as "no manual order" and the
+     * ranking simply ignores it.
+     */
+    orderAccountIds?: readonly string[]
   }
   /** One region's CHECKED accounts, plus their credits and last measurements. */
   members(region: WorkBuddyRegion): Promise<readonly WorkBuddyPoolMember[]>
@@ -808,7 +816,7 @@ async function workBuddyWebPool(
   const preferences = pool.preferences(region)
   const members = await pool.members(region)
   const nowMs = Date.now()
-  const ranked = rankPool(members, nowMs)
+  const ranked = rankPool(members, nowMs, preferences.orderAccountIds)
   const catalog = pool.catalog?.(region) ?? []
   const target = resolveTargetModel(catalog, preferences.targetModelId)
   const currentAccountId = await pool.currentAccountId?.(region)
@@ -914,6 +922,19 @@ async function workBuddyWebPool(
     // chose, and a login can come back (the desktop app re-adds it) in which
     // case the saved id should apply again.
     memberAccountIds: preferences.memberAccountIds,
+    // The user's manual pool order, SANITIZED to ids that still resolve to a
+    // actually listed account. The saved list is independent of membership and
+    // may carry ids whose sign-in has gone since the user last dragged them into
+    // place; shipping those would let the card render an ordering over accounts
+    // it cannot even name. Dropping them on transmit (never rewiring them into
+    // membership) keeps the saved preference intact for when the login returns.
+    // An empty list omits the key entirely — "no manual order" must not read as
+    // "all accounts sorted last" (exactOptionalPropertyTypes; see `rankPool`).
+    ...(() => {
+      const listed = new Set(accounts.map(account => account.accountId))
+      const orderedIds = (preferences.orderAccountIds ?? []).filter(id => listed.has(id))
+      return orderedIds.length === 0 ? {} : { orderAccountIds: orderedIds }
+    })(),
     // The probe size the user chose, verbatim (`0` = the host's default). Sent
     // rather than resolved so the dropdown can show "默认" as a state distinct
     // from "25000": resolving here would make the card claim the user picked a

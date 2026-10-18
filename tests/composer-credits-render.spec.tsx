@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ComposerCredits } from '../src/client/ComposerCredits.tsx'
 import { WORKBUDDY_COMPOSER_CSS } from '../src/client/styles.ts'
 import { mount, stubFetch, t } from './pool-render-helpers.tsx'
+import { AccountPool } from '../src/client/AccountPool.tsx'
 
 afterEach(() => { vi.unstubAllGlobals() })
 
@@ -257,7 +258,14 @@ describe('ComposerCredits panel', () => {
     await m.settle()
     // The label the POOL table uses for the same fact.
     expect(panelText()).toContain('row.poolExcludedRateLimited')
-    expect(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark')).toHaveLength(1)
+    // Two second lines, and each says exactly one thing: the selected account
+    // names itself, the limited one says why. The COUNT is the guard against a
+    // line appearing on a row that has nothing to report.
+    const marks = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark'))
+      .map(node => node.textContent ?? '')
+    expect(marks).toContain('composer.current')
+    expect(marks.some(line => line.includes('row.poolExcludedRateLimited')), 'the reason is printed').toBe(true)
+    expect(marks).toHaveLength(2)
   })
 
   it('marks nothing for an account with no known problem', async () => {
@@ -272,7 +280,11 @@ describe('ComposerCredits panel', () => {
     const m = await render({ provider: 'workbuddy', settingsScope: scopeOf({ accounts: {} }) })
     await m.click(m.buttons()[0] as Element)
     await m.settle()
-    expect(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark')).toHaveLength(0)
+    // The selected row still names itself -- that is not a problem report. What
+    // must stay empty is every other row, and the list has exactly that one line.
+    const marks = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-mark'))
+      .map(node => node.textContent ?? '')
+    expect(marks).toEqual(['composer.current'])
   })
 
   it('renders the rows inert without a writable scope', async () => {
@@ -325,5 +337,450 @@ describe('composer CSS contract (the classes the component renders must exist)',
     expect(rule).toContain('border:0')
     expect(rule).toContain('background:transparent')
     expect(rule).toContain('font-size:12px')
+  })
+})
+
+/**
+ * The panel must agree with the pool card about ORDER.
+ *
+ * The reported symptom: accounts were sorted manually in the pool card, but the
+ * credit panel listed them in a different sequence — the same pool rendered two
+ * different ways. It made the ordering feature look like it had not saved.
+ */
+describe('ComposerCredits panel follows the manual priority order', () => {
+  /** Names of the panel's rows, in the order they are displayed. */
+  const panelRowNames = (): string[] =>
+    Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-who'))
+      .map(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent ?? '')
+
+  const threeAccounts = () => ({
+    accounts: [
+      { id: 'a-1', accountName: 'A One', selected: true, credits: 1072 },
+      { id: 'a-2', accountName: 'A Two', selected: false, credits: 300 },
+      { id: 'a-3', accountName: 'A Three', selected: false, credits: 55 },
+    ],
+  })
+
+  const orderScope = (order: readonly string[]) =>
+    scopeOf({ regions: { cn: { pool: { orderAccountIds: order } } } })
+
+  it('lists accounts in the saved manual order, not the Host order', async () => {
+    stubFetch((url) => ({ body: url.includes('account-credits') ? threeAccounts() : usageOf('cn', 1072) }))
+    const m = await render({ provider: 'workbuddy', settingsScope: orderScope(['a-3', 'a-1', 'a-2']) })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    // This is the assertion that fails on the reported bug: the Host returns
+    // a-1, a-2, a-3 and the panel used to render exactly that.
+    expect(panelRowNames()).toEqual(['A Three', 'A One', 'A Two'])
+  })
+
+  it('keeps an unsorted pool in the Host order', async () => {
+    // No manual order must not be mistaken for "sort by something else".
+    stubFetch((url) => ({ body: url.includes('account-credits') ? threeAccounts() : usageOf('cn', 1072) }))
+    const m = await render({ provider: 'workbuddy', settingsScope: orderScope([]) })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    expect(panelRowNames()).toEqual(['A One', 'A Two', 'A Three'])
+  })
+
+  it('reads the order from the SAME region the panel is showing', async () => {
+    // The two pools are independent: an order set for the domestic pool must
+    // not reorder the international panel, which would look like the arrows
+    // were moving the wrong list.
+    stubFetch((url) => ({
+      body: url.includes('account-credits')
+        ? { accounts: [
+            { id: 'g-1', accountName: 'G One', selected: true, credits: 10 },
+            { id: 'g-2', accountName: 'G Two', selected: false, credits: 20 },
+          ] }
+        : usageOf('global', 88),
+    }))
+    const m = await render({
+      provider: 'workbuddy-global',
+      settingsScope: scopeOf({
+        regions: {
+          cn: { pool: { orderAccountIds: ['g-2', 'g-1'] } },
+          global: { pool: { orderAccountIds: [] } },
+        },
+      }),
+    })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    expect(panelRowNames()).toEqual(['G One', 'G Two'])
+  })
+
+  it('still renders every account when the order is stale', async () => {
+    // A saved order can name an account that has since been removed. Dropping
+    // it must not hide the ones that remain.
+    stubFetch((url) => ({ body: url.includes('account-credits') ? threeAccounts() : usageOf('cn', 1072) }))
+    const m = await render({ provider: 'workbuddy', settingsScope: orderScope(['gone', 'a-2']) })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    expect(panelRowNames()).toEqual(['A Two', 'A One', 'A Three'])
+  })
+})
+
+/**
+ * The panel and the pool card must agree about AVAILABILITY, not just order.
+ *
+ * The reported symptom: the card said "被限流 · 10/19 01:32 之后可再用" with an
+ * amber dot, while the panel beside it said a bare "被限流" with a grey dot and
+ * no time. One measurement, two stories — which is worse than either story
+ * alone, because the user concludes the plugin is confused about its own data.
+ */
+/** A settings scope carrying a saved manual order. */
+const orderScope = (order: readonly string[]): any =>
+  scopeOf({ regions: { cn: { pool: { orderAccountIds: order } } } })
+
+describe('ComposerCredits panel agrees with the pool card about availability', () => {
+  /** A pool document the panel can read availability from. */
+  const poolUsage = (): Record<string, unknown> => ({
+    ...usageOf('cn', 1072),
+    pool: {
+      enabled: true,
+      targetModelId: '',
+      checkinSupported: true,
+      modelId: 'deepseek-v4.1-flash',
+      accounts: [
+        {
+          accountId: 'a-1',
+          accountName: 'A One',
+          credits: 1072,
+          current: true,
+          member: true,
+          probe: { outcome: 'ok', atMs: Date.now() - 60_000 },
+        },
+        {
+          accountId: 'a-2',
+          accountName: 'A Two',
+          credits: 300,
+          current: false,
+          member: true,
+          // A rate limit WITH a stated reset. The instant is fixed so the two
+          // surfaces' formatting can be compared character for character.
+          probe: { outcome: 'rate-limited', atMs: Date.now() - 60_000, retryAtMs: 1_800_000_000_000 },
+          excludedBy: 'rate-limited',
+        },
+        {
+          accountId: 'a-3',
+          accountName: 'A Three',
+          credits: 55,
+          current: false,
+          member: true,
+        },
+      ],
+    },
+  })
+
+  const openPanel = async (usage: () => Record<string, unknown>) => {
+    stubFetch((url) => ({
+      body: url.includes('account-credits')
+        ? { accounts: [
+            { id: 'a-1', accountName: 'A One', selected: true, credits: 1072 },
+            { id: 'a-2', accountName: 'A Two', selected: false, credits: 300 },
+            { id: 'a-3', accountName: 'A Three', selected: false, credits: 55 },
+          ] }
+        : usage(),
+    }))
+    const m = await render({ provider: 'workbuddy' })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    return m
+  }
+
+  /** The mark under one panel row's name, by account name. */
+  const markOf = (name: string): string | undefined =>
+    Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-who'))
+      .find(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === name)
+      ?.querySelector('.dsm-workbuddy-composer-panel-mark')?.textContent ?? undefined
+
+  /** The row's hover text, which is where the absolute instant now lives. */
+  const rowTitleOf = (name: string): string | undefined =>
+    Array.from(document.body.querySelectorAll('tr[title]'))
+      .find(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === name)
+      ?.getAttribute('title') ?? undefined
+
+  /** The row header's accessible name — the same sentence, for screen readers. */
+  const rowLabelOf = (name: string): string | undefined =>
+    Array.from(document.body.querySelectorAll('th[aria-label]'))
+      .find(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === name)
+      ?.getAttribute('aria-label') ?? undefined
+
+  /** The dot under one panel row's name, by account name. */
+  const dotOf = (name: string): Element | undefined =>
+    Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-switch'))
+      .find(button => button.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === name)
+      ?.querySelector('.dsm-workbuddy-composer-panel-dot') ?? undefined
+
+  it('prints the reason and the wait, but not the absolute instant', async () => {
+    // The owner's request, on this panel only: "被限流 · 约 6 小时后" stays, the
+    // "10/19, 01:32 之后可再用" in the middle goes. The wait answers the question
+    // a limited row raises ("how long?"); the date is the part nobody acts on,
+    // and in this column it read like a log line wrapped in a sentence.
+    const m = await openPanel(poolUsage)
+    const mark = markOf('A Two')
+    expect(mark).toBeDefined()
+    expect(mark).toContain('row.poolExcludedRateLimited')
+    expect(mark, 'the reset instant must no longer be printed here').not.toContain('row.poolRetryAt')
+    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    expect(WAIT.test(mark ?? ''), 'the wait must survive').toBe(true)
+    await m.unmount()
+  })
+
+  it('keeps the absolute instant one hover away, in the card\'s own words', async () => {
+    // Dropping the instant from the visible line is not dropping the fact. The
+    // row keeps the full `availabilityLine` sentence as its title — and the row
+    // header carries the same words, because a screen reader cannot hover.
+    const m = await openPanel(poolUsage)
+    const title = rowTitleOf('A Two') ?? ''
+    expect(title, 'the row must still be able to say exactly when').toContain('row.poolRetryAt')
+    expect(title).toContain('row.poolExcludedRateLimited')
+    expect(rowLabelOf('A Two'), 'and say it without a mouse').toBe('A Two — ' + title)
+    await m.unmount()
+  })
+
+  it('formats the reset instant exactly as the pool card does', async () => {
+    // The drift guard. Both surfaces call one shared formatter; if either grows
+    // its own, the same instant prints two ways and the pair looks broken.
+    const m = await openPanel(poolUsage)
+    const mark = markOf('A Two') ?? ''
+    // The panel's instant now lives in the row title, not the visible line.
+    const panelLine = rowTitleOf('A Two') ?? ''
+    const INSTANT = /at=([^|]+?)(?:\s·|$)/
+    const panelAt = INSTANT.exec(panelLine)?.[1]
+    expect(panelAt, 'the panel must still carry an instant, in its title').toBeDefined()
+    // And the WAIT stays visible. "01:32 之后可再用" alone makes the reader
+    // subtract from the clock and does not say whether that is tonight or
+    // tomorrow, which is why the visible half keeps the relative wait.
+    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    expect(WAIT.test(mark), 'the panel must print how long until it is usable').toBe(true)
+
+    // Render the card from the SAME document, then compare the instants. The
+    // card takes the pool block itself, so the measurement compared below is
+    // literally the same object the panel read.
+    const card = await mount(AccountPool as any, {
+      t,
+      region: 'cn',
+      settingsScope: scopeOf({ regions: { cn: { pool: { memberAccountIds: ['a-1', 'a-2', 'a-3'], orderAccountIds: [] } } } }),
+      pool: (poolUsage() as any).pool,
+    })
+    const cardLine = Array.from(card.container.querySelectorAll('.dsm-workbuddy-pool-probe-main'))
+      .map(node => node.textContent ?? '')
+      .find(text => text.includes('row.poolExcludedRateLimited')) ?? ''
+    const cardAt = INSTANT.exec(cardLine)?.[1]
+    expect(cardAt, 'the card must print the same instant').toBe(panelAt)
+    // Same wait, word for word — the suffix is shared, not re-derived.
+    const cardWait = WAIT.exec(cardLine)?.[0]
+    expect(cardWait, 'the card must print the same wait').toBe(WAIT.exec(mark)?.[0])
+    await card.unmount()
+    await m.unmount()
+  })
+
+  // FOURTH AND FINAL CONTRACT, at the user's explicit request:
+  //
+  //   "能用的 绿色圆点，当前选择的，绿色圆点加第二行提示当前选用，不能用的 红色圆点+原因"
+  //
+  // Colour answers ONE question — can this account serve the next message? — and
+  // the second line answers the other — is it the one this tab is using?
+  //
+  // The revision this replaces painted green only on the selected account, so
+  // every other usable row was grey ("可用的用灰色，在用的用绿色"). That was an
+  // answer to "这样无法知道当前用的是什么", but it made the panel's default
+  // question — "which accounts do I have left?" — unreadable: one green row
+  // among greys. The two facts now have separate channels, which is what the
+  // earlier revision could not do while using colour for both.
+  it('paints every usable account green and names the one in use', async () => {
+    const pool = (currentId: string): Record<string, unknown> => ({
+      ...usageOf('cn', 1072),
+      pool: {
+        enabled: true,
+        targetModelId: '',
+        checkinSupported: true,
+        modelId: 'deepseek-v4.1-flash',
+        accounts: [
+          {
+            accountId: 'a-1',
+            accountName: 'A One',
+            credits: 1072,
+            current: currentId === 'a-1',
+            member: true,
+            probe: { outcome: 'ok', atMs: Date.now() - 60_000 },
+          },
+          {
+            accountId: 'a-2',
+            accountName: 'A Two',
+            credits: 200,
+            current: currentId === 'a-2',
+            member: true,
+            probe: { outcome: 'ok', atMs: Date.now() - 60_000 },
+          },
+        ],
+      },
+    })
+
+    // Two healthy accounts, A Two in use: BOTH green, and only A Two says so.
+    const m = await openPanel(() => pool('a-2'))
+    expect(dotOf('A Two')!.className, 'a usable account is green, selected or not').toContain('panel-dot-ok')
+    expect(dotOf('A One')!.className, 'the other usable account is green too').toContain('panel-dot-ok')
+    expect(markOf('A Two'), 'the selected account says which it is').toBe('composer.current')
+    expect(markOf('A One'), 'a usable account that is not selected says nothing').toBeUndefined()
+    await m.unmount()
+
+    // Swap the selection: the label moves with it, and no dot changes colour,
+    // because usability did not change.
+    const swapped = await openPanel(() => pool('a-1'))
+    expect(dotOf('A One')!.className).toContain('panel-dot-ok')
+    expect(dotOf('A Two')!.className).toContain('panel-dot-ok')
+    expect(markOf('A One')).toBe('composer.current')
+    expect(markOf('A Two')).toBeUndefined()
+    await swapped.unmount()
+  })
+
+  it('paints a refusal red rather than amber', async () => {
+    // A rate limit is a refusal, not a warning: the account cannot answer this
+    // message, and amber ("mostly fine, look later") was the one thing the row
+    // was not. The reason still rides on the second line, so the colour is not
+    // the only carrier of the fact.
+    const m = await openPanel(poolUsage)
+    expect(dotOf('A Two')!.className, 'a stated rate limit is red').toContain('panel-dot-error')
+    expect(dotOf('A Two')!.className).not.toContain('panel-dot-ok')
+    expect(markOf('A Two')).toContain('row.poolExcludedRateLimited')
+    await m.unmount()
+  })
+
+  it('still shows a problem on the in-use row, in words', async () => {
+    // Green-for-current must not swallow a real limitation. The dot carries
+    // "live"; the mark under the name continues to carry "rate limited, until
+    // when", so the two facts coexist instead of one hiding the other.
+    const m = await openPanel(() => ({
+      ...usageOf('cn', 1072),
+      pool: {
+        enabled: true,
+        targetModelId: '',
+        checkinSupported: true,
+        modelId: 'deepseek-v4.1-flash',
+        accounts: [
+          {
+            accountId: 'a-1',
+            accountName: 'A One',
+            credits: 1072,
+            current: true,
+            member: true,
+            probe: { outcome: 'rate-limited', atMs: Date.now() - 60_000, retryAtMs: Date.now() + 9 * 3_600_000 },
+            excludedBy: 'rate-limited',
+          },
+        ],
+      },
+    }))
+    // The dot goes RED even though this is the account in use: the row cannot
+    // answer the next message, and a green dot would say it can. Selection is
+    // spelled out on the second line instead, so nothing is lost by it.
+    expect(dotOf('A One')!.className, 'the in-use row is red when it cannot serve').toContain('panel-dot-error')
+    const line = markOf('A One') ?? ''
+    expect(line, 'the limitation is not hidden').toContain('row.poolExcludedRateLimited')
+    expect(line, 'and the row still says it is the one in use').toContain('composer.current')
+    await m.unmount()
+  })
+
+  it('marks a healthy account and an unmeasured one differently', async () => {
+    const m = await openPanel(poolUsage)
+    expect(dotOf('A One')!.className).toContain('panel-dot-ok')
+    // No probe and no exclusion: state unknown, NOT success. Claiming green
+    // would assert a measurement nobody made.
+    expect(dotOf('A Three')!.className).toContain('panel-dot-unknown')
+    expect(markOf('A Three'), 'nothing to explain for an unmeasured account').toBeUndefined()
+    await m.unmount()
+  })
+
+  it('prints no reason on a row that has no problem', async () => {
+    // The second line carries two facts only: "this is the account in use" and
+    // "this is why it cannot serve". A healthy row prints the first or nothing:
+    // never a state label, because a checkmark on every row is noise and the
+    // green dot already says it.
+    //
+    // A One is the selected account in this fixture, so the "nothing" half is
+    // asserted on its absence-of-a-reason: the line exists, and says only that
+    // this is the current one -- no health claim, no instant, no wait.
+    const m = await openPanel(poolUsage)
+    const line = markOf('A One')
+    expect(line, 'the selected row names itself').toBe('composer.current')
+    expect(line, 'and claims nothing more').not.toContain('row.')
+    await m.unmount()
+  })
+
+  it('falls back to the credits row when the Host has no pool document', async () => {
+    // An older Host answers the credits route but not the pool route; the panel
+    // must still warn about a rate-limited account instead of silently hiding it.
+    stubFetch((url) => ({
+      body: url.includes('account-credits')
+        ? { accounts: [
+            { id: 'a-1', accountName: 'A One', selected: true, credits: 1072 },
+            { id: 'a-2', accountName: 'A Two', selected: false, credits: 300, excludedBy: 'rate-limited' },
+          ] }
+        : usageOf('cn', 1072),
+    }))
+    const m = await render({ provider: 'workbuddy' })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    expect(markOf('A Two')).toBe('row.poolExcludedRateLimited')
+    await m.unmount()
+  })
+})
+
+/**
+ * The order the panel sorts by must come from the SAME place the card reads.
+ *
+ * The card sorts by `pool.orderAccountIds` (the wire field). Reading the settings
+ * snapshot alone let the two lists disagree whenever the credits route answered
+ * before the settings scope had caught up — the symptom being a panel that
+ * re-sorted itself a moment after opening.
+ */
+describe('ComposerCredits panel takes its order from the pool document', () => {
+  const names = (): string[] =>
+    Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-name'))
+      .map(node => node.textContent ?? '')
+
+  const creditsRows = {
+    accounts: [
+      { id: 'a-1', accountName: 'A One', selected: true, credits: 10 },
+      { id: 'a-2', accountName: 'A Two', selected: false, credits: 20 },
+    ],
+  }
+
+  it('follows the pool document order even with no saved settings order', async () => {
+    // A Host that reports the order in the pool document only. The panel must
+    // still match the card, which is what the user sees beside it.
+    stubFetch((url) => ({
+      body: url.includes('account-credits')
+        ? creditsRows
+        : {
+            ...usageOf('cn', 30),
+            pool: {
+              enabled: true,
+              targetModelId: '',
+              orderAccountIds: ['a-2', 'a-1'],
+              accounts: [
+                { accountId: 'a-1', accountName: 'A One', current: true, member: true },
+                { accountId: 'a-2', accountName: 'A Two', current: false, member: true },
+              ],
+            },
+          },
+    }))
+    const m = await render({ provider: 'workbuddy', settingsScope: orderScope(['a-1', 'a-2']) })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    // The document wins over the stale settings snapshot: agreement with the
+    // card beats agreement with a snapshot the user cannot see.
+    expect(names()).toEqual(['A Two', 'A One'])
+    await m.unmount()
+  })
+
+  it('falls back to the settings order when the Host sends no order', async () => {
+    stubFetch((url) => ({ body: url.includes('account-credits') ? creditsRows : usageOf('cn', 30) }))
+    const m = await render({ provider: 'workbuddy', settingsScope: orderScope(['a-2', 'a-1']) })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    expect(names()).toEqual(['A Two', 'A One'])
+    await m.unmount()
   })
 })

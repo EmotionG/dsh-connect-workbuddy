@@ -1142,3 +1142,330 @@ describe('a streamed test batch reports each account as it lands', () => {
     await m.unmount()
   })
 })
+
+/**
+ * Manual priority (`orderAccountIds`) — the user-visible contract of "move this
+ * account up/down".
+ *
+ * These run against the REAL component because the whole point is what the user
+ * sees: the row order, which account holds which rank badge, and whether the
+ * arrows are clickable. Every assertion is on the DOM, so a mutant that
+ * respells the comparator or the draft edit cannot slip past.
+ */
+describe('manual priority: rows, rank badges and the up/down arrows', () => {
+  /** Three ordered members, deliberately rendered in a DIFFERENT order than saved. */
+  function threeMembers(savedOrder: string[], accounts?: unknown[]): Record<string, unknown> {
+    const ids = ['a', 'b', 'c']
+    return baseProps({
+      pool: poolOf({
+        memberAccountIds: ids,
+        effectiveMemberAccountIds: ids,
+        orderAccountIds: savedOrder,
+        accounts: accounts ?? ids.map(id => accountOf({
+          accountId: id,
+          accountName: `Name ${id.toUpperCase()}`,
+          current: id === 'a',
+        })),
+      }),
+    })
+  }
+
+  /** The account ids of the rendered table rows, top to bottom. */
+  function renderedIds(m: Awaited<ReturnType<typeof mount>>): string[] {
+    return Array.from(m.container.querySelectorAll<HTMLInputElement>('.dsm-workbuddy-pool-table input[type=checkbox]'))
+      .map(box => (box.getAttribute('aria-label') ?? '').replace(/^.*accountName=/, '').replace(/\|.*$/, ''))
+  }
+
+  it('renders rows in the SAVED order, not in the accounts array order', async () => {
+    // The `accounts` array arrives in whatever order the Host built it, and the
+    // saved order is what the user dragged into place. If the table ignored
+    // `orderAccountIds`, the arrows would visibly do nothing after a save.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers(['c', 'a', 'b']))
+    expect(renderedIds(m)).toEqual(['Name C', 'Name A', 'Name B'])
+    await m.unmount()
+  })
+
+  it('renders the accounts-array order when nothing is saved', async () => {
+    // The "never sorted" state must be byte-identical to the pre-feature
+    // behaviour: no rearrangement at all.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers([]))
+    expect(renderedIds(m)).toEqual(['Name A', 'Name B', 'Name C'])
+    await m.unmount()
+  })
+
+  it('numbers each badge by its RENDERED position', async () => {
+    // The number is the row's rank, so it must be derived from the sorted
+    // sequence. Numbering the badge from the raw array index would print
+    // "第 1 位" beside whatever account happened to arrive first.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers(['c', 'a', 'b']))
+    const badges = Array.from(m.container.querySelectorAll('.dsm-workbuddy-pool-rank'))
+      .map(node => node.textContent ?? '')
+    expect(badges).toEqual([
+      'row.poolRankLabel|rank=1',
+      'row.poolRankLabel|rank=2',
+      'row.poolRankLabel|rank=3',
+    ])
+    await m.unmount()
+  })
+
+  it('shows the dashed "automatic" badge — and NO number — when no order is saved', async () => {
+    // A numeric rank next to a credit-policy order would be a lie: that order
+    // reshuffles on every refresh, so "第 2 位" would describe a position the
+    // pool is not going to keep. The auto state says so instead.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers([]))
+    const badges = Array.from(m.container.querySelectorAll('.dsm-workbuddy-pool-rank'))
+    expect(badges.length).toBe(3)
+    for (const badge of badges) {
+      expect(badge.textContent).toBe('row.poolRankAuto')
+      expect(badge.className).toContain('dsm-workbuddy-pool-rank-auto')
+    }
+    expect(m.text()).not.toContain('row.poolRankLabel')
+    await m.unmount()
+  })
+
+  it('gives every row exactly two arrows and disables the first/last edges', async () => {
+    // The arrows are buttons; a disabled edge keeps the row from shifting when
+    // an account is already at an end, and "exactly two per row" is the count
+    // the CSS lays out.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers(['c', 'a', 'b']))
+    const up = Array.from(m.container.querySelectorAll<HTMLButtonElement>('.dsm-workbuddy-pool-move-btn'))
+      .filter(button => button.textContent === '↑')
+    const down = Array.from(m.container.querySelectorAll<HTMLButtonElement>('.dsm-workbuddy-pool-move-btn'))
+      .filter(button => button.textContent === '↓')
+    expect(up.length).toBe(3)
+    expect(down.length).toBe(3)
+    // Rendered order is c, a, b — so c's ↑ and b's ↓ are the disabled edges.
+    expect(up[0]!.disabled, 'the TOP row cannot move up').toBe(true)
+    expect(down[2]!.disabled, 'the BOTTOM row cannot move down').toBe(true)
+    expect(up[1]!.disabled).toBe(false)
+    expect(down[1]!.disabled).toBe(false)
+    await m.unmount()
+  })
+
+  it('the badge is NOT a button — it only describes the order', async () => {
+    // Rendering it as an inert <button> would announce a control that does
+    // nothing, and inflate the row's button count (2 arrows + N inert badges).
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers(['c', 'a', 'b']))
+    const badge = m.container.querySelector('.dsm-workbuddy-pool-rank')!
+    expect(badge.tagName).toBe('SPAN')
+    // Three ordered rows => exactly six move buttons and no more. Counting the
+    // whole `.dsm-workbuddy-pool-row` subtree would also pick up each row's
+    // Test / Remove actions and the header row (which shares the class), so the
+    // selector is narrowed to the arrows themselves.
+    expect(m.container.querySelectorAll('.dsm-workbuddy-pool-move-btn').length).toBe(6)
+    expect(m.container.querySelectorAll('.dsm-workbuddy-pool-rank button').length).toBe(0)
+    await m.unmount()
+  })
+
+  it('clicking ↓ moves the row down and marks the draft dirty', async () => {
+    // The end-to-end promise. Save is a DRAFT edit (not a straight write), so
+    // the observable proof is: rows reorder, and Save becomes enabled because
+    // the order now differs from what the Host has.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers([]))
+    expect(m.button('row.poolSaved').disabled, 'nothing edited yet').toBe(true)
+    const downOnTopRow = Array.from(
+      m.container.querySelectorAll<HTMLButtonElement>('.dsm-workbuddy-pool-row .dsm-workbuddy-pool-move-btn'),
+    ).filter(button => button.textContent === '↓')[0]!
+    await m.click(downOnTopRow)
+    expect(renderedIds(m)).toEqual(['Name B', 'Name A', 'Name C'])
+    expect(m.button('row.poolSaved').disabled, 'the reorder is an unsaved edit').toBe(false)
+    await m.unmount()
+  })
+
+  it('the FIRST move sorts the WHOLE visible order, not just the swapped pair', async () => {
+    // Clicking ↑ on an unsorted pool must persist every row's position. A
+    // draft that wrote only the moved id would leave the other rows unordered
+    // (and the badges would fall back to "automatic"), so this pins the
+    // "materialise the current order on first edit" behaviour.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, threeMembers([]))
+    const upOnMiddle = Array.from(
+      m.container.querySelectorAll<HTMLButtonElement>('.dsm-workbuddy-pool-row .dsm-workbuddy-pool-move-btn'),
+    ).filter(button => button.textContent === '↑')[1]!
+    await m.click(upOnMiddle)
+    expect(renderedIds(m)).toEqual(['Name B', 'Name A', 'Name C'])
+    // Now MANUAL: numbers replace the dashed badge.
+    const badges = Array.from(m.container.querySelectorAll('.dsm-workbuddy-pool-rank')).map(n => n.textContent)
+    expect(badges).toEqual([
+      'row.poolRankLabel|rank=1',
+      'row.poolRankLabel|rank=2',
+      'row.poolRankLabel|rank=3',
+    ])
+    await m.unmount()
+  })
+
+  it('persists the reordered ids through Save', async () => {
+    // The save must carry POSITIONAL ids. A set-shaped write would reorder the
+    // pool arbitrarily on the next load and the user's drag would be lost.
+    const calls = stubFetch((url) => url.includes('__save')
+      ? { body: { ok: true } }
+      : { body: {} })
+    const scope = fakeScope({})
+    const props = baseProps({
+      settingsScope: scope,
+      pool: poolOf({
+        memberAccountIds: ['a', 'b'],
+        effectiveMemberAccountIds: ['a', 'b'],
+        orderAccountIds: ['a', 'b'],
+        accounts: [
+          accountOf({ accountId: 'a', accountName: 'Name A', current: true }),
+          accountOf({ accountId: 'b', accountName: 'Name B' }),
+        ],
+      }),
+    })
+    const m = await mount(AccountPool, props)
+    const downOnTop = Array.from(
+      m.container.querySelectorAll<HTMLButtonElement>('.dsm-workbuddy-pool-row .dsm-workbuddy-pool-move-btn'),
+    ).filter(button => button.textContent === '↓')[0]!
+    await m.click(downOnTop)
+    expect(renderedIds(m)).toEqual(['Name B', 'Name A'])
+    await m.click(m.button('row.poolSaved'))
+    await m.settle()
+    // The Host endpoint is the authoritative write path (`writeField` tries it
+    // FIRST, so `scope.set` is only a best-effort mirror refresh and records
+    // nothing here). Read the order out of the request body the card actually
+    // sent — that is the value the Host persists.
+    const saveBodies = calls
+      .filter(call => call.url.includes('__save'))
+      .map(call => JSON.parse(String(call.init.body)) as { field: string, value: Record<string, any> })
+    const regions = saveBodies.find(body => body.field === 'regions')
+    expect(regions, 'the pool must be saved through the regions field').toBeDefined()
+    const poolWrite = Object.values(regions!.value).map((slot: any) => slot?.pool).filter(Boolean).pop()
+    expect(poolWrite?.orderAccountIds, 'the swapped order must be what was saved').toEqual(['b', 'a'])
+    // …and it must be POSITIONAL, not a re-sorted set: the ids keep the
+    // user's order, which is the entire point of the feature.
+    expect(poolWrite?.orderAccountIds[0]).toBe('b')
+    await m.unmount()
+  })
+
+  it('renders no arrows for an UNCHECKED account', async () => {
+    // An account outside the pool has no place in the order, so offering to
+    // move it would promise a change the saved order cannot express.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps({
+      pool: poolOf({
+        memberAccountIds: ['a'],
+        effectiveMemberAccountIds: ['a'],
+        orderAccountIds: ['a'],
+        accounts: [
+          accountOf({ accountId: 'a', accountName: 'Name A', member: true }),
+          accountOf({ accountId: 'b', accountName: 'Name B', member: false }),
+        ],
+      }),
+    }))
+    // `.dsm-workbuddy-pool-row` also matches the header row, so select the
+    // DATA rows by the checkbox cell they contain.
+    const rows = Array.from(m.container.querySelectorAll('.dsm-workbuddy-pool-row'))
+      .filter(row => row.querySelector('input[type=checkbox]') !== null)
+    expect(rows.length).toBe(2)
+    expect(rows[0]!.querySelector('.dsm-workbuddy-pool-order'), 'the member has ordering chrome').not.toBeNull()
+    expect(rows[0]!.querySelectorAll('.dsm-workbuddy-pool-move-btn').length, 'the member has both arrows').toBe(2)
+    expect(rows[1]!.querySelector('.dsm-workbuddy-pool-rank'), 'a non-member has no badge').toBeNull()
+    expect(rows[1]!.querySelectorAll('.dsm-workbuddy-pool-move-btn').length, 'a non-member has no arrows').toBe(0)
+    await m.unmount()
+  })
+})
+
+/**
+ * The ordering rule, disclosed in the settings panel.
+ *
+ * The rule is invisible in normal use — it lives in `rankPool`'s comparator —
+ * and users were asking "why wasn't the account at position 1 used?". These
+ * assertions pin the two things that make the disclosure useful: it is present
+ * but COLLAPSED by default (so it does not push the table down), and when
+ * opened it states the priority order a reader would otherwise have to read the
+ * source to discover.
+ */
+describe('ordering-rule disclosure in the settings panel', () => {
+  it('is rendered, collapsed, and sits above the member table', async () => {
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps())
+    const rules = m.container.querySelector('details.dsm-workbuddy-pool-order-rules')
+    expect(rules, 'the rule must be discoverable from the panel').not.toBeNull()
+    // Collapsed by default: reference text must not push the controls down.
+    expect(rules!.hasAttribute('open')).toBe(false)
+    expect(rules!.querySelector('summary')!.textContent).toBe('row.poolOrderRulesTitle')
+    // Above the table in document order, so a reader meets the rule before the
+    // arrows it explains.
+    const table = m.container.querySelector('.dsm-workbuddy-pool-table')!
+    expect(rules!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the rule must precede the table').toBeTruthy()
+    await m.unmount()
+  })
+
+  it('states all eight rules IN THE COMPARATOR ORDER', async () => {
+    // Ordering here is the point: the list must match `rankPool`. A rule moved
+    // to the wrong slot would teach the user the opposite of what the code does.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps())
+    const rules = Array.from(
+      m.container.querySelectorAll('.dsm-workbuddy-pool-order-rules-list li'),
+    ).map(li => li.textContent ?? '')
+    expect(rules).toEqual([
+      expect.stringContaining('row.poolOrderRuleUsable'),
+      expect.stringContaining('row.poolOrderRuleExpiring'),
+      expect.stringContaining('row.poolOrderRuleManual'),
+      expect.stringContaining('row.poolOrderRuleNearestExpiry'),
+      expect.stringContaining('row.poolOrderRuleExpiringAmount'),
+      expect.stringContaining('row.poolOrderRuleTotal'),
+      expect.stringContaining('row.poolOrderRuleFreshness'),
+      expect.stringContaining('row.poolOrderRuleId'),
+    ])
+    await m.unmount()
+  })
+
+  it('explains why expiring credits outrank the manual order', async () => {
+    // The single most surprising rule, and the one this section exists for.
+    // Without it "No. 2 was skipped" looks like a bug.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps())
+    expect(m.container.querySelector('.dsm-workbuddy-pool-order-rules-why')!.textContent)
+      .toBe('row.poolOrderWhy')
+    // And the badge caveat: saved position != live ranking.
+    expect(m.text()).toContain('row.poolOrderBadgeNote')
+    await m.unmount()
+  })
+
+  it('stays open across a props refresh', async () => {
+    // The pool re-renders on every usage poll; a disclosure that snapped shut
+    // mid-read would be worse than not having one.
+    stubFetch(() => ({ body: {} }))
+    const props = baseProps()
+    const m = await mount(AccountPool, props)
+    const rules = m.container.querySelector('details.dsm-workbuddy-pool-order-rules') as HTMLDetailsElement
+    rules.open = true
+    rules.dispatchEvent(new window.Event('toggle', { bubbles: false }))
+    await m.settle()
+    await m.update({ ...props, pool: poolOf({
+      memberAccountIds: [GENUINE_ID],
+      effectiveMemberAccountIds: [GENUINE_ID],
+      accounts: [GENUINE_ACCOUNT],
+    }) })
+    expect(
+      (m.container.querySelector('details.dsm-workbuddy-pool-order-rules') as HTMLDetailsElement).open,
+      'the opened rule must survive a refresh',
+    ).toBe(true)
+    await m.unmount()
+  })
+
+  it('is not a SAVED setting — opening it must not dirty the draft', async () => {
+    // Reading the rules is not an edit. If it dirtied the draft, Save would
+    // light up and the user would be asked to commit nothing at all.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps())
+    expect(m.button('row.poolSaved').disabled).toBe(true)
+    const rules = m.container.querySelector('details.dsm-workbuddy-pool-order-rules') as HTMLDetailsElement
+    rules.open = true
+    rules.dispatchEvent(new window.Event('toggle', { bubbles: false }))
+    await m.settle()
+    expect(m.button('row.poolSaved').disabled, 'opening the rule is not an unsaved change').toBe(true)
+    await m.unmount()
+  })
+})

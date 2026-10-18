@@ -15,6 +15,10 @@ const saved = {
   enabled: true,
   targetModelId: '',
   memberAccountIds: ['a'] as readonly string[],
+  // Required by `PoolPreferencesLike`: membership and ordering are separate
+  // fields, and an empty order is the real "no manual priority" state (never an
+  // omitted key), so every fixture has to spell it out.
+  orderAccountIds: [] as readonly string[],
 }
 
 describe('draftBaseFor (H-1)', () => {

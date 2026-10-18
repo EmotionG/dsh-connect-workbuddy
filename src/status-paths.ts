@@ -982,6 +982,16 @@ export interface WorkBuddyWebPool {
   /** The account ids the user has checked into this region's pool. */
   memberAccountIds?: readonly string[]
   /**
+   * The user's hand-ordered pool order, as account ids.
+   *
+   * Independent of {@link memberAccountIds}: an id need not be checked in
+   * (it only takes effect once the account is a member), and ids not listed
+   * sort last. Kept separate from membership so reordering never conflicts
+   * with, or is destroyed by, a membership edit. Only ids that resolve to a
+   * currently listed account are transmitted (see `web-status.ts`).
+   */
+  orderAccountIds?: readonly string[]
+  /**
    * Tokens each test probe sends, as the user saved it; `0`/absent = default.
    *
    * The SAVED value, not the resolved one: the card needs to tell "the user

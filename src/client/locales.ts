@@ -296,6 +296,23 @@ export const en = {
   'row.poolSelectAll': 'Select all',
   'row.poolSelectNone': 'Clear all',
   'row.poolSelectedCount': '{count} of {total} selected',
+  // The ordering rule, spelled out where the arrows are used. This is the ONE
+  // place the full priority order is written down for a reader; `rankPool`'s
+  // doc comment is the source of truth for the code, and the numbered list
+  // below must stay in the same order as that comparator.
+  'row.poolOrderRulesTitle': 'How this pool chooses an account',
+  'row.poolOrderRulesIntro': 'The pool always picks the first account that can actually be billed right now. The rules below are checked in order — the first one that separates two accounts decides; later rules only break ties.',
+  'row.poolOrderRuleUsable': '1. Can it be billed right now? Accounts that are rate-limited, out of credit, credential-rejected, or failing are moved to the back until their cooldown ends. This outranks everything, including your own order below.',
+  'row.poolOrderRuleExpiring': '2. Does it have credits expiring within 3 days? Yes goes first. This also outranks your manual order — see the note below.',
+  'row.poolOrderRuleManual': '3. Your manual order. The position you set with the ↑ / ↓ arrows. Accounts you never ordered are placed after every ordered one.',
+  'row.poolOrderRuleNearestExpiry': '4. Which expiry comes first? Between accounts that both have credits expiring, the one losing them sooner goes first.',
+  'row.poolOrderRuleExpiringAmount': '5. How many are expiring? Between those same accounts, the one with more at stake goes first. With nothing expiring this is equivalent to comparing totals.',
+  'row.poolOrderRuleTotal': '6. Total credits. The account holding more goes first, so a nearly-drained account is kept in reserve.',
+  'row.poolOrderRuleFreshness': '7. Freshness of the sign-in. The more recently issued credential wins a draw.',
+  'row.poolOrderRuleId': '8. Account id. A final tie-break, so the same pool always produces the same order.',
+  'row.poolOrderWhy': 'Why expiring credits outrank your manual order: expiring credits are money about to disappear, while a manual order may be stale or set by accident. If the manual order won, one mis-drag could let credits lapse unused. So an account with credits expiring within 3 days always goes ahead of one without, even if you dragged it to the bottom.',
+  'row.poolOrderBadgeNote': 'The badge shows the position you SAVED, not the live ranking. An account can read "No. 2" while being benched for a rate limit — the number is your saved preference, and the pool skips accounts it cannot bill right now.',
+  'row.poolOrderRulesToggle': 'Show the full ordering rule',
   'row.poolNoneSelected': 'No account is checked into this pool.',
   'row.poolNoneSelectedHint': 'Check at least one account above and save. Until then both buttons stay disabled, because a pool with no members has nothing to run on.',
   'row.poolGhostMembers': '{count} pool member(s) are no longer signed in on this machine, so they are not counted and not used: {names}. Remove any you no longer need below.',
@@ -308,6 +325,20 @@ export const en = {
   'row.poolCurrentHeader': 'In use: {account}',
   'row.poolNotMember': 'Not in pool',
   'row.poolUnsavedMembers': 'Selection changed — save to apply',
+  // Manual priority ordering: the rank badge and the ↑/↓ move arrows. The badge
+  // is non-interactive (it describes the current order), the arrows act on it.
+  'row.poolRankLabel': 'No. {rank}',
+  // Deliberately no interpolated ordinal suffix. "{rank}st" is correct for 1
+  // but produces "2st" / "3st" for the ranks the badge actually shows, and an
+  // English ordinal needs a suffix helper the locale table does not have. This
+  // wording reads correctly for every rank and matches the badge's "No. N".
+  'row.poolRankManualTitle': 'You placed this account at position {rank} in the pool manually.',
+  'row.poolRankAuto': 'Auto',
+  'row.poolRankAutoTitle': 'Not manually sorted yet: the pool spends expiring credits first, then picks accounts by remaining balance. Use ↑/↓ to set your own order.',
+  'row.poolMoveUpTitle': 'Move account up in this pool\'s order',
+  'row.poolMoveDownTitle': 'Move account down in this pool\'s order',
+  'row.poolMoveUpAria': 'Move {accountName} up in this pool\'s order',
+  'row.poolMoveDownAria': 'Move {accountName} down in this pool\'s order',
   // Per-row actions: test ONE account, remove ONE account.
   'row.poolRowTest': 'Test',
   'row.poolRowRemove': 'Remove',
@@ -360,6 +391,7 @@ export const en = {
   'composer.account': 'Account',
   'composer.credits': 'Credits',
   'composer.switchTo': 'Switch to {account}',
+  'composer.current': 'In use',
   'composer.noAccounts': 'No account in this region',
   'composer.signedOut': 'Not signed in',
   'composer.refresh': 'Refresh credits',
@@ -641,6 +673,20 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolSelectAll': '全选',
   'row.poolSelectNone': '全不选',
   'row.poolSelectedCount': '已选 {count} / {total}',
+  // 排序规则说明。顺序必须与 rankPool 的比较器完全一致（见 src/account-pool.ts）。
+  'row.poolOrderRulesTitle': '本池如何挑选账号',
+  'row.poolOrderRulesIntro': '池子总是先挑「现在确实能扣费的」账号。下面这些规则按顺序逐条比较，第一条分出胜负就停止，后面的只在平局时才看。',
+  'row.poolOrderRuleUsable': '1. 现在能扣费吗？被限流、积分耗尽、凭证被拒或调用失败的账号会被挪到后面，直到冷却结束。这一条优先级最高，压过下面的手动顺序。',
+  'row.poolOrderRuleExpiring': '2. 有 3 天内会过期的积分吗？有就排前面。这一条同样压过手动顺序，原因见下方说明。',
+  'row.poolOrderRuleManual': '3. 你排的手动顺序。就是用 ↑ / ↓ 设定的位置。没有手动排过的账号，会排在所有已排序账号之后。',
+  'row.poolOrderRuleNearestExpiry': '4. 谁先过期？两个都有临期积分时，先到期的排前面。',
+  'row.poolOrderRuleExpiringAmount': '5. 过期多少？同样是两个都有临期积分时，临期数额大的排前面。没有临期积分时，这一步等同于比较总积分。',
+  'row.poolOrderRuleTotal': '6. 总积分。积分多的排前面，接近耗尽的号先留着备用。',
+  'row.poolOrderRuleFreshness': '7. 登录凭证新旧。凭证签发更晚的赢下平局。',
+  'row.poolOrderRuleId': '8. 账号 id。最终兜底，保证同样的池子每次排出来的顺序都一样。',
+  'row.poolOrderWhy': '为什么临期积分压过手动顺序：临期积分是马上要过期的钱，而手动顺序可能已经过时、也可能是手滑拖错了。如果让手动顺序赢，一次误拖就足以让积分白白过期。所以有 3 天内到期积分的账号，永远排在没有的账号前面 —— 哪怕你把它拖到了最后一位。',
+  'row.poolOrderBadgeNote': '徽标显示的是你「保存」的位置，不是此刻的实际排序。一个账号可能写着「第 2 位」却因为被限流而暂时不被选中 —— 那个数字代表你的偏好，池子会跳过当下无法扣费的账号。',
+  'row.poolOrderRulesToggle': '查看完整排序规则',
   'row.poolNoneSelected': '这个池里还没有勾选任何账号。',
   'row.poolNoneSelectedHint': '请在上方勾选至少一个账号并保存。在此之前两个按钮都不可用 —— 空池没有可执行的对象。',
   'row.poolGhostMembers': '有 {count} 个已选入本池的账号在本机已不再登录，因此不计入、也不会被使用：{names}。不需要的可在下方逐个移除。',
@@ -653,6 +699,15 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolCurrentHeader': '当前使用：{account}',
   'row.poolNotMember': '未入池',
   'row.poolUnsavedMembers': '勾选已改动 —— 保存后生效',
+  // 手动优先级排序：排序徽标与 ↑/↓ 移动按钮。徽标不可点（只描述当前顺序），箭头负责调整。
+  'row.poolRankLabel': '第 {rank} 位',
+  'row.poolRankManualTitle': '你在本池中手动把该账号排在第 {rank} 位。',
+  'row.poolRankAuto': '自动排序',
+  'row.poolRankAutoTitle': '还没有手动排序：池会先花临期积分，再按余额多寡选号。用 ↑/↓ 自己指定顺序。',
+  'row.poolMoveUpTitle': '在本池顺序中上移该账号',
+  'row.poolMoveDownTitle': '在本池顺序中下移该账号',
+  'row.poolMoveUpAria': '在本池顺序中上移 {accountName}',
+  'row.poolMoveDownAria': '在本池顺序中下移 {accountName}',
   // 行级操作：测试单个账号 / 删除单个账号。
   'row.poolRowTest': '测试',
   'row.poolRowRemove': '删除',
@@ -697,6 +752,7 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'composer.account': '账号',
   'composer.credits': '积分',
   'composer.switchTo': '切换到 {account}',
+  'composer.current': '当前选用',
   'composer.noAccounts': '该区域暂无账号',
   'composer.signedOut': '未登录',
   'composer.refresh': '刷新积分',
