@@ -394,8 +394,14 @@ export const en = {
   'composer.current': 'In use',
   'composer.noAccounts': 'No account in this region',
   'composer.signedOut': 'Not signed in',
-  'composer.refresh': 'Refresh credits',
-  'composer.refreshing': 'Refreshing credits…',
+  // The panel's header button TESTS the accounts rather than re-reading their
+  // balances: a mark in that table is a measurement, and only another measurement
+  // can improve it. It still re-reads afterwards — the probes live in the usage
+  // document — so pressing this leaves the table current as well as tested.
+  'composer.testAll': 'Test all',
+  'composer.testing': 'Testing…',
+  'composer.testAllHint': 'Test every account in this region, one at a time',
+  'composer.testFailed': 'Could not test the accounts',
   'composer.refreshFailed': 'Could not refresh credits',
   'composer.lastRefresh': 'Last refreshed',
   'composer.panelTitle': 'WorkBuddy credits',
@@ -755,8 +761,10 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'composer.current': '当前选用',
   'composer.noAccounts': '该区域暂无账号',
   'composer.signedOut': '未登录',
-  'composer.refresh': '刷新积分',
-  'composer.refreshing': '正在刷新积分…',
+  'composer.testAll': '一键测试',
+  'composer.testing': '正在测试…',
+  'composer.testAllHint': '逐个测试本区所有账号（一次一个，避免触发上游限流）',
+  'composer.testFailed': '测试失败',
   'composer.refreshFailed': '积分刷新失败',
   'composer.lastRefresh': '最近刷新',
   'composer.panelTitle': 'WorkBuddy 积分',

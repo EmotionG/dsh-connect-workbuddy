@@ -311,11 +311,14 @@ describe('the panel keeps its account rows current while it is open', () => {
   })
 })
 
-describe('the panel refresh control refreshes the panel', () => {
+describe('the panel header button tests every account', () => {
   it('re-reads the account table, not only the usage document', async () => {
-    // The defect: the button sat in the ACCOUNT TABLE's header and called
-    // `fetchUsage` alone, so pressing 刷新 moved the trigger's balance and left
-    // every row — marks included — untouched.
+    // The defect this case was written for: the button sat in the ACCOUNT
+    // TABLE's header and called `fetchUsage` alone, so pressing it moved the
+    // trigger's balance and left every row — marks included — untouched. The
+    // button now runs a TEST batch, but it still must leave the table current:
+    // the probes it just wrote are only visible after the usage document is
+    // read again.
     const calls = stubFetch((url) => ({
       body: url.includes('account-credits')
         ? { accounts: [
@@ -335,6 +338,59 @@ describe('the panel refresh control refreshes the panel', () => {
     // Mutation: restore `onClick={() => void fetchUsage()}` → this stays equal.
     expect(calls.filter(call => call.url.includes('account-credits')).length)
       .toBeGreaterThan(before)
+  })
+
+  it('posts the TEST batch for this region, then re-reads what it measured', async () => {
+    const usage = usageOf(1072)
+    const calls = stubFetch((url) =>
+      url.includes('account-credits')
+        ? { body: { accounts: [{ id: 'a-1', accountName: 'A One', selected: true, credits: 1072 }] } }
+        : url.includes('/pool')
+          ? { body: { rows: [] } }
+          : { body: usage })
+    const m = await openPanel()
+    const usageBefore = calls.filter(call => call.url.includes('/usage')).length
+
+    const button = document.body.querySelector<HTMLButtonElement>('.dsm-workbuddy-composer-panel-refresh')
+    expect(button?.textContent, 'the control says what it does now').toBe('composer.testAll')
+    await m.click(button as Element)
+    await m.settle()
+
+    const batch = calls.filter(call => call.url.includes('/pool'))
+    expect(batch, 'one batch request').toHaveLength(1)
+    expect(batch[0]?.init?.method, 'the batch is a POST').toBe('POST')
+    expect(batch[0]?.url, 'the region the panel is showing').toContain('region=cn')
+    expect(batch[0]?.url, 'the test action, not checkin').toContain('action=test')
+    // The measurements live in the usage document, so a batch that is not
+    // followed by a read leaves the dots showing the state it just replaced.
+    expect(calls.filter(call => call.url.includes('/usage')).length)
+      .toBeGreaterThan(usageBefore)
+  })
+
+  it('reports a failure that arrives as a line of the stream', async () => {
+    // A current Host commits its HTTP status on the FIRST line, so a batch that
+    // dies mid-way answers 200 with a `reason` line. Reading only the status
+    // would report a dead batch as a clean one.
+    const calls = stubFetch((url) =>
+      // The batch answers NDJSON, and its FIRST line is the status: a batch that
+      // dies mid-way still answers 200, with a `reason` line.
+      url.includes('/pool')
+        ? {
+            body: '{"reason":"no-target-model","error":"no target model configured"}\n',
+            contentType: 'application/x-ndjson',
+          }
+        : url.includes('account-credits')
+          ? { body: { accounts: [{ id: 'a-1', accountName: 'A One', selected: true, credits: 1072 }] } }
+          : { body: usageOf(1072) })
+    const m = await openPanel()
+    const button = document.body.querySelector<HTMLButtonElement>('.dsm-workbuddy-composer-panel-refresh')
+    await m.click(button as Element)
+    await m.settle()
+
+    expect(calls.some(call => call.url.includes('action=test')), 'the batch ran').toBe(true)
+    const errors = Array.from(document.body.querySelectorAll('.dsm-workbuddy-composer-panel-error'))
+      .map(node => node.textContent ?? '')
+    expect(errors.join(' | '), 'the batch died, so the panel says so').toContain('no target model configured')
   })
 
   it('moves the footer clock when the table is refreshed', async () => {
