@@ -702,7 +702,10 @@ describe('the benefit claim route', () => {
   const CLAIM_PATH = '/plugins/dsh-connect-workbuddy/benefit/claim'
 
   /** Mount only the claim handler, with the given client double. */
-  async function mountClaim(client: Partial<WorkBuddyStatusRouteOptions['client']>): Promise<CapturedEntry['handler']> {
+  async function mountClaim(
+    client: Partial<WorkBuddyStatusRouteOptions['client']>,
+    pool?: Partial<NonNullable<WorkBuddyStatusRouteOptions['pool']>>,
+  ): Promise<CapturedEntry['handler']> {
     const captured: CapturedEntry[] = []
     const FakeWebServer = {
       name: 'webServer',
@@ -718,10 +721,10 @@ describe('the benefit claim route', () => {
     }
     const ctx = new Context()
     await ctx.plugin(FakeWebServer)
-    registerWorkBuddyStatusRoute(ctx, {
-      ...deps(),
-      client: { ...deps().client, ...client },
-    })
+    // Build the pool deps through poolDeps() so the double inherits all 18
+    // required members and only overrides the hook under test.
+    const base = deps(pool === undefined ? undefined : poolDeps(pool))
+    registerWorkBuddyStatusRoute(ctx, { ...base, client: { ...base.client, ...client } })
     await ctx.fiber.dispose()
     const claim = captured.find(entry => entry.path === CLAIM_PATH)
     if (claim === undefined) throw new Error('claim route was not registered')
@@ -830,5 +833,47 @@ describe('the benefit claim route', () => {
 
     expect(out.status()).toBe(403)
     expect(claimBenefit).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A successful claim must drop the cached reading for THAT account.
+   *
+   * Reported as 「领取成功后，领取按钮还在，积分加了」: the credits landed but the
+   * 领取 pill stayed. The claim route writes upstream directly, so the only copy
+   * of the pre-claim state that could survive is the Host's 30-minute benefit
+   * cache — and nothing ever invalidated it. The card DOES await a full status
+   * re-read after the claim, so the pill is only stale if that re-read is served
+   * from a cache that still says "claimable".
+   */
+  it('invalidates the cached benefit for the claimed account, and only that account', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    let reads = 0
+    const fetchBenefits = vi.fn(async () => {
+      reads += 1
+      return [reads === 1 ? claimable : claimed]
+    })
+    const invalidateBenefit = vi.fn()
+    const handler = await mountClaim({ fetchBenefits, claimBenefit }, { invalidateBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(200)
+    expect(invalidateBenefit).toHaveBeenCalledTimes(1)
+    // The account that was claimed, not the whole region: dropping everyone's
+    // reading would turn one click into six upstream reads.
+    expect(invalidateBenefit).toHaveBeenCalledWith('cn', 'a')
+  })
+
+  it('leaves the cache alone when the claim is refused, so a no-op does not cost reads', async () => {
+    const invalidateBenefit = vi.fn()
+    const handler = await mountClaim(
+      { fetchBenefits: async () => [claimed], claimBenefit: vi.fn() },
+      { invalidateBenefit },
+    )
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(409)
+    expect(invalidateBenefit).not.toHaveBeenCalled()
   })
 })

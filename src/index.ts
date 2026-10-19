@@ -1352,6 +1352,24 @@ export function apply(ctx: Context, config: Config): void {
         }
         return cached
       },
+      /**
+       * Drop one account's cached benefit reading (issue #79).
+       *
+       * The claim route writes upstream itself, so this cache is the ONLY thing
+       * that can keep answering "claimable" after a successful claim — and it was
+       * never invalidated: the credits went up, the 领取 pill stayed for up to 30
+       * minutes, and the claim looked like it had silently failed. That is the
+       * exact symptom the user reported. `checkin` already deletes its entries
+       * after a batch; this is the same rule for the claim.
+       *
+       * Deleting (rather than overwriting with the post-claim read) keeps the
+       * ownership where it belongs: the route already made the authoritative
+       * re-read, and the next `benefits()` refills this from live data.
+       */
+      invalidateBenefit(region, accountId) {
+        const cached = benefitStateCache[region]
+        if (cached !== undefined) delete cached[accountId]
+      },
       async currentAccountId(region) {
         // Apply the SAME selection the request path applies, then report what the
         // store would bill. Going through `applyPoolSelection` instead of

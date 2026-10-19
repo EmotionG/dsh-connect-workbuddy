@@ -393,6 +393,21 @@ export interface WorkBuddyPoolDeps {
    */
   cachedBenefits?(region: WorkBuddyRegion): Readonly<Record<string, readonly WorkBuddyBenefitView[]>>
   /**
+   * Forget this account's cached benefit reading so the next status read is live.
+   *
+   * The claim route writes to upstream directly, so nothing else in the plugin
+   * knows the campaign just changed. Without this the card kept showing 领取 for
+   * up to `BENEFIT_CACHE_MS` (30 min) after a SUCCESSFUL claim: the credits went
+   * up, the pill stayed, and the only remaining explanation was "the claim
+   * silently failed" — which invited a second click the route then refused as
+   * already-claimed. `checkin` has the same rule and invalidates its own cache;
+   * this is the benefit counterpart.
+   *
+   * Absent is legal (a Host from before this hook) and means "the click refreshes
+   * the card, but the host-side cache may still answer stale for a while".
+   */
+  invalidateBenefit?(region: WorkBuddyRegion, accountId: string): void
+  /**
    * Every local sign-in the pool does NOT cover, so the card can offer them to
    * check in. Absent means the card lists only pool members.
    */
@@ -1273,6 +1288,12 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           if (target.claimed) return json(res, 409, { error: 'benefit already claimed', benefit: target })
           if (!target.active) return json(res, 409, { error: 'benefit activity is not active', benefit: target })
           await deps.client.claimBenefit(credential, kind)
+          // Drop the cached reading BEFORE answering, so the status read the card
+          // fires next is live rather than a 30-minute-old snapshot. Ordering is
+          // the point: the client awaits its refresh, so by the time the pill is
+          // re-rendered this account's cache entry is already gone. Skipping this
+          // is what left 领取 on screen after a SUCCESSFUL claim (issue #79).
+          deps.pool?.invalidateBenefit?.(region, accountId)
           // Answer with what the gateway says NOW, not with an assumption. The
           // card repaints from this reading, so a claim that did nothing still
           // cannot leave a 待领取 line behind.
