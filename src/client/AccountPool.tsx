@@ -1584,7 +1584,7 @@ function renderAccountRow(input: {
               // An urgent window counts days; a comfortable one states just the
               // amount, because "{n} days left" on a long window is noise. A
               // window ending today says 今天截止 rather than "还剩 0 天".
-              h('span', null, benefit.urgent
+              h('span', { className: 'dsm-workbuddy-pool-benefit-tag' }, benefit.urgent
                 ? benefit.daysLeft === undefined || benefit.daysLeft === 0
                   ? t('row.poolBenefitDueToday', { title: benefit.title, count: formatNumber(benefit.creditNum) })
                   : t('row.poolBenefitUrgent', {

@@ -2,11 +2,11 @@
  * Client styles for the WorkBuddy plugin card.
  *
  * 参考：dingminhua/dsh-connect-trae（MIT，Copyright (c) 2026 LaoDing）
- *   — 整套 `dsm-*` 卡片样式系统（卡片外壳、按钮原语、`--dsw-alias-*`
+ *   — 整套 dsm-* 卡片样式系统（卡片外壳、按钮原语、--dsw-alias-*
  *     主题变量与十六进制回退值）逐字沿用自该项目，其又复制自
  *     dingminhua/dsh-subagent-default-model（MIT）的 SETTINGS_CSS。
  *     沿用目的是让两个插件共享同一套外部表现语言。
- * 改动：类名由 `dsm-trae-*` 改为 `dsm-workbuddy-*`；
+ * 改动：类名由 dsm-trae-* 改为 dsm-workbuddy-*；
  *   移除 trae 特有的 1M 变体样式，新增按套餐聚合的积分行样式；
  *   双 provider 化后新增国内版/国际版 tab 栏样式。
  *
@@ -398,12 +398,52 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-soon{font-size:11px;line-height:16px;color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .dsm-workbuddy-pool-soon-plain{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999)}
 /* Claimable benefits (issue #79). A quiet line by default — it is an opportunity, not a fault — and loud only when the window is about to close. */
-.dsm-workbuddy-pool-benefits{display:flex;flex-wrap:wrap;align-items:center;gap:5px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999);min-width:0}
+.dsm-workbuddy-pool-benefits{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999);min-width:0}
+/* One entry = text + pill. The tag keeps this to one line (nowrap) and gives
+   up width first (ellipsis); the button never shrinks. */
+.dsm-workbuddy-pool-benefit-tag{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-pool-benefit{display:inline-flex;align-items:center;gap:5px}
 .dsm-workbuddy-pool-benefit-urgent{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:600}
-/* The claim button is smaller than a row action: it sits inside a text line,
-   and it must not make the benefit line taller than the credit line above. */
-.dsm-workbuddy-pool-benefit-btn{padding:0 6px;font-size:11px;line-height:15px;height:auto}
+/* The claim button is a PILL, not a row action.
+   It sits inside a text line, so three things are load-bearing:
+   - white-space:nowrap: without it the flex row squeezed 领取 into 领/取 on
+     two lines and the pill grew into a tall blob;
+   - a fixed compact height, so it matches the 11px text beside it instead of
+     inheriting .dsm-btn's 13px padding;
+   - a tinted background, because an outline-only button at this size reads as
+     disabled next to the credit figures.
+   flex:none keeps the pill from stretching when the line has to wrap. */
+.dsm-workbuddy-pool-benefit-btn{
+  flex:none;
+  padding:0 8px;
+  height:19px;
+  font-size:11px;
+  line-height:17px;
+  font-weight:500;
+  border-radius:999px;
+  white-space:nowrap;
+  letter-spacing:.02em;
+  border-color:var(--dsw-alias-brand-primary,#5686fe);
+  color:var(--dsw-alias-brand-primary,#5686fe);
+  background:rgba(86,134,254,.12);
+}
+.dsm-workbuddy-pool-benefit-btn:hover:not(:disabled){
+  color:var(--dsw-alias-bg-layer-3,#16181d);
+  border-color:var(--dsw-alias-brand-primary,#5686fe);
+  background:var(--dsw-alias-brand-primary,#5686fe);
+}
+/* The urgent pill leans on the warning colour, so the eye lands on the window
+   that is about to close rather than on the one with days to spare. */
+.dsm-workbuddy-pool-benefit-urgent .dsm-workbuddy-pool-benefit-btn{
+  border-color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  background:rgba(245,158,11,.14);
+}
+.dsm-workbuddy-pool-benefit-urgent .dsm-workbuddy-pool-benefit-btn:hover:not(:disabled){
+  color:var(--dsw-alias-bg-layer-3,#16181d);
+  border-color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  background:var(--dsw-alias-state-warn-primary,#f59e0b);
+}
 .dsm-workbuddy-pool-probe,.dsm-workbuddy-pool-checkin{font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999);min-width:0;overflow-wrap:anywhere}
 .dsm-workbuddy-pool-probe{display:flex;flex-direction:column;gap:4px}
 .dsm-workbuddy-pool-probe-main{color:var(--dsw-alias-label-secondary,#c6c9d0)}
@@ -581,7 +621,7 @@ export const WORKBUDDY_CARD_CSS = `
  * Composer credit readout styles, injected by the readout component itself.
  *
  * 参考：dingminhua/dsh-connect-trae（MIT，Copyright (c) 2026 LaoDing）
- *   — 该项目的 `COMPOSER_POINTS_CSS`，类名改为 `dsm-workbuddy-*`，
+ *   — 该项目的 COMPOSER_POINTS_CSS，类名改为 dsm-workbuddy-*，
  *     其余（尺寸、节奏、主题变量与回退值、表格对齐）逐条沿用。
  *
  * Separate from the card bundle because the readout lives in the session's
