@@ -402,7 +402,20 @@ export const WORKBUDDY_CARD_CSS = `
 /* One entry = text + pill. The tag keeps this to one line (nowrap) and gives
    up width first (ellipsis); the button never shrinks. */
 .dsm-workbuddy-pool-benefit-tag{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsm-workbuddy-pool-benefit{display:inline-flex;align-items:center;gap:5px}
+/* min-width:0 IS the whole fix (issue #79).
+   The pill made this entry's min-content 229px (full line + button) inside a
+   148px column, so it painted over the probe column beside it.
+   A flex ITEM defaults to min-width:auto and refuses to shrink below its
+   content, which is what pinned it at 229; min-width:0 lets the tag ellipsize
+   and the pill keep its size.
+
+   Measured in headless Chrome against the real rendered row, as an A/B:
+     min-width:0        -> 0 overflowing children, entry 148px
+     without it          -> 3 overflowing children, entry 229px
+   Changing the row's grid tracks to minmax(0,...) was tried too and made NO
+   difference (the entry overflows its CELL, so the CELL was never the
+   constraint) — so the tracks are left as they were. */
+.dsm-workbuddy-pool-benefit{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%}
 .dsm-workbuddy-pool-benefit-urgent{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:600}
 /* The claim button is a PILL, not a row action.
    It sits inside a text line, so three things are load-bearing:

@@ -247,6 +247,48 @@ describe('the mounted plugin: defects found by driving the real code (now fixed)
 
 
 
+  /**
+   * The claim pill must stay INSIDE the credits column (issue #79).
+   *
+   * Regression guard for a defect a screenshot showed: the benefit entry painted
+   * on top of the probe column beside it. jsdom cannot catch that — it performs
+   * no layout, so an overflow assertion there is vacuously true. The cause is
+   * structural: the entry is a flex item containing a NOWRAP line and a
+   * flex:none pill, so its min-content is the whole line plus the button, and a
+   * flex item defaults to min-width:auto, which refuses to shrink below it.
+   *
+   * The rule is therefore asserted on the source: the entry itself must opt out
+   * of the automatic minimum. Measured in headless Chrome against the real
+   * rendered row (min-width:0 -> 0 overflowing children; without it -> 3).
+   */
+  it('lets the benefit entry shrink below its content, so the pill cannot overrun the column', async () => {
+    const styles = await sourceOf('client/styles.ts')
+    const entry = styles.match(/\.dsm-workbuddy-pool-benefit\{([^}]*)\}/u)?.[1] ?? ''
+    expect(entry, 'the benefit entry rule was not found').not.toBe('')
+    expect(entry, 'a flex item keeps min-width:auto, so the pill overflows the column')
+      .toMatch(/min-width:\s*0/)
+    // The grid tracks were tried as the fix and made no difference (the entry
+    // overflows its CELL, so the cell was never the constraint). They stay as
+    // bare `fr`; this asserts that, so a future reader does not re-try it.
+    const row = styles.match(/\.dsm-workbuddy-pool-row\{([^}]*)\}/u)?.[1] ?? ''
+    expect(row, 'the pool row grid declaration was not found').not.toBe('')
+    expect(row, 'the grid tracks should stay as they were; minmax changed nothing')
+      .not.toContain('minmax(')
+  })
+
+  it('keeps the claim pill from shrinking, and the benefit text as the part that gives way', async () => {
+    const styles = await sourceOf('client/styles.ts')
+    const pill = styles.match(/\.dsm-workbuddy-pool-benefit-btn\{([^}]*)\}/u)?.[1] ?? ''
+    expect(pill, 'the claim pill rule was not found').not.toBe('')
+    // `nowrap` alone is what made it a two-line blob last time.
+    expect(pill, 'the claim pill must not wrap its label').toContain('white-space:nowrap')
+    // `flex:none` is what keeps it from being squashed by the shrinking column.
+    expect(pill, 'the claim pill must not flex').toContain('flex:none')
+    // The pill needs its own compact height: inheriting .dsm-btn padding made it
+    // taller than the text line it sits on.
+    expect(pill, 'the claim pill must carry its own height').toMatch(/height:\s*\d+px/)
+  })
+
   it('gives a pool probe the quota-refresh time, so out-of-credit has a cooldown', async () => {
     // The defect: the pool built its own probe call and omitted the monthly
     // refresh point, so a drained account reported "no time given" in the pool
