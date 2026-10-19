@@ -440,6 +440,12 @@ export const WORKBUDDY_CARD_CSS = `
    - a fixed 19px height, so it matches the 11px text beside it instead of
      inheriting .dsm-btn's padding;
    - flex:none, so the shrinking column eats the TEXT and never the pill. */
+/* Order matters: this rule must come AFTER .dsm-btn-outline (line ~36) so its
+   amber background wins. Two-class specificity turned out to be the wrong lever
+   and was REMOVED after measuring: pairing the classes also beat the
+   dsm-workbuddy-pool-small-btn padding, and without dsm-btn-outline on the
+   element the button fell back to dsm-btn's default background — rendered white
+   on a dark row. Source order is what was already working; keep it. */
 .dsm-workbuddy-pool-benefit-btn{
   /* Flex centring plus a 1px nudge is what actually centres 领取.
      Measured on the rendered pill in headless Chrome (OCR-free pixel scan of
@@ -516,6 +522,12 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-members-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dsm-workbuddy-pool-members-title{margin:0 0 3px;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-pool-members-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+/* The 测试/删除 and 全选/全不选 buttons. Shared with the benefit pill, which
+ * OVERRIDES both properties at higher specificity (see its rule above): a pill is
+ * a capsule whose height is fixed at 19px, so inheriting this 3px/10px rhythm
+ * pushed its own padding/line-height out and changed how the label sat.
+ * Kept as-is rather than narrowed to the parents that use it, so the row-action
+ * and select-all sizing stays in one place. */
 .dsm-workbuddy-pool-small-btn{padding:3px 10px;font-size:12px}
 .dsm-workbuddy-pool-check{display:inline-flex;align-items:center;flex:none;cursor:pointer}
 .dsm-workbuddy-pool-check input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}

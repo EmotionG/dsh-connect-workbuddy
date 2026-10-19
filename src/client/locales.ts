@@ -12,7 +12,7 @@
 
 export const en = {
   'row.title': 'WorkBuddy credits & models (dsh-connect-workbuddy)',
-  'row.desc': 'Use WorkBuddy models in DSH and see your remaining credits; the domestic and international sides are two independent providers, each with its own account — use both at the same time.',
+  'row.desc': 'Use WorkBuddy models in DSH: each refresh reads every model\'s credit multiplier from the upstream catalog, image input is toggled per model, several accounts can be switched or failed over automatically, and daily check-in plus your remaining credits are one click away. The domestic and international sides are two independent providers, each with its own account — use both at the same time.',
   'row.expand': 'Expand',
   'row.collapse': 'Collapse',
   'row.tabCn': 'Domestic',
@@ -431,7 +431,7 @@ export type WorkBuddySettingsKey = keyof typeof en
 
 export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.title': '接入使用 WorkBuddy 积分与模型（dsh-connect-workbuddy）',
-  'row.desc': '在 DSH 中使用 WorkBuddy 模型并随时查看剩余积分；国内版与国际版是两个独立供应商，各有自己的账号，可同时使用。',
+  'row.desc': '在 DSH 中使用 WorkBuddy 模型：每次刷新都按上游目录读取每个模型的积分倍率，图片输入可逐模型开关，多个账号可切换或由账号池自动换号，每日签到与剩余积分一键可查。国内版与国际版是两个独立供应商，各有自己的账号，可同时使用。',
   'row.expand': '展开',
   'row.collapse': '收起',
   'row.tabCn': '国内版',
