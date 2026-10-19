@@ -314,29 +314,43 @@ describe('the mounted plugin: defects found by driving the real code (now fixed)
   })
 
   /**
-   * The claim label must say WHICH account it claims.
+   * A claim on ONE row must not repaint the OTHER rows as claiming.
    *
-   * A user read a bare 「领取」 as a pool-wide action and asked why every row's
-   * button had become 一起领取. Nothing was wrong with the claim itself — the
-   * route takes a mandatory accountId, and each button closes over its own row's
-   * campaign — but the label was unreadable in context: the bulk toolbar directly
-   * above the rows is 「一键签到所有账号 / 一键测试所有账号」, so a bare 「领取」
-   * under it reads as the third member of that group. A write that spends a real
-   * entitlement must not be ambiguous about its scope, so the label carries the
-   * scope itself and the toolbar's 「所有账号」 phrasing is banned on it.
+   * Reported as 「点击一个 全部联动，这是错的」: one click turned every row's pill
+   * into 「领取中…」. The claim was never pool-wide — the route takes a mandatory
+   * accountId and each button closes over its own row's campaign — but the ROW
+   * PROP that fed the pill was `rowBusyAccountId !== undefined`, i.e. "some row
+   * is busy", so the label flipped on all of them at once. A per-account write
+   * whose feedback spreads to every account reads as a bulk action no matter what
+   * the button says, so the label must be gated on THIS row.
+   *
+   * Asserted on the SOURCE, because the defect is a prop binding rather than a
+   * rendered string: both bindings render identically when exactly one row is
+   * busy, which is what a jsdom click test would produce.
    */
-  it('words the claim label so it cannot read as a pool-wide action', async () => {
+  it('gates the claim label on its own row, so one claim cannot relabel the table', async () => {
+    const source = await sourceOf('client/AccountPool.tsx')
+    // The prop handed to each row must be this row's identity, not a global flag.
+    expect(source, 'the rows must be told which row is busy by identity')
+      .toMatch(/claimBusy:\s*rowBusyAccountId === account\.accountId/u)
+    // And the pill's label must consult it. A bare `rowBusyAction === 'claim'`
+    // is the exact expression that lit up every row.
+    // Start at the opening paren of the h('button', {...}) call, not at the class
+    // name: the keyword sits above the class string, so slicing from the class
+    // truncates `disabled:` out of view.
+    const pill = source.slice(Math.max(0, source.indexOf('dsm-workbuddy-pool-benefit-btn') - 400))
+    // The pill's child expression is the ternary that picks 领取 vs 领取中…
+    const label = pill.match(/h\('span', null,\s*([\s\S]{0,200}?)\)\),/u)?.[1] ?? ''
+    expect(label, 'the claim label expression was not found').not.toBe('')
+    expect(label, 'the claim label must be gated on this row, or one click relabels every row')
+      .toContain('claimBusy')
+    // The button stays DISABLED on any write in flight: that part is a real race
+    // guard and must not be loosened to this row alone.
+    expect(pill, 'a second write must still be blocked while one is landing')
+      .toMatch(/disabled:\s*rowBusy/u)
+    // The label itself stays the short 「领取」 the user asked for.
     const locales = await sourceOf('client/locales.ts')
-    const label = locales.match(/'row\.poolBenefitClaim':\s*'([^']*)'/u)?.[1] ?? ''
-    expect(label, 'the claim label was not found').not.toBe('')
-    expect(label, 'the claim label must name its scope; a bare 领取 reads as the toolbar group')
-      .toMatch(/本账号|this account/u)
-    expect(label, 'the claim label must not reuse the bulk toolbar\'s 所有账号 phrasing')
-      .not.toMatch(/所有账号/u)
-    // The bulk buttons really are worded that way — that contrast is what made the
-    // bare label ambiguous, so assert it rather than assume it.
-    expect(locales, 'the pooled check-in label changed; re-check what the claim label reads against')
-      .toMatch(/'row\.poolCheckinAll':\s*'[^']*所有账号/u)
+    expect(locales).toMatch(/'row\.poolBenefitClaim':\s*'领取'/u)
   })
 
   it('awaits the re-read after a claim, so a successful claim cannot look failed', async () => {

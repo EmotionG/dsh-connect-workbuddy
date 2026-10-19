@@ -25,10 +25,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createElement as h } from 'react'
 import type { ReactNode } from 'react'
 import {
+  WORKBUDDY_BENEFIT_CLAIM_PATH,
   WORKBUDDY_GITHUB_URL,
   WORKBUDDY_PLAN_URL,
   WORKBUDDY_POOL_ACCOUNT_PARAM,
   WORKBUDDY_POOL_PATH,
+  withWorkBuddyRegion,
   withWorkBuddyRegionAndAction,
 } from '../status-paths.ts'
 import type {
@@ -865,7 +867,9 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     setRowBusyAccountId(accountId)
     setRowBusyAction('claim')
     setActionError(undefined)
-    const url = withWorkBuddyRegionAndAction(WORKBUDDY_BENEFIT_CLAIM_PATH, region)
+    // Not withWorkBuddyRegionAndAction: that helper appends `&action=<pool action>`,
+    // and the claim route takes no action — it is addressed by accountId + kind.
+    const url = withWorkBuddyRegion(WORKBUDDY_BENEFIT_CLAIM_PATH, region)
       + '&' + WORKBUDDY_POOL_ACCOUNT_PARAM + '=' + encodeURIComponent(accountId)
       + '&kind=' + encodeURIComponent(kind)
     try {
@@ -889,8 +893,8 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       // AWAIT the re-read, for the same reason removal below does: the row keeps
       // rendering the OLD snapshot until the new usage lands, and the claim pill
       // is only cleared by that snapshot. Returning before it arrived cleared the
-      // busy flag while the card still showed 「本账号领取」, so a claim that HAD
-      // succeeded looked like it had not — inviting a second click that the route
+      // busy flag while the card still showed a live 「领取」 pill, so a claim
+      // that succeeded looked like it had not — inviting a second click the route
       // then refuses as already-claimed.
       await onRefresh?.()
     } catch (error: unknown) {
@@ -1261,10 +1265,13 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
               canEdit: canEditPool,
               checkinSupported: pool.checkinSupported,
               onToggle: next => toggleMember(account.accountId, next),
-              // Per-row actions, right side of the row. One busy flag gates both,
-              // so a row's test and another row's removal never interleave.
-              busy: rowBusyAccountId !== undefined,
+              // Per-row actions, right side of the row. A `busy` row gates ITS OWN
+              // buttons only: see the rowBusyAccountId note in renderAccountRow.
+              busy: rowBusyAccountId === account.accountId,
+              rowBusy: rowBusyAccountId !== undefined,
               rowBusyAction,
+              /** The pill also needs to know WHICH row is busy, not just that one is. */
+              claimBusy: rowBusyAccountId === account.accountId,
               testDisabled: pool.targetModelSource === 'none' || pool.targetModelSource === 'stale',
               targetHint: pool.targetModelSource === 'none'
                 ? t('row.poolTargetNone')
@@ -1384,8 +1391,17 @@ function renderAccountRow(input: {
   /** Whether this region has a check-in at all; the column is omitted when not. */
   checkinSupported: boolean
   onToggle: (next: boolean) => void
-  /** A per-row action is in flight (any row): both buttons gate on it. */
+  /**
+   * A per-row action is in flight for THIS row: its own buttons gate on it.
+   *
+   * Deliberately NOT "any row is busy". Gating every row on a single global flag
+   * made one claim repaint every other row's pill as 「领取中…」, which reads as
+   * one click claiming the whole pool — the opposite of what this row-level
+   * button means (issue #79). Only this row's pill may say it is claiming.
+   */
   busy: boolean
+  /** SOME row has an action in flight; the toolbar-level actions gate on it. */
+  rowBusy: boolean
   /** The region cannot name a target model; the test button says why. */
   testDisabled: boolean
   targetHint: string | undefined
@@ -1401,6 +1417,8 @@ function renderAccountRow(input: {
   onClaim: (kind: 'compensation' | 'gift', title: string, creditNum: number) => void
   /** Which per-row action is in flight, so the claim button can name its state. */
   rowBusyAction: 'test' | 'remove' | 'claim' | undefined
+  /** This row's own claim is the action in flight (never another row's). */
+  claimBusy: boolean
   /** 1-based rank among members; undefined when not a member / not manually ordered. */
   orderIndex: number | undefined
   /** Whether the pool order is user-pinned (vs the credit policy picking it). */
@@ -1414,8 +1432,8 @@ function renderAccountRow(input: {
   moveDownDisabled: boolean
 }): ReturnType<typeof h> {
   const {
-    t, account, checked, canEdit, checkinSupported, onToggle, busy, testDisabled,
-    targetHint, onTest, onRemove, onClaim, rowBusyAction, orderIndex, orderIsManual, moveEnabled,
+    t, account, checked, canEdit, checkinSupported, onToggle, busy, rowBusy, testDisabled,
+    targetHint, onTest, onRemove, onClaim, rowBusyAction, claimBusy, orderIndex, orderIsManual, moveEnabled,
     onMoveUp, onMoveDown, moveUpDisabled, moveDownDisabled,
   } = input
   const name = account.accountName === '' ? t('row.accountUnnamed') : account.accountName
@@ -1602,15 +1620,19 @@ function renderAccountRow(input: {
               h('button', {
                 type: 'button',
                 className: 'dsm-btn dsm-btn-outline dsm-workbuddy-pool-small-btn dsm-workbuddy-pool-benefit-btn',
-                // Gated on ANY row action, not just this row's: a second write
-                // fired while the first is still landing would race the refresh
-                // and could overwrite the reading the first one is waiting for.
-                disabled: busy,
+                // Gated on a write in flight ANYWHERE in the card, because a second
+                // write fired while the first is still landing would race the
+                // refresh. But the LABEL is gated on this row alone: a shared label
+                // state made one click repaint the whole table as 「领取中…」, which
+                // reads as a pool-wide claim (issue #79).
+                disabled: rowBusy,
                 title: t('row.poolBenefitHint', { url: WORKBUDDY_PLAN_URL }),
                 'aria-label': t('row.poolBenefitClaimAria', { title: benefit.title, count: formatNumber(benefit.creditNum) }),
                 onClick: () => onClaim(benefit.kind, benefit.title, benefit.creditNum),
               }, h('span', null,
-                rowBusyAction === 'claim' ? t('row.poolBenefitClaiming') : t('row.poolBenefitClaim'))),
+                claimBusy && rowBusyAction === 'claim'
+                  ? t('row.poolBenefitClaiming')
+                  : t('row.poolBenefitClaim'))),
             )),
           ),
     ),
@@ -1678,14 +1700,14 @@ function renderAccountRow(input: {
       h('button', {
         type: 'button',
         className: 'dsm-btn dsm-btn-outline dsm-workbuddy-pool-small-btn',
-        disabled: busy || testDisabled,
+        disabled: rowBusy || testDisabled,
         title: testDisabled ? targetHint : undefined,
         onClick: onTest,
       }, t('row.poolRowTest')),
       h('button', {
         type: 'button',
         className: 'dsm-btn dsm-btn-outline dsm-workbuddy-pool-small-btn',
-        disabled: busy,
+        disabled: rowBusy,
         title: t('row.poolRowRemoveHint'),
         'aria-label': t('row.poolRowRemoveAria', { accountName: name }),
         onClick: onRemove,
