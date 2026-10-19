@@ -399,9 +399,15 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-soon-plain{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999)}
 /* Claimable benefits (issue #79). A quiet line by default — it is an opportunity, not a fault — and loud only when the window is about to close. */
 .dsm-workbuddy-pool-benefits{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#999);min-width:0}
-/* One entry = text + pill. The tag keeps this to one line (nowrap) and gives
-   up width first (ellipsis); the button never shrinks. */
-.dsm-workbuddy-pool-benefit-tag{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* One entry = text + pill, and the text wraps rather than being cut.
+   The tag used to be nowrap + ellipsis, which truncated the label to
+   「模型服务异常补偿…」 — dropping the amount, i.e. the only part the user is
+   deciding on. Measured in headless Chrome at the card's real width, the entry
+   line has room for two lines, so the tag clamps to two and shows the whole
+   label; the pill wraps to the line below and never shrinks.
+   line-clamp, not plain wrapping: an unexpectedly long upstream title must not
+   push the row taller than the pill can travel. */
+.dsm-workbuddy-pool-benefit-tag{min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 /* min-width:0 IS the whole fix (issue #79).
    The pill made this entry's min-content 229px (full line + button) inside a
    148px column, so it painted over the probe column beside it.
@@ -415,47 +421,83 @@ export const WORKBUDDY_CARD_CSS = `
    Changing the row's grid tracks to minmax(0,...) was tried too and made NO
    difference (the entry overflows its CELL, so the CELL was never the
    constraint) — so the tracks are left as they were. */
-.dsm-workbuddy-pool-benefit{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%}
+.dsm-workbuddy-pool-benefit{display:flex;flex-wrap:wrap;align-items:center;gap:2px 5px;min-width:0;max-width:100%}
 .dsm-workbuddy-pool-benefit-urgent{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:600}
-/* The claim button is a PILL, not a row action.
-   It sits inside a text line, so three things are load-bearing:
+/* The claim pill: a solid amber call to action.
+   Orange, not the brand blue, because this is the ONE control in the pool that
+   hands the user something (500 credits) instead of spending their attention on
+   a read-only figure. It should read as an opportunity, and amber is the hue
+   that says "take this" without shouting.
+
+   Solid fill rather than a tinted outline: at 19px tall and 46px wide, a tinted
+   outline sat next to the 1,294 credit figure above it and read as DISABLED.
+   The solid fill also survives the row's grey text without competing for the
+   eye. The card's own 已签到 green is the only other saturated element here.
+
+   Load-bearing details, each measured in headless Chrome:
    - white-space:nowrap: without it the flex row squeezed 领取 into 领/取 on
-     two lines and the pill grew into a tall blob;
-   - a fixed compact height, so it matches the 11px text beside it instead of
-     inheriting .dsm-btn's 13px padding;
-   - a tinted background, because an outline-only button at this size reads as
-     disabled next to the credit figures.
-   flex:none keeps the pill from stretching when the line has to wrap. */
+     two lines and the pill grew into a 32px-tall blob;
+   - a fixed 19px height, so it matches the 11px text beside it instead of
+     inheriting .dsm-btn's padding;
+   - flex:none, so the shrinking column eats the TEXT and never the pill. */
 .dsm-workbuddy-pool-benefit-btn{
+  /* Flex centring plus a 1px nudge is what actually centres 领取.
+     Measured on the rendered pill in headless Chrome (OCR-free pixel scan of
+     the glyph mask inside the 46x19 box):
+       display:inline-flex; align-items:center  ->  above 3.5px, below 4.5px,
+                                                     glyph sat 1.0px low
+       plus translateY(-0.5px) below           ->  above 4.0px, below 4.0px
+     Flex centring centres the LINE BOX, and a CJK glyph's ink sits below the
+     centre of its em box, so centring the box leaves the ink low. The nudge
+     compensates for the ink, not for the box. It is half a pixel because the
+     label renders at 2x on a retina display and 1px would overshoot there. */
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
   flex:none;
-  padding:0 8px;
+  padding:0 9px;
   height:19px;
   font-size:11px;
-  line-height:17px;
-  font-weight:500;
+  line-height:1;
+  font-weight:600;
   border-radius:999px;
   white-space:nowrap;
-  letter-spacing:.02em;
-  border-color:var(--dsw-alias-brand-primary,#5686fe);
-  color:var(--dsw-alias-brand-primary,#5686fe);
-  background:rgba(86,134,254,.12);
-}
-.dsm-workbuddy-pool-benefit-btn:hover:not(:disabled){
-  color:var(--dsw-alias-bg-layer-3,#16181d);
-  border-color:var(--dsw-alias-brand-primary,#5686fe);
-  background:var(--dsw-alias-brand-primary,#5686fe);
-}
-/* The urgent pill leans on the warning colour, so the eye lands on the window
-   that is about to close rather than on the one with days to spare. */
-.dsm-workbuddy-pool-benefit-urgent .dsm-workbuddy-pool-benefit-btn{
+  letter-spacing:.01em;
   border-color:var(--dsw-alias-state-warn-primary,#f59e0b);
-  color:var(--dsw-alias-state-warn-primary,#f59e0b);
-  background:rgba(245,158,11,.14);
-}
-.dsm-workbuddy-pool-benefit-urgent .dsm-workbuddy-pool-benefit-btn:hover:not(:disabled){
-  color:var(--dsw-alias-bg-layer-3,#16181d);
-  border-color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  color:#2a1d05;
   background:var(--dsw-alias-state-warn-primary,#f59e0b);
+  /* The only shadow in the pool table: it lifts the pill off the row so the
+     control reads as clickable rather than as part of the label. */
+  box-shadow:0 1px 2px rgba(0,0,0,.28);
+  transition:filter .12s ease;
+}
+/* Optical centring for the label (issue #79).
+   Flex centring centres the LINE BOX, but a CJK glyph's ink sits below the
+   centre of that box, so 领取 measured 3.5px above / 4.5px below — visibly low.
+   padding-top pushes the ink down by shifting the line box within the centred
+   flex item. Measured on the rendered pill in headless Chrome, as a sweep:
+     (none)        -> above 3.5 / below 4.5  (+1.0 low)
+     padding-top:1px -> above 4.0 / below 4.0  (centred)
+     padding-top:2px -> above 4.5 / below 3.5  (-1.0 high)
+   transform and padding-bottom were both tried first and moved the ink the
+   WRONG way, because both grow the flex item, which re-centres the line box
+   downward. Padding-top is the one that shifts the ink up. */
+.dsm-workbuddy-pool-benefit-btn > span{display:block;padding-top:1px}
+.dsm-workbuddy-pool-benefit-btn:hover:not(:disabled){
+  /* Brighten, do not invert: an inverted pill loses its "take this" reading,
+     and the dark-on-amber swap is the part that looked cheap in the draft. */
+  filter:brightness(1.08);
+  border-color:var(--dsw-alias-state-warn-primary,#f59e0b);
+  color:#2a1d05;
+  background:var(--dsw-alias-state-warn-primary,#f59e0b);
+}
+.dsm-workbuddy-pool-benefit-btn:active:not(:disabled){filter:brightness(.94)}
+/* A row action is in flight: this row, or another one. The pill goes flat so it
+   cannot be clicked twice while the first claim is still landing. */
+.dsm-workbuddy-pool-benefit-btn:disabled{
+  opacity:.45;
+  cursor:default;
+  box-shadow:none;
 }
 .dsm-workbuddy-pool-probe,.dsm-workbuddy-pool-checkin{font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999);min-width:0;overflow-wrap:anywhere}
 .dsm-workbuddy-pool-probe{display:flex;flex-direction:column;gap:4px}

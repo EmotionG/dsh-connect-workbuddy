@@ -287,6 +287,30 @@ describe('the mounted plugin: defects found by driving the real code (now fixed)
     // The pill needs its own compact height: inheriting .dsm-btn padding made it
     // taller than the text line it sits on.
     expect(pill, 'the claim pill must carry its own height').toMatch(/height:\s*\d+px/)
+    // The label is centred optically, not just geometrically. A CJK glyph's ink
+    // sits below the centre of its line box, so flex centring alone left 领取
+    // 1px low (measured: above 3.5 / below 4.5). padding-top on the label is the
+    // one nudge that moved the ink UP; transform and padding-bottom both moved
+    // it DOWN, because they grow the flex item and re-centre the line box.
+    expect(styles, 'the label needs its optical nudge back').toMatch(
+      /\.dsm-workbuddy-pool-benefit-btn > span\{[^}]*padding-top:1px/u,
+    )
+  })
+
+  it('shows the whole benefit label rather than truncating the amount away', async () => {
+    const styles = await sourceOf('client/styles.ts')
+    const tag = styles.match(/\.dsm-workbuddy-pool-benefit-tag\{([^}]*)\}/u)?.[1] ?? ''
+    expect(tag, 'the benefit tag rule was not found').not.toBe('')
+    // nowrap + ellipsis cut the label to 「模型服务异常补偿…」, dropping the
+    // credit amount — the one fact the user is deciding on.
+    expect(tag, 'the benefit label must not be cut off with an ellipsis')
+      .not.toContain('text-overflow:ellipsis')
+    expect(tag, 'the benefit label must be allowed to wrap').toMatch(/-webkit-line-clamp:\s*2/)
+    // The entry wraps so the pill drops below the text instead of squeezing it.
+    const entry = styles.match(/\.dsm-workbuddy-pool-benefit\{([^}]*)\}/u)?.[1] ?? ''
+    expect(entry, 'the benefit entry rule was not found').not.toBe('')
+    expect(entry, 'the entry must wrap the pill onto its own line when text needs room')
+      .toContain('flex-wrap:wrap')
   })
 
   it('gives a pool probe the quota-refresh time, so out-of-credit has a cooldown', async () => {
