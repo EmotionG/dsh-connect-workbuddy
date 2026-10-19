@@ -313,6 +313,47 @@ describe('the mounted plugin: defects found by driving the real code (now fixed)
       .toContain('flex-wrap:wrap')
   })
 
+  /**
+   * The claim label must say WHICH account it claims.
+   *
+   * A user read a bare 「领取」 as a pool-wide action and asked why every row's
+   * button had become 一起领取. Nothing was wrong with the claim itself — the
+   * route takes a mandatory accountId, and each button closes over its own row's
+   * campaign — but the label was unreadable in context: the bulk toolbar directly
+   * above the rows is 「一键签到所有账号 / 一键测试所有账号」, so a bare 「领取」
+   * under it reads as the third member of that group. A write that spends a real
+   * entitlement must not be ambiguous about its scope, so the label carries the
+   * scope itself and the toolbar's 「所有账号」 phrasing is banned on it.
+   */
+  it('words the claim label so it cannot read as a pool-wide action', async () => {
+    const locales = await sourceOf('client/locales.ts')
+    const label = locales.match(/'row\.poolBenefitClaim':\s*'([^']*)'/u)?.[1] ?? ''
+    expect(label, 'the claim label was not found').not.toBe('')
+    expect(label, 'the claim label must name its scope; a bare 领取 reads as the toolbar group')
+      .toMatch(/本账号|this account/u)
+    expect(label, 'the claim label must not reuse the bulk toolbar\'s 所有账号 phrasing')
+      .not.toMatch(/所有账号/u)
+    // The bulk buttons really are worded that way — that contrast is what made the
+    // bare label ambiguous, so assert it rather than assume it.
+    expect(locales, 'the pooled check-in label changed; re-check what the claim label reads against')
+      .toMatch(/'row\.poolCheckinAll':\s*'[^']*所有账号/u)
+  })
+
+  it('awaits the re-read after a claim, so a successful claim cannot look failed', async () => {
+    const source = await sourceOf('client/AccountPool.tsx')
+    // Locate the claim callback, then its refresh call. A fire-and-forget refresh
+    // clears the busy flag while the card still shows the pre-claim snapshot and a
+    // live claim pill, so a claim that HAD succeeded looks like it did nothing —
+    // inviting a second click the route then refuses as already-claimed.
+    const claimAt = source.indexOf('const runRowClaim = useCallback')
+    expect(claimAt, 'runRowClaim was not found').toBeGreaterThan(-1)
+    const body = source.slice(claimAt, source.indexOf('const runRowRemove = useCallback', claimAt))
+    const refresh = body.match(/^[ \t]*(await\s+)?onRefresh\?\.\(\)/mu) ?? []
+    expect(refresh.length, 'the claim callback no longer refreshes').toBeGreaterThan(0)
+    expect(refresh[0], 'the claim refresh must be awaited, as removal\'s is')
+      .toContain('await')
+  })
+
   it('gives a pool probe the quota-refresh time, so out-of-credit has a cooldown', async () => {
     // The defect: the pool built its own probe call and omitted the monthly
     // refresh point, so a drained account reported "no time given" in the pool

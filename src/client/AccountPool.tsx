@@ -886,7 +886,13 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
         title,
         count: formatNumber(creditNum),
       }), 'ok')
-      onRefresh?.()
+      // AWAIT the re-read, for the same reason removal below does: the row keeps
+      // rendering the OLD snapshot until the new usage lands, and the claim pill
+      // is only cleared by that snapshot. Returning before it arrived cleared the
+      // busy flag while the card still showed 「本账号领取」, so a claim that HAD
+      // succeeded looked like it had not — inviting a second click that the route
+      // then refuses as already-claimed.
+      await onRefresh?.()
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : t('row.requestFailed')
       if (mounted.current) {
