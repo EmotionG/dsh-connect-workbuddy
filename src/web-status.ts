@@ -31,6 +31,8 @@ import { resolveCredentialRecovery } from './credential-recovery.ts'
 import { Config, unwrapVolatileDeep } from './index.ts'
 import type { WorkBuddyRecoveryCandidate } from './credential-recovery.ts'
 import type { WorkBuddyCredits, WorkBuddyUpstreamClient } from './upstream.ts'
+import type { WorkBuddyBenefitView } from './benefits.ts'
+import { WORKBUDDY_BENEFIT_TITLES } from './benefits.ts'
 import { isCredentialRejectedError } from './upstream.ts'
 import { effectiveMembersOf, rankPool, resolveTargetModel } from './account-pool.ts'
 import type { WorkBuddyPoolMember, WorkBuddyPoolProbe } from './account-pool.ts'
@@ -370,6 +372,24 @@ export interface WorkBuddyPoolDeps {
    * per-account read in the full document.
    */
   cachedCheckedInToday?(region: WorkBuddyRegion): Readonly<Record<string, boolean>>
+  /**
+   * Claimable promotional benefits per account id (issue #79).
+   *
+   * Only campaigns the account can STILL claim are present; a claimed or lapsed
+   * campaign is absent on purpose, so the card renders nothing for it. Absent
+   * (or a missing entry) also means "not read yet", which the card treats the
+   * same way — no line, rather than a guessed state.
+   */
+  benefits?(region: WorkBuddyRegion): Promise<
+    Readonly<Record<string, readonly WorkBuddyBenefitView[]>>
+  >
+  /**
+   * Claimable benefits, from the readings already taken this process.
+   *
+   * The first-paint counterpart of {@link benefits}: no request, so painting
+   * never waits on two upstream reads per account.
+   */
+  cachedBenefits?(region: WorkBuddyRegion): Readonly<Record<string, readonly WorkBuddyBenefitView[]>>
   /**
    * Every local sign-in the pool does NOT cover, so the card can offer them to
    * check in. Absent means the card lists only pool members.
@@ -941,6 +961,16 @@ async function workBuddyWebPool(
     ? pool.cachedCheckedInToday?.(region) ?? {}
     : await pool.checkedInToday?.(region).catch(() => ({} as Record<string, boolean>))
       ?? {} as Record<string, boolean>
+  // Claimable benefits per account (issue #79). Read the same two ways as the
+  // check-in column: the first paint uses this process's readings (no request),
+  // the full document pays for two status calls per account. A failed or absent
+  // read leaves the row without a benefit line, which is the same shape as
+  // "nothing to claim" — by design, a benefit line only ever announces that
+  // something IS there.
+  const claimable: Readonly<Record<string, readonly WorkBuddyBenefitView[]>> = fast
+    ? pool.cachedBenefits?.(region) ?? {}
+    : await pool.benefits?.(region).catch(() => ({} as Record<string, readonly WorkBuddyBenefitView[]>))
+      ?? {} as Record<string, readonly WorkBuddyBenefitView[]>
   const rows: readonly {
     account: { id: string, accountName: string }
     member: boolean
@@ -1008,6 +1038,22 @@ async function workBuddyWebPool(
       current: account.id === currentAccountId,
       member,
       ...checkedIn[account.id] === undefined ? {} : { checkedInToday: checkedIn[account.id] as boolean },
+      ...(() => {
+        // Only campaigns that can still be claimed survive this map; a claimed
+        // or lapsed one never reaches the card at all (issue #79). The title is
+        // resolved here so both clients name a campaign identically.
+        const views = claimable[account.id]
+        if (views === undefined || views.length === 0) return {}
+        return {
+          benefits: views.map(view => ({
+            kind: view.kind,
+            title: WORKBUDDY_BENEFIT_TITLES[view.kind],
+            creditNum: view.creditNum,
+            ...view.daysLeft === undefined ? {} : { daysLeft: view.daysLeft },
+            urgent: view.urgent,
+          })),
+        }
+      })(),
     }
   })
 

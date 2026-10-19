@@ -26,6 +26,7 @@ import { createElement as h } from 'react'
 import type { ReactNode } from 'react'
 import {
   WORKBUDDY_GITHUB_URL,
+  WORKBUDDY_PLAN_URL,
   WORKBUDDY_POOL_ACCOUNT_PARAM,
   WORKBUDDY_POOL_PATH,
   withWorkBuddyRegionAndAction,
@@ -1484,6 +1485,37 @@ function renderAccountRow(input: {
           ? null
           : h('span', { className: 'dsm-workbuddy-pool-soon-plain' },
               t('row.poolCreditNearest', { at: formatShortClock(account.nearestExpiryMs) })),
+      // Claimable benefits (issue #79). Rendered ONLY when there is at least one:
+      // a claimed campaign and a lapsed one both arrive here ABSENT, so the line
+      // disappears by itself once nothing is left to take — that absence is the
+      // requested behaviour, not an omission. Nothing here can claim: the plugin
+      // is read-only about benefits, and the tooltip names the page that can.
+      account.benefits === undefined || account.benefits.length === 0
+        ? null
+        : h('span', { className: 'dsm-workbuddy-pool-benefits' },
+            account.benefits.map((benefit, index) => h('span', {
+              key: benefit.kind,
+              className: benefit.urgent
+                ? 'dsm-workbuddy-pool-benefit dsm-workbuddy-pool-benefit-urgent'
+                : 'dsm-workbuddy-pool-benefit',
+              title: t('row.poolBenefitHint', { url: WORKBUDDY_PLAN_URL }),
+            },
+              // Separator BETWEEN entries, so it can never dangle.
+              index === 0 ? null : h('span', { className: 'dsm-workbuddy-pool-prov-sep' }, '·'),
+              // An urgent window counts days; a comfortable one states just the
+              // amount, because "{n} days left" on a long window is noise. A
+              // window ending today says 今天截止 rather than "还剩 0 天".
+              benefit.urgent
+                ? benefit.daysLeft === undefined || benefit.daysLeft === 0
+                  ? t('row.poolBenefitDueToday', { title: benefit.title, count: formatNumber(benefit.creditNum) })
+                  : t('row.poolBenefitUrgent', {
+                      title: benefit.title,
+                      count: formatNumber(benefit.creditNum),
+                      days: formatNumber(benefit.daysLeft),
+                    })
+                : t('row.poolBenefitClaimable', { title: benefit.title, count: formatNumber(benefit.creditNum) }),
+            )),
+          ),
     ),
     // The full upstream text stays on the element as a tooltip even when the
     // line above suppressed it as redundant. Suppressing it inline must not mean

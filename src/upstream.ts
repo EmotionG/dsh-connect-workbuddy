@@ -188,6 +188,48 @@ export interface WorkBuddyCheckinClaim {
   isStreakDay: boolean
 }
 
+/**
+ * One promotional benefit the account may or may not still be entitled to.
+ *
+ * Read from the billing gateway's OWN status endpoints — the same two the
+ * 「套餐与积分」 page calls before it decides whether to render a claim card
+ * (`/billing/meter/compensation-status`, `/billing/meter/check-gift-claimed`).
+ * Reading them is what makes the card honest: the plugin shows a benefit only
+ * while the gateway itself would still show one.
+ *
+ * The two flags answer DIFFERENT questions and neither can be derived from the
+ * other — this is the single most important fact about this shape, measured on
+ * a real account pool:
+ *
+ *   - `active` is about the WINDOW, not about the reader. An account that has
+ *     already claimed still reports `active: true` (observed: `claimed: true`
+ *     together with `active: true` on a claimed gift), so `active` alone cannot
+ *     mean "claimable".
+ *   - `claimed` is about THIS account, and it survives the window: once the
+ *     campaign lapses the endpoint keeps answering `claimed: false` with
+ *     `active: false` (observed on every international account, whose campaign
+ *     ended months ago).
+ *
+ * Hence a benefit is claimable exactly when {@link active} AND NOT
+ * {@link claimed}. See `benefitOf` in `src/benefits.ts`.
+ */
+export interface WorkBuddyBenefit {
+  /** Which campaign this is; the plugin renders one row per kind. */
+  kind: 'compensation' | 'gift'
+  /** The campaign is inside its window (empty, see: already claimed ≠ inactive). */
+  active: boolean
+  /** This account has already taken it — permanently, even after the window. */
+  claimed: boolean
+  /** Credits on offer, as the gateway states them. */
+  creditNum: number
+  /** Window end, epoch ms. Absent when the gateway sent none it could parse. */
+  endsAtMs?: number
+  /** Window start, epoch ms. Compensation omits it. */
+  startsAtMs?: number
+  /** When this account claimed it, epoch ms. Only meaningful with `claimed`. */
+  claimedAtMs?: number
+}
+
 /** Token refresh answer; fields the upstream omits stay absent. */
 export interface WorkBuddyRefreshOutcome {
   accessToken: string
@@ -1438,6 +1480,80 @@ export class WorkBuddyUpstreamClient {
       ...typeof data['claim_button_text'] === 'string' && data['claim_button_text'] !== ''
         ? { claimButtonText: data['claim_button_text'] }
         : {},
+    }
+  }
+
+  /**
+   * Read every promotional benefit this account can still see, WITHOUT claiming
+   * anything.
+   *
+   * The campaign list is closed and small on purpose: the gateway exposes one
+   * status endpoint per campaign, so "discover benefits" is a fixed fan-out, not
+   * a search. A new campaign type means a new `/billing/meter/*-status` endpoint
+   * added here — the plugin never guesses at undocumented ones.
+   *
+   * Every endpoint is read in parallel because they are independent, and a
+   * failure is per-endpoint: one campaign answering 5xx must not blank out the
+   * other. The caller gets only what was actually read.
+   *
+   * Note the paths carry NO `/v2` prefix — these are not the `/v2/billing/meter`
+   * family the credit and check-in calls use. Probing `/v2/...` answers 404, which
+   * is how this distinction was found.
+   */
+  async fetchBenefits(credential: WorkBuddyCredential): Promise<readonly WorkBuddyBenefit[]> {
+    const read = async (
+      kind: WorkBuddyBenefit['kind'],
+      path: string,
+    ): Promise<WorkBuddyBenefit | undefined> => {
+      try {
+        return await this.readBenefitStatus(kind, credential, path)
+      } catch {
+        return undefined
+      }
+    }
+    const [compensation, gift] = await Promise.all([
+      read('compensation', '/billing/meter/compensation-status'),
+      read('gift', '/billing/meter/check-gift-claimed'),
+    ])
+    return [compensation, gift].filter((benefit): benefit is WorkBuddyBenefit => benefit !== undefined)
+  }
+
+  /** One benefit status endpoint. Throws on anything that is not a clean `code: 0`. */
+  private async readBenefitStatus(
+    kind: WorkBuddyBenefit['kind'],
+    credential: WorkBuddyCredential,
+    path: string,
+  ): Promise<WorkBuddyBenefit> {
+    const response = await fetch(`${billingBase(credential)}${path}`, {
+      method: 'POST',
+      headers: billingHeaders(credential),
+      body: '{}',
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    const numberField = (key: string): number => typeof data[key] === 'number' ? data[key] as number : 0
+    /** The gateway states times as `YYYY-MM-DD HH:MM:SS` in local time. */
+    const timeField = (key: string): number | undefined => {
+      const raw = data[key]
+      if (typeof raw !== 'string' || raw.trim() === '') return undefined
+      const parsed = Date.parse(raw.replace(' ', 'T'))
+      return Number.isNaN(parsed) ? undefined : parsed
+    }
+    const endsAtMs = timeField('end_time')
+    const startsAtMs = timeField('start_time')
+    const claimedAtMs = timeField('claimed_at')
+    return {
+      kind,
+      active: data['active'] === true,
+      claimed: data['claimed'] === true,
+      creditNum: numberField('credit_num'),
+      ...endsAtMs === undefined ? {} : { endsAtMs },
+      ...startsAtMs === undefined ? {} : { startsAtMs },
+      ...claimedAtMs === undefined ? {} : { claimedAtMs },
     }
   }
 

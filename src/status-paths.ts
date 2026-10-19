@@ -35,6 +35,15 @@ export const WORKBUDDY_ACCOUNT_CREDITS_PATH = '/plugins/dsh-connect-workbuddy/ac
  * costs nothing on the Host side either.
  */
 export const WORKBUDDY_GITHUB_URL = 'https://github.com/dingminhua/dsh-connect-workbuddy'
+/**
+ * The page where a human claims a benefit: 「套餐与积分」.
+ *
+ * Named here rather than inline in the card because the benefit line is a POINTER,
+ * not an action (issue #79 asks for discovery only): the plugin never claims, so
+ * the best it can do is say where claiming happens. One constant keeps that claim
+ * honest if the page moves.
+ */
+export const WORKBUDDY_PLAN_URL = 'https://www.workbuddy.cn/profile/plans-usage'
 /** Plugin-owned live model refresh endpoint. */
 export const WORKBUDDY_MODELS_REFRESH_PATH = '/plugins/dsh-connect-workbuddy/models/refresh'
 /** Plugin-owned local account rescan endpoint. */
@@ -892,6 +901,25 @@ export type WorkBuddyWebPoolExclusion =
   | 'unavailable'
   | 'failed'
 
+/** One claimable benefit, as the card renders it (issue #79). */
+export interface WorkBuddyWebBenefit {
+  /** Which campaign: compensation (crash补偿) or gift (新人首月赠送). */
+  kind: 'compensation' | 'gift'
+  /** Display name for the campaign, resolved Host-side so both clients agree. */
+  title: string
+  /** Credits on offer. */
+  creditNum: number
+  /**
+   * Whole days until the window closes, floored at 0.
+   *
+   * ABSENT when the gateway stated no end time — the card must then omit the
+   * countdown rather than print a number nobody knows.
+   */
+  daysLeft?: number
+  /** True when the window closes within 3 days, so the card can say 即将到期. */
+  urgent: boolean
+}
+
 /**
  * One account's row in the pool, as the card renders it.
  *
@@ -968,6 +996,16 @@ export interface WorkBuddyWebPoolAccount {
    * result the user just watched succeed.
    */
   checkedInToday?: boolean
+  /**
+   * Promotional benefits this account can STILL claim (issue #79).
+   *
+   * Never carries a claimed or lapsed campaign: the issue's rule is that those
+   * do not appear at all, so their absence here IS the "hide it" instruction.
+   * ABSENT means not read (or nothing claimable), and the card renders no line
+   * either way — a benefit line is only ever added to say "there is something
+   * here for you", never to announce its own absence.
+   */
+  benefits?: readonly WorkBuddyWebBenefit[]
   /**
    * The model a TEST of this row would use (issue #61).
    *

@@ -34,6 +34,7 @@ import { workbuddyAccountId, WorkBuddyCredentialStore, type WorkBuddyCredential 
 import { deriveCatalog, fallbackModelsFor, WorkBuddyCatalog } from './catalog.ts'
 import type { WorkBuddyContextBudget, WorkBuddyModelInfo } from './catalog.ts'
 import { createAccountUsabilityProbe } from './credential-recovery.ts'
+import { BENEFIT_CACHE_MS, claimableBenefits, type WorkBuddyBenefitView } from './benefits.ts'
 import {
   createWorkBuddyAdapter,
   regionOfProvider,
@@ -767,6 +768,22 @@ export function apply(ctx: Context, config: Config): void {
     Record<WorkBuddyRegion, Record<string, { checkedIn: boolean, atMs: number }>>
   > = {}
 
+  /**
+   * Per-region, per-account benefit readings (issue #79).
+   *
+   * Same shape and same reasoning as `checkinStateCache`: claim state changes
+   * when a human acts on the web page or in the desktop app, not spontaneously,
+   * so a per-poll read of two endpoints per account would be thousands of
+   * requests a day to learn nothing. Coarser than the check-in TTL because a
+   * benefit window is measured in days, not hours.
+   */
+  const benefitStateCache: Partial<
+    Record<WorkBuddyRegion, Record<string, {
+      views: readonly WorkBuddyBenefitView[]
+      atMs: number
+    }>>
+  > = {}
+
 
   // The namespace the host actually serves (see `settingsNamespaceOf`). On
   // 0.1.7 this is the Loader entry id, and the harness looks it up by EXACT
@@ -1277,6 +1294,61 @@ export function apply(ctx: Context, config: Config): void {
         for (const [accountId, entry] of Object.entries(state)) {
           if (now - entry.atMs >= CHECKIN_CACHE_MS) continue
           cached[accountId] = entry.checkedIn
+        }
+        return cached
+      },
+      /**
+       * Claimable promotional benefits per account (issue #79).
+       *
+       * Only campaigns the account can STILL claim are returned — a claimed or
+       * lapsed one is absent, which is what the issue asked for. Absent means
+       * the card shows no benefit line at all.
+       *
+       * Two status reads per account, so it is cached for `BENEFIT_CACHE_MS` and
+       * skipped entirely when the pool is off (same reasoning as
+       * `checkedInToday`: no table, no request).
+       */
+      async benefits(region) {
+        if (!poolPreferencesOf(current(), region).enabled) return {}
+        const store = stacks[region].store
+        const accounts = await store.accounts()
+        const now = Date.now()
+        const entries = await Promise.all(accounts.map(async account => {
+          const cached = benefitStateCache[region]?.[account.id]
+          if (cached !== undefined && now - cached.atMs < BENEFIT_CACHE_MS) {
+            return [account.id, cached.views] as const
+          }
+          const credential = await store.credentialFor(account.id).catch(() => undefined)
+          if (credential === undefined) return undefined
+          const read = await client.fetchBenefits(credential).catch(() => undefined)
+          // A failed read is UNKNOWN, not "no benefits": caching an empty answer
+          // would make one bad request look like a fully-claimed pool for half
+          // an hour.
+          if (read === undefined) return undefined
+          const views = claimableBenefits(read, now)
+          benefitStateCache[region] = {
+            ...benefitStateCache[region],
+            [account.id]: { views, atMs: now },
+          }
+          return [account.id, views] as const
+        }))
+        return Object.fromEntries(entries.filter(entry => entry !== undefined))
+      },
+      /**
+       * Claimable benefits from the readings already taken this process.
+       *
+       * The first-paint counterpart of `benefits`, mirroring
+       * `cachedCheckedInToday`: no request, so painting never blocks on two
+       * calls per account. An unmeasured account is absent, not empty.
+       */
+      cachedBenefits(region) {
+        if (!poolPreferencesOf(current(), region).enabled) return {}
+        const now = Date.now()
+        const state = benefitStateCache[region] ?? {}
+        const cached: Record<string, readonly WorkBuddyBenefitView[]> = {}
+        for (const [accountId, entry] of Object.entries(state)) {
+          if (now - entry.atMs >= BENEFIT_CACHE_MS) continue
+          cached[accountId] = entry.views
         }
         return cached
       },
