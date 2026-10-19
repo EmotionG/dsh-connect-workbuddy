@@ -456,6 +456,41 @@ export interface UpstreamErrorDetail {
   requestId?: string
   /** Best human-facing message: `displayMsg.zh`, falling back to `.en`, then `msg`. */
   displayMsg?: string
+  /**
+   * What the upstream says to DO about it: `displayTips.zh`, falling back to
+   * `.en` (issue #78).
+   *
+   * Kept separate from {@link displayMsg} because the two answer different
+   * questions and both are needed: `displayMsg` names what was rejected
+   * ("模型无法处理此请求"), while `displayTips` names the REMEDY ("请新建任务、换个
+   * 模型或稍后重试"). The generic failure path used to discard it and render the
+   * raw body instead, whose first 400 characters are the `code`/`requestId`/
+   * `extError` skeleton — so the one actionable sentence was always cut off, and
+   * a plain parameter rejection read like an empty account pool.
+   *
+   * Recorded as data rather than folded into `displayMsg` so a caller that wants
+   * to tell the user what to change can do so without the "what went wrong"
+   * clause losing its own meaning.
+   */
+  tips?: string
+}
+
+/**
+ * Read one of the upstream's localized fields, in either shape it ships: a plain
+ * string, or a `{ zh, en }` object.
+ *
+ * One reader for every such field on purpose. `displayMsg` and `displayTips`
+ * arrive in the same two shapes from the same envelope, so parsing them with two
+ * separate hand-rolled branches is how one of them ends up only handling the
+ * object form (which is exactly what happened to `displayTips`: it was never
+ * read at all, issue #78).
+ */
+function localizedText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (typeof value !== 'object' || value === null) return undefined
+  const localized = value as Record<string, unknown>
+  const pick = localized.zh ?? localized.en
+  return typeof pick === 'string' ? pick : undefined
 }
 
 /**
@@ -471,20 +506,18 @@ export function parseUpstreamErrorDetail(body: string): UpstreamErrorDetail | un
   }
   if (typeof parsed !== 'object' || parsed === null) return undefined
   const raw = parsed as Record<string, unknown>
-  let displayMsg: string | undefined
-  const display = raw.displayMsg
-  if (typeof display === 'string') {
-    displayMsg = display
-  } else if (typeof display === 'object' && display !== null) {
-    const localized = display as Record<string, unknown>
-    const pick = localized.zh ?? localized.en
-    if (typeof pick === 'string') displayMsg = pick
-  }
-  if (displayMsg === undefined && typeof raw.msg === 'string') displayMsg = raw.msg
+  // `msg` is the fallback only when `displayMsg` is absent: it is the raw
+  // machine sentence ("the request parameters were rejected by the model
+  // provider"), which is worse prose than `displayMsg` but far better than the
+  // JSON skeleton the generic path used to print.
+  const displayMsg = localizedText(raw.displayMsg)
+    ?? (typeof raw.msg === 'string' ? raw.msg : undefined)
+  const tips = localizedText(raw.displayTips)
   const detail: UpstreamErrorDetail = {}
   if (typeof raw.code === 'number') detail.upstreamCode = raw.code
   if (typeof raw.requestId === 'string') detail.requestId = raw.requestId
   if (displayMsg !== undefined) detail.displayMsg = displayMsg
+  if (tips !== undefined) detail.tips = tips
   return detail
 }
 

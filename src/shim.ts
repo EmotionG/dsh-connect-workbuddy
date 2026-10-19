@@ -938,9 +938,51 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
       return '模型不可用'
     case 'server':
       return '上游异常'
+    // A request the upstream rejected on its PARAMETERS (issue #78). Deliberately
+    // NOT "不可用": the plugin never fails over for this kind, so saying only
+    // "unavailable" leaves the reader to guess whether an account or the network
+    // is at fault. Neither is — the same body will be refused by every account.
+    case 'client':
+      return '请求被上游拒绝'
     default:
-      return `不可用（http ${failure.status}）`
+      // No status code here. The caller already renders `（http N）` for every
+      // failure, so embedding it again produced "（http 400）（http 400）" — the
+      // duplicate made the one piece of information the reader could search for
+      // look like a glitch (issue #78).
+      return '不可用'
   }
+}
+
+/**
+ * One upstream sentence, made safe to paste into a single-line error message.
+ *
+ * `result.message` carries the WHOLE upstream body — for a classified failure
+ * that is a JSON envelope 637–777 characters long whose first 400 characters are
+ * the `code`/`requestId`/`extError` skeleton (`param: ""`, `Request: null`). A
+ * plain `slice(0, 400)` therefore cut the one actionable sentence in half: the
+ * reply ended mid-word at `Pleas` and the reader lost `displayTips` entirely
+ * (issue #78).
+ *
+ * Two rules keep that from happening again:
+ * - whitespace collapses to single spaces, because the body is JSON/HTML and its
+ *   newlines would otherwise render as a ragged block inside one paragraph;
+ * - the cut prefers a sentence boundary once one exists past the halfway point,
+ *   so a clipped sentence reads as "truncated" instead of as broken prose, and
+ *   the `…` always says the text continues.
+ *
+ * This is the LAST resort: a body that parsed into a `detail` with `displayMsg`
+ * or `tips` never reaches it, and those are short by construction.
+ */
+function clippedUpstreamText(text: string, limit: number): string {
+  const collapsed = text.replace(/\s+/gu, ' ').trim()
+  if (collapsed.length <= limit) return collapsed
+  const cut = collapsed.slice(0, limit)
+  const stop = Math.max(
+    cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'),
+    cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '),
+  )
+  if (stop >= Math.floor(limit / 2)) return `${cut.slice(0, stop + 1).trimEnd()}…`
+  return `${cut.trimEnd()}…`
 }
 
 /**
@@ -1482,16 +1524,24 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       const attempts = triedAccountIds.length
       const note = attempts > 1 ? `（已尝试 ${attempts} 个账号）` : ''
       // WHY THERE WAS NOWHERE ELSE TO GO. Asked only when the request actually
-      // failed, so the success path never pays for it, and only when the pool
-      // was even in play (a shortfall callback implies a configured pool).
+      // failed, so the success path never pays for it, and only when a POOL
+      // SEARCH really ran — which is a different question from whether the host
+      // wired the callback (issue #78).
+      //
+      // The old test was the callback's mere presence, so every host got "池中
+      // 没有其他可用账号" on every generic failure, including a plain 400 that
+      // `isFailoverWorthy` excludes: the shim had not asked the pool anything,
+      // yet the reply described the pool's answer as "nowhere left". Asking also
+      // costs the pool a ranking pass, so a search that cannot have happened must
+      // not trigger one.
       //
       // A rejected callback must not replace the real upstream failure with a
       // bookkeeping one, so a throw degrades to "no explanation" — the reply the
       // user gets is then exactly the one this option was added to improve, not
       // a worse one.
-      const shortfall = failoverShortfall === undefined
-        ? undefined
-        : await failoverShortfall().catch(() => undefined)
+      const poolSearched =
+        failoverShortfall !== undefined && failoverAccount !== undefined && isFailoverWorthy(result.kind)
+      const shortfall = poolSearched ? await failoverShortfall().catch(() => undefined) : undefined
       const why = shortfall === undefined ? '' : `：${shortfall}`
       if (result.kind === 'policy_reject') {
         // A content-policy refusal is the one upstream failure whose own words
@@ -1506,7 +1556,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         // one it knows. Under 403 it already falls outside the retry set, so the
         // request is neither retried in place nor reported as an auth failure.
         const detail = result.detail
-        const lead = detail?.displayMsg ?? result.message.slice(0, 200)
+        // Same LAST-resort clipping as the generic path: a body that parsed
+        // never reaches it, and one that did not must not end mid-word.
+        const lead = detail?.displayMsg ?? clippedUpstreamText(result.message, 200)
         const meta = ['服务端策略拒绝']
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
@@ -1527,7 +1579,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         // this failure: every account shares the model, so a retry elsewhere
         // would spend a request to be told the same thing (issue #56).
         const detail = result.detail
-        const lead = detail?.displayMsg ?? result.message.slice(0, 200)
+        // Same LAST-resort clipping as the generic path: a body that parsed
+        // never reaches it, and one that did not must not end mid-word.
+        const lead = detail?.displayMsg ?? clippedUpstreamText(result.message, 200)
         const meta = ['模型当前负载较高']
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
@@ -1546,15 +1600,43 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // action should be the one the search could not take for them. Saying only
       // "the request failed" left them to guess between four remedies, three of
       // which the plugin had already ruled out.
+      //
+      // The BODY of the sentence is now the upstream's own advice, in this order
+      // of preference (issue #78):
+      //   1. `detail.tips` — what to do about it ("请新建任务、换个模型或稍后重试");
+      //   2. `detail.displayMsg` — what was rejected, when no tips came;
+      //   3. the raw body, clipped — only for a body that did not parse.
+      // The old code spliced `message.slice(0, 400)` unconditionally, which for a
+      // JSON envelope is the code/requestId/extError skeleton: the actionable
+      // sentence always fell past the cut and the reply stopped mid-word.
+      //
+      // `code`/`requestId` survive as a compact parenthetical: they are exactly
+      // what support asks for, and they used to be reachable only by reading the
+      // chopped-up JSON.
+      const detail = result.detail
+      const meta: string[] = []
+      if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
+      if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
+      const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
+      const receipt = detail?.tips ?? detail?.displayMsg ?? clippedUpstreamText(result.message, 400)
+      // A `client` failure is the one class the pool never searched (issue #78),
+      // so the advice must not imply an account problem at all: the same request
+      // is refused by every account, and the fix is in the request or the model.
+      // The pool sentence is emitted only when a search really produced a verdict.
+      const advice = result.kind === 'client'
+        ? '该请求被上游按参数拒绝：与网络、账号、额度都无关，换账号也不会改变结果，请按上面的提示调整后重试'
+        : shortfall === undefined
+          ? ''
+          : '建议换一个模型继续，或稍后等待该账号的额度恢复'
+      // `displayTips` and most `msg` bodies already end in a full stop, so gluing
+      // an advice sentence on would read "。。" — the upstream's sentence is left
+      // exactly as it arrived, minus that final stop, and the join supplies one.
+      const body = advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],
         result.kind,
-        `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${why}。` +
-        `${result.message.slice(0, 400)}` +
-        (failoverShortfall === undefined
-          ? ''
-          : '。池中没有其他可用账号，建议换一个模型继续，或稍后等待该账号的额度恢复'),
+        `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${why}${stamp}。${body}`,
         hostErrorCode(result.kind),
       )
       return

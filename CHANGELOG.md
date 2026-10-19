@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.9.4 (2026-10-19)
+
+> 版本号是 **patch**：只改**错误文案的取材方式**，发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变（换号规则的变化只有一处「不再多问一次」的减少，见下）。但它修的是一个**会把人送去查错地方**的故障——一个普通的 400 被渲染成「账号池空了」，而上游唯一那句可执行建议被截断丢掉。
+
+### Fixes
+
+- **issue #78：400/11133 被渲染成「池中其余账号本次请求都已尝试过」，且 `displayTips` 被 400 字截断丢弃**
+  - **原来错在哪**：三个缺陷叠在同一行错误里。
+    1. **描述了一次从未发生的账号遍历**。`isFailoverWorthy()` 明确排除 `client`（同一个请求体换哪个账号都是 400），换号循环因此一次都没跑；但通用分支判断「要不要问池子要解释」用的条件是**回调是否存在**，而真实宿主两个回调都给了。于是 `explainPoolShortfall()` 被问了一次，它看到池里每个成员都健康（400 不记账号故障）、`excluded.length === 0`，命中那条分支返回「池中其余账号本次请求都已尝试过」——**池子其实没被问过任何候选**。句中再加上尾部固定的「池中没有其他可用账号」，整句读起来就是「账号用完了/额度耗尽了」，而真实原因是请求参数。
+    2. **`displayTips` 从未被解析**。`parseUpstreamErrorDetail()` 只取 `code`/`requestId`/`displayMsg`；通用分支把 `result.message.slice(0, 400)` 直接拼进用户可见文本，而这类报文 637–777 字符，前 400 字符全是 `code`/`requestId`/`extError` 的骨架（`param: ""`、`Request: null`），那句「请新建任务、换个模型或稍后重试」必然落在截断之外。报告者看到的回复停在 `Pleas` 中间。
+    3. **状态码印两次**。`failoverReasonText()` 的 `default` 回「不可用（http 400）」，而调用方自己又拼了一次「（http 400）」。
+  - **为什么测试没抓住**：既有测试全都用**不带 `displayTips`** 的报文（#56 的 14003、#51 的策略拒绝），所以「可执行建议被截断」这件事在夹具里根本不存在；而「问了没问池子」只被间接覆盖——`shortfall` 回调存在的用例恰好都是有换号的用例，于是「有没有问」和「该不该问」在测试里始终是同一个问题。状态码重复更无从断言：**没有任何测试读过用户看到的那一行**，只断言过 `detail` 字段本身。
+  - **现在的形状**：
+    - `UpstreamErrorDetail` 增加 `tips?: string`，`parseUpstreamErrorDetail()` 用同一个 `localizedText()` 读 `displayTips` 与 `displayMsg`（字符串与 `{ zh, en }` 两种形态都接受）。两个字段分开存：`displayMsg` 说「错在哪」，`displayTips` 说「该怎么办」——合并会让其中一个失去自己的意思。
+    - 通用分支的正文改成 `detail.tips ?? detail.displayMsg ?? clippedUpstreamText(message, 400)`，`code`/`requestId` 收进紧凑后缀「（code 11133，requestId 33221fe5-…）」（support 要的就是这两个，此前只能从被切碎的 JSON 里自己找）。`clippedUpstreamText()` 压平空白、超长时优先在句末断开并补 `…`——它**只**接住解析不出来的报文（非 JSON 网关页），有 `detail` 的报文永远走不到它。
+    - `failoverReasonText()` 增加 `case 'client': return '请求被上游拒绝'`，`default` 改为 `'不可用'`（不再自带状态码）。另两个分支（`policy_reject` / `model_busy`）里同样的 `slice(0, 200)` 也换成 `clippedUpstreamText()`，形状统一。
+    - **问池子的条件改为「真的搜过」**：`failoverShortfall !== undefined && failoverAccount !== undefined && isFailoverWorthy(result.kind)`。`client` 与 `model_busy` 两类不再触发那次排序（它们本来就不换号，问出来的答案必然是假的）；`client` 另给一句正确的建议——「该请求被上游按参数拒绝：与网络、账号、额度都无关，换账号也不会改变结果」。
+  - **同一份报文现在渲染为**（177 字符，原来是 490）：
+    ```
+    workbuddy 上游失败：请求被上游拒绝（http 400）（code 11133，requestId 33221fe5-f6d5-4ea1-8882-669411e07a5b）。这次对话的内容这个模型不接受，与网络无关。请新建任务、换个模型或稍后重试。该请求被上游按参数拒绝：与网络、账号、额度都无关，换账号也不会改变结果，请按上面的提示调整后重试
+    ```
+  - **测试**：新增 `tests/upstream-error-copy.spec.ts`（12 例）。它**不测 helper 而测渲染出来的那句话**——helper 只值它换来的用户可见结果，且 `detail` 由真实的 `parseUpstreamErrorDetail()` 产出，所以解析与渲染是一起被覆盖的（手搓 `detail` 的夹具可以在解析坏掉时仍然是绿的）。用例含：报告者那份 11133 报文逐字节渲染出上游建议、`message` 里**没有** `extError`/`"requestId"` 等骨架、长度 < 300、`（http 400）` 恰好出现**一次**（数出来的，因为「含有 http 400」对坏文案也成立）、`client` 失败时 shortfall 回调**调用次数为 0**且不出现两句池子术语、429 这类**会**换号的失败仍然既问池子又打印池子的结论并保留上游的重置时间、超长非 JSON 页补 `…` 且长度有界、短的非 JSON 页原样显示且不加 `…`、以及 `policy_reject`/`model_busy` 两个分支的文案不回归。删掉 `tips` 的解析、或把「问池子」的条件改回看回调是否存在，这组里都有用例会失败——已实测确认判别力。
+  - **刻意没做的**：没有改 `explainPoolShortfall()` 本身（它那句「池中其余账号本次请求都已尝试过」在**真的**搜过池子之后是诚实的，问题在于以前没搜过也会被问）；没有把 `triedAccountIds` 传进 shortfall 回调（`tests/pool-e2e.spec.ts` 有源码文本守卫固定 `explainPoolShortfall(region)` 这个调用形状，且现有签名「不从 shim 接收参数」是 `src/index.ts:837-844` 写明的设计）；没有改 400 的换号策略本身——它本来就是对的，错的是文案在描述一次没发生的换号。
+
 ## 4.9.3 (2026-10-19)
 
 > 版本号是 **patch**：新增一个**可选**的查询参数（`detail=fast`）和一条**只读**的本地取数路径；不带参数的老请求逐字节不变，发往上游的请求体、路由 id、模型 id、凭据与配置项一律未改。但**它修的是一个用户可见的等待**——打开设置页后要等半分钟到一分钟才出现账号列表。
