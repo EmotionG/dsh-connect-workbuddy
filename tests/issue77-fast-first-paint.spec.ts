@@ -136,6 +136,8 @@ function deps(store: StoreSpies, pool: PoolSpies): WorkBuddyStatusRouteOptions {
       fetchCredits: vi.fn(async () => ({ total: 500, packages: [], expiringSoon: 0 })),
       fetchCheckinStatus: vi.fn(async () => ({ active: true, todayCheckedIn: true }) as never),
       claimDailyCheckin: vi.fn(async () => ({ credit: 0, streakDays: 0, isStreakDay: false })),
+      fetchBenefits: vi.fn(async () => []),
+      claimBenefit: vi.fn(async () => undefined),
     },
     displayModels: () => [],
     enabledModelIds: () => [],

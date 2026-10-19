@@ -230,6 +230,20 @@ export interface WorkBuddyBenefit {
   claimedAtMs?: number
 }
 
+/**
+ * The write half of each campaign: the endpoint that actually grants the
+ * credits.
+ *
+ * Kept beside the status paths because they must move together: the pair is
+ * what the 「套餐与积分」 page itself uses (`xp`/`vp` in its bundle), and a
+ * campaign whose status is read from one path can only be claimed through its
+ * matching claim path. Note the same absence of a `/v2` prefix.
+ */
+const BENEFIT_CLAIM_PATHS: Readonly<Record<WorkBuddyBenefit['kind'], string>> = {
+  compensation: '/billing/meter/claim-compensation',
+  gift: '/billing/meter/claim-gift',
+}
+
 /** Token refresh answer; fields the upstream omits stay absent. */
 export interface WorkBuddyRefreshOutcome {
   accessToken: string
@@ -1555,6 +1569,34 @@ export class WorkBuddyUpstreamClient {
       ...startsAtMs === undefined ? {} : { startsAtMs },
       ...claimedAtMs === undefined ? {} : { claimedAtMs },
     }
+  }
+
+  /**
+   * Claim one benefit campaign on ONE account (issue #79).
+   *
+   * This is a real credit grant on a real account, so it takes no account
+   * argument other than the credential it is handed: the caller decides which
+   * single account, and there is deliberately no batch form of this method. The
+   * browser route is the only caller, and it guards the mutation with the same
+   * POST + loopback checks the check-in route carries.
+   *
+   * The response is not parsed: the documented envelope of these two endpoints
+   * is an empty success, and the caller re-reads the status afterwards. That
+   * re-read, not this answer, is what the user is shown — which is why a claim
+   * that silently did nothing still cannot leave the card saying 待领取.
+   */
+  async claimBenefit(
+    credential: WorkBuddyCredential,
+    kind: WorkBuddyBenefit['kind'],
+  ): Promise<void> {
+    const response = await fetch(`${billingBase(credential)}${BENEFIT_CLAIM_PATHS[kind]}`, {
+      method: 'POST',
+      headers: billingHeaders(credential),
+      body: '{}',
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
   }
 
   /** Claim today's check-in reward. The browser route guards this mutation. */

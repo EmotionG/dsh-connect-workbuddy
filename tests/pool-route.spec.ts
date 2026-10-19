@@ -146,6 +146,8 @@ function deps(pool?: WorkBuddyPoolDeps): WorkBuddyStatusRouteOptions {
       fetchCredits: async () => ({ total: 0, packages: [], expiringSoon: 0 }),
       fetchCheckinStatus: async () => ({ active: true, todayCheckedIn: true }) as never,
       claimDailyCheckin: async () => ({ credit: 0, streakDays: 0, isStreakDay: false }),
+      fetchBenefits: async () => [],
+      claimBenefit: async () => undefined,
     },
     displayModels: () => [],
     enabledModelIds: () => [],
@@ -684,5 +686,149 @@ describe('the check-in column must not lie', () => {
     expect(status()).toBe(200)
     const rows = (body() as { pool?: { accounts?: { checkedInToday?: boolean }[] } }).pool?.accounts ?? []
     expect(rows[0]?.checkedInToday).toBeUndefined()
+  })
+})
+
+/**
+ * The benefit-claim route (issue #79).
+ *
+ * One account per call, and every rule the CARD renders is re-checked here
+ * against a fresh read: a stale card cannot make this route skip its own
+ * guards. These tests exist because the route spends real, non-refundable
+ * credits — it is the only place in the plugin where one HTTP request changes
+ * what the user owns.
+ */
+describe('the benefit claim route', () => {
+  const CLAIM_PATH = '/plugins/dsh-connect-workbuddy/benefit/claim'
+
+  /** Mount only the claim handler, with the given client double. */
+  async function mountClaim(client: Partial<WorkBuddyStatusRouteOptions['client']>): Promise<CapturedEntry['handler']> {
+    const captured: CapturedEntry[] = []
+    const FakeWebServer = {
+      name: 'webServer',
+      inject: [] as const,
+      apply(ctx: Context) {
+        ctx.provide('webServer', {
+          register: (entry: { path: string }) => {
+            captured.push(entry as CapturedEntry)
+            return () => {}
+          },
+        })
+      },
+    }
+    const ctx = new Context()
+    await ctx.plugin(FakeWebServer)
+    registerWorkBuddyStatusRoute(ctx, {
+      ...deps(),
+      client: { ...deps().client, ...client },
+    })
+    await ctx.fiber.dispose()
+    const claim = captured.find(entry => entry.path === CLAIM_PATH)
+    if (claim === undefined) throw new Error('claim route was not registered')
+    return claim.handler
+  }
+
+  const claimable = {
+    kind: 'compensation' as const,
+    active: true,
+    claimed: false,
+    creditNum: 500,
+    endsAtMs: Date.now() + 3 * 86_400_000,
+  }
+  const claimed = { ...claimable, claimed: true }
+  const lapsed = { ...claimable, active: false }
+
+  it('claims one account and answers with the campaign as the gateway reports it AFTER the write', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    // The re-read after the claim reports it taken; the answer must show THAT,
+    // not the pre-claim state the click was based on.
+    let reads = 0
+    const fetchBenefits = vi.fn(async () => {
+      reads += 1
+      return [reads === 1 ? claimable : claimed]
+    })
+    const handler = await mountClaim({ fetchBenefits, claimBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(200)
+    expect(claimBenefit).toHaveBeenCalledTimes(1)
+    expect(claimBenefit).toHaveBeenCalledWith(expect.objectContaining({ uid: 'uid-a' }), 'compensation')
+    expect(out.body()).toMatchObject({ claimed: true, benefit: { kind: 'compensation', claimed: true } })
+  })
+
+  it('refuses an already-claimed campaign without writing', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    const handler = await mountClaim({ fetchBenefits: async () => [claimed], claimBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(409)
+    expect(out.body()).toMatchObject({ error: 'benefit already claimed' })
+    // Never write: the card's own rule is enforced by the route, so a stale
+    // card cannot trigger a pointless call against a live account.
+    expect(claimBenefit).not.toHaveBeenCalled()
+  })
+
+  it('refuses a campaign outside its window without writing', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    const handler = await mountClaim({ fetchBenefits: async () => [lapsed], claimBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(409)
+    expect(out.body()).toMatchObject({ error: 'benefit activity is not active' })
+    expect(claimBenefit).not.toHaveBeenCalled()
+  })
+
+  it('refuses a campaign the account does not have at all', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    const handler = await mountClaim({ fetchBenefits: async () => [], claimBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=gift`), out.res)
+
+    expect(out.status()).toBe(404)
+    expect(claimBenefit).not.toHaveBeenCalled()
+  })
+
+  it('requires an explicit account, so no request can claim a whole pool', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    const handler = await mountClaim({ fetchBenefits: async () => [claimable], claimBenefit })
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(400)
+    expect(out.body()).toMatchObject({ error: 'accountId is required' })
+    expect(claimBenefit).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown campaign kind rather than guessing', async () => {
+    const handler = await mountClaim({})
+    const out = response()
+    await handler(request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=bonus`), out.res)
+
+    expect(out.status()).toBe(400)
+    expect(out.body()).toMatchObject({ error: 'kind must be compensation or gift' })
+  })
+
+  it('is a write route: GET is refused', async () => {
+    const handler = await mountClaim({})
+    const out = response()
+    await handler(request('GET', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`), out.res)
+
+    expect(out.status()).toBe(405)
+  })
+
+  it('rejects a non-loopback origin, like every other write', async () => {
+    const claimBenefit = vi.fn(async () => undefined)
+    const handler = await mountClaim({ fetchBenefits: async () => [claimable], claimBenefit })
+    const out = response()
+    await handler(
+      request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`, 'https://evil.example'),
+      out.res,
+    )
+
+    expect(out.status()).toBe(403)
+    expect(claimBenefit).not.toHaveBeenCalled()
   })
 })

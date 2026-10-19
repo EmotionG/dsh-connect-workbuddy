@@ -96,6 +96,8 @@ function deps(overrides: Partial<WorkBuddyStatusRouteOptions> = {}): WorkBuddySt
         streakBonusCredit: 0,
       }),
       claimDailyCheckin: async () => ({ credit: 100, streakDays: 9, isStreakDay: false }),
+      fetchBenefits: async () => [],
+      claimBenefit: async () => undefined,
     },
     displayModels: () => FALLBACK_WORKBUDDY_MODELS,
     enabledModelIds: () => ['glm-5.3'],
@@ -367,6 +369,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new Error('billing unavailable') },
         fetchCheckinStatus: async () => ({ active: true, todayCheckedIn: false, streakDays: 0, dailyCredit: 100, todayCredit: 0, isStreakDay: false, nextStreakDay: 0, streakBonusDays: 0, streakBonusCredit: 0 }),
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     }), 'cn')
     if (status.status !== 'signed-in') throw new Error('expected signed-in')
@@ -384,6 +388,8 @@ describe('workBuddyWebStatus', () => {
         },
         fetchCheckinStatus: async () => ({ active: true, todayCheckedIn: false, streakDays: 0, dailyCredit: 100, todayCredit: 0, isStreakDay: false, nextStreakDay: 0, streakBonusDays: 0, streakBonusCredit: 0 }),
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     }), 'cn')
     if (status.status !== 'signed-in') throw new Error('expected signed-in')
@@ -399,6 +405,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new WorkBuddyCredentialRejectedError(401) },
         fetchCheckinStatus: async () => { throw new WorkBuddyCredentialRejectedError(401) },
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
       accountUsable: async (_region, account) => {
         probed.push(account.id)
@@ -420,6 +428,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new WorkBuddyCredentialRejectedError(401) },
         fetchCheckinStatus: async () => { throw new WorkBuddyCredentialRejectedError(401) },
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
       accountUsable: async () => false,
     }), 'cn')
@@ -439,6 +449,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new WorkBuddyCredentialRejectedError(403) },
         fetchCheckinStatus: async () => ({ active: true, todayCheckedIn: false, streakDays: 0, dailyCredit: 100, todayCredit: 0, isStreakDay: false, nextStreakDay: 0, streakBonusDays: 0, streakBonusCredit: 0 }),
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     }), 'cn')
     if (status.status !== 'signed-in') throw new Error('expected signed-in')
@@ -454,6 +466,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new Error('workbuddy upstream server (http 503): busy') },
         fetchCheckinStatus: async () => { throw new Error('workbuddy upstream server (http 503): busy') },
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     }), 'cn')
     if (status.status !== 'signed-in') throw new Error('expected signed-in')
@@ -469,6 +483,8 @@ describe('workBuddyWebStatus', () => {
         fetchCredits: async () => { throw new WorkBuddyCredentialRejectedError(401) },
         fetchCheckinStatus: async () => ({ active: true, todayCheckedIn: false, streakDays: 0, dailyCredit: 100, todayCredit: 0, isStreakDay: false, nextStreakDay: 0, streakBonusDays: 0, streakBonusCredit: 0 }),
         claimDailyCheckin: async () => ({ credit: 100, streakDays: 1, isStreakDay: false }),
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
       accountUsable: async () => false,
     }), 'cn')
@@ -550,7 +566,7 @@ describe('registerWorkBuddyStatusRoute', () => {
     return captured
   }
 
-  it('mounts the usage, account, check-in, model, probe, pool, save, oauth, and transfer routes', async () => {
+  it('mounts the usage, account, check-in, benefit, model, probe, pool, save, oauth, and transfer routes', async () => {
     const captured = await mountRoutes()
     expect(captured.map(entry => entry.path)).toEqual([
       '/plugins/dsh-connect-workbuddy/usage',
@@ -559,6 +575,8 @@ describe('registerWorkBuddyStatusRoute', () => {
       '/plugins/dsh-connect-workbuddy/account-credits',
       '/plugins/dsh-connect-workbuddy/accounts/refresh',
       '/plugins/dsh-connect-workbuddy/checkin',
+      // The one claim route (issue #79): POST + loopback, one account per call.
+      '/plugins/dsh-connect-workbuddy/benefit/claim',
       '/plugins/dsh-connect-workbuddy/models/refresh',
       '/plugins/dsh-connect-workbuddy/probe',
       '/plugins/dsh-connect-workbuddy/pool',
@@ -836,6 +854,8 @@ describe('registerWorkBuddyStatusRoute', () => {
         fetchCredits: async () => { throw new Error('unused') },
         fetchCheckinStatus: async () => checkinStatus({ active: false }),
         claimDailyCheckin: async () => { claims.push(1); return { credit: 100, streakDays: 1, isStreakDay: false } },
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     })
     const { res, status, body } = response()
@@ -852,6 +872,8 @@ describe('registerWorkBuddyStatusRoute', () => {
         fetchCredits: async () => { throw new Error('unused') },
         fetchCheckinStatus: async () => checkinStatus({ active: true, todayCheckedIn: true, streakDays: 11 }),
         claimDailyCheckin: async () => { claims.push(1); return { credit: 0, streakDays: 11, isStreakDay: false } },
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     })
     const { res, status, body } = response()
@@ -874,6 +896,8 @@ describe('registerWorkBuddyStatusRoute', () => {
           return checkinStatus({ todayCheckedIn: reads.length > 1, streakDays: reads.length > 1 ? 6 : 5 })
         },
         claimDailyCheckin: async () => { claims.push(1); return { credit: 100, streakDays: 6, isStreakDay: false } },
+        fetchBenefits: async () => [],
+        claimBenefit: async () => undefined,
       },
     })
     const { res, status, body } = response()

@@ -51,7 +51,9 @@ import {
   WORKBUDDY_CHECKIN_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_OAUTH_PATH,
+  WORKBUDDY_BENEFIT_CLAIM_PATH,
   WORKBUDDY_POOL_PATH,
+  WORKBUDDY_POOL_ACCOUNT_PARAM,
   WORKBUDDY_PROBE_PATH,
   WORKBUDDY_TRANSFER_PATH,
   WORKBUDDY_ACCOUNT_CREDITS_PATH,
@@ -89,7 +91,7 @@ export type { WorkBuddyWebUsage }
 export interface WorkBuddyStatusRouteOptions {
   /** The region-scoped credential store backing each region's requests. */
   store(region: WorkBuddyRegion): WorkBuddyCredentialStore
-  client: Pick<WorkBuddyUpstreamClient, 'fetchCredits' | 'fetchCheckinStatus' | 'claimDailyCheckin'>
+  client: Pick<WorkBuddyUpstreamClient, 'fetchCredits' | 'fetchCheckinStatus' | 'claimDailyCheckin' | 'fetchBenefits' | 'claimBenefit'>
   /**
    * The requested region's last-refreshed model directory (unfiltered) for
    * card display. Region-scoped because the CN and international apps expose
@@ -1228,6 +1230,54 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           const claim = await deps.client.claimDailyCheckin(credential)
           const checkin = await deps.client.fetchCheckinStatus(credential)
           json(res, 200, { alreadyCheckedIn: false, claim, checkin })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
+    const disposeBenefitClaim = ctx.webServer.register({
+      kind: 'exact',
+      path: WORKBUDDY_BENEFIT_CLAIM_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        // A credit grant on a real account. Same guards as check-in (write +
+        // loopback), and it requires an explicit account because the click is
+        // always made ROW BY ROW in the card: there is no batch action, so no
+        // request can spend six accounts' entitlements in one call.
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        const region = requestRegion(req, res)
+        if (region === undefined) return
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        const accountId = url.searchParams.get(WORKBUDDY_POOL_ACCOUNT_PARAM)
+        const kind = url.searchParams.get('kind')
+        if (accountId === null || accountId === '') {
+          return json(res, 400, { error: 'accountId is required' })
+        }
+        if (kind !== 'compensation' && kind !== 'gift') {
+          return json(res, 400, { error: 'kind must be compensation or gift' })
+        }
+        try {
+          // Resolve the credential for THIS account, not the signed-in default:
+          // a claim must never be redirected onto whichever account the pool
+          // happens to prefer at that moment.
+          const credential = await deps.store(region).credentialFor(accountId)
+          if (credential === undefined) return json(res, 404, { error: 'no credential for this account' })
+          // Re-read before writing. The status is read first so a stale card
+          // cannot cause a pointless call, and so this route states the same
+          // rule the card renders: claimable means inside the window and not yet
+          // taken. The upstream rejects a second claim, but asking it anyway
+          // makes an already-claimed row look like an upstream fault.
+          const current = await deps.client.fetchBenefits(credential)
+          const target = current.find(benefit => benefit.kind === kind)
+          if (target === undefined) return json(res, 404, { error: 'benefit not available on this account' })
+          if (target.claimed) return json(res, 409, { error: 'benefit already claimed', benefit: target })
+          if (!target.active) return json(res, 409, { error: 'benefit activity is not active', benefit: target })
+          await deps.client.claimBenefit(credential, kind)
+          // Answer with what the gateway says NOW, not with an assumption. The
+          // card repaints from this reading, so a claim that did nothing still
+          // cannot leave a 待领取 line behind.
+          const after = await deps.client.fetchBenefits(credential)
+          json(res, 200, { claimed: true, benefit: after.find(benefit => benefit.kind === kind) ?? target })
         } catch (error: unknown) {
           json(res, 500, { error: safeMessage(error) })
         }

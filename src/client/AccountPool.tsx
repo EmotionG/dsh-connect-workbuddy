@@ -782,7 +782,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
    * things to the person watching ("this account is going away" versus "this
    * account is being measured") — and the veil exists precisely to say which.
    */
-  const [rowBusyAction, setRowBusyAction] = useState<'test' | 'remove' | undefined>(undefined)
+  const [rowBusyAction, setRowBusyAction] = useState<'test' | 'remove' | 'claim' | undefined>(undefined)
 
   /**
    * Test ONE account from its row.
@@ -832,6 +832,66 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       if (mounted.current) {
         setActionError(message)
         appendLog(t('row.poolLogBatchFailed', { message }), 'error')
+      }
+    } finally {
+      if (mounted.current) {
+        setRowBusyAccountId(undefined)
+        setRowBusyAction(undefined)
+      }
+    }
+  }, [appendLog, onRefresh, region, t])
+
+  /**
+   * Claim ONE benefit on ONE account, from its row (issue #79).
+   *
+   * Always a single account and a single campaign: there is no batch entry
+   * point, because a claim spends a real entitlement that cannot be undone. The
+   * row is the unit of consent, so the row is the only way to ask for it.
+   *
+   * The Host re-reads the campaign before AND after the write, so the message
+   * here reports what the gateway says now rather than what was requested. The
+   * refresh afterwards is what actually removes the 待领取 line: the card has no
+   * optimistic update, so a claim that silently did nothing cannot leave a stale
+   * line claiming credits were taken.
+   */
+  const runRowClaim = useCallback(async (
+    accountId: string,
+    accountName: string,
+    kind: 'compensation' | 'gift',
+    title: string,
+    creditNum: number,
+  ): Promise<void> => {
+    const name = accountName === '' ? t('row.accountUnnamed') : accountName
+    setRowBusyAccountId(accountId)
+    setRowBusyAction('claim')
+    setActionError(undefined)
+    const url = withWorkBuddyRegionAndAction(WORKBUDDY_BENEFIT_CLAIM_PATH, region)
+      + '&' + WORKBUDDY_POOL_ACCOUNT_PARAM + '=' + encodeURIComponent(accountId)
+      + '&kind=' + encodeURIComponent(kind)
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+      })
+      const body = await response.json().catch(() => undefined) as
+        | { reason?: string, error?: string }
+        | undefined
+      if (!response.ok) {
+        throw new Error(poolFailureText(t, { status: response.status, reason: body?.reason, error: body?.error }))
+      }
+      if (!mounted.current) return
+      appendLog(t('row.poolLogBenefitClaimed', {
+        accountName: name,
+        title,
+        count: formatNumber(creditNum),
+      }), 'ok')
+      onRefresh?.()
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : t('row.requestFailed')
+      if (mounted.current) {
+        setActionError(message)
+        appendLog(t('row.poolLogBenefitFailed', { accountName: name, message }), 'error')
       }
     } finally {
       if (mounted.current) {
@@ -1198,12 +1258,19 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
               // Per-row actions, right side of the row. One busy flag gates both,
               // so a row's test and another row's removal never interleave.
               busy: rowBusyAccountId !== undefined,
+              rowBusyAction,
               testDisabled: pool.targetModelSource === 'none' || pool.targetModelSource === 'stale',
               targetHint: pool.targetModelSource === 'none'
                 ? t('row.poolTargetNone')
                 : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
               onTest: () => { void runRowTest(account.accountId) },
               onRemove: () => { void runRowRemove(account.accountId, account.accountName) },
+              // Per-campaign claim, passed through as a factory: the button is
+              // rendered only for benefits that are actually claimable, and the
+              // row supplies the campaign so one route serves both kinds.
+              onClaim: (kind, title, creditNum) => {
+                void runRowClaim(account.accountId, account.accountName, kind, title, creditNum)
+              },
               // Manual-sort props (see renderAccountRow): the 1-based rank among
               // members, whether ordering is manual, and whether this row's move
               // arrows are enabled. First member's ↑ and last member's ↓ are
@@ -1320,6 +1387,14 @@ function renderAccountRow(input: {
   onTest: () => void
     /** Forget this account's plugin-stored credential. */
   onRemove: () => void
+  /**
+   * Claim one campaign on THIS account. Rendered per claimable benefit, so the
+   * campaign kind and its wording travel with the click instead of being
+   * re-derived from the row at claim time.
+   */
+  onClaim: (kind: 'compensation' | 'gift', title: string, creditNum: number) => void
+  /** Which per-row action is in flight, so the claim button can name its state. */
+  rowBusyAction: 'test' | 'remove' | 'claim' | undefined
   /** 1-based rank among members; undefined when not a member / not manually ordered. */
   orderIndex: number | undefined
   /** Whether the pool order is user-pinned (vs the credit policy picking it). */
@@ -1334,7 +1409,7 @@ function renderAccountRow(input: {
 }): ReturnType<typeof h> {
   const {
     t, account, checked, canEdit, checkinSupported, onToggle, busy, testDisabled,
-    targetHint, onTest, onRemove, orderIndex, orderIsManual, moveEnabled,
+    targetHint, onTest, onRemove, onClaim, rowBusyAction, orderIndex, orderIsManual, moveEnabled,
     onMoveUp, onMoveDown, moveUpDisabled, moveDownDisabled,
   } = input
   const name = account.accountName === '' ? t('row.accountUnnamed') : account.accountName
@@ -1488,8 +1563,13 @@ function renderAccountRow(input: {
       // Claimable benefits (issue #79). Rendered ONLY when there is at least one:
       // a claimed campaign and a lapsed one both arrive here ABSENT, so the line
       // disappears by itself once nothing is left to take — that absence is the
-      // requested behaviour, not an omission. Nothing here can claim: the plugin
-      // is read-only about benefits, and the tooltip names the page that can.
+      // requested behaviour, not an omission.
+      //
+      // Each entry carries its OWN claim button, because the button is the unit
+      // of consent: one click spends one account's entitlement and nothing else.
+      // A row-wide or pool-wide "claim all" is deliberately absent — the pool can
+      // hold a dozen accounts, and a single click that silently spends all of
+      // them is not a decision this card may make for the user.
       account.benefits === undefined || account.benefits.length === 0
         ? null
         : h('span', { className: 'dsm-workbuddy-pool-benefits' },
@@ -1498,14 +1578,13 @@ function renderAccountRow(input: {
               className: benefit.urgent
                 ? 'dsm-workbuddy-pool-benefit dsm-workbuddy-pool-benefit-urgent'
                 : 'dsm-workbuddy-pool-benefit',
-              title: t('row.poolBenefitHint', { url: WORKBUDDY_PLAN_URL }),
             },
               // Separator BETWEEN entries, so it can never dangle.
               index === 0 ? null : h('span', { className: 'dsm-workbuddy-pool-prov-sep' }, '·'),
               // An urgent window counts days; a comfortable one states just the
               // amount, because "{n} days left" on a long window is noise. A
               // window ending today says 今天截止 rather than "还剩 0 天".
-              benefit.urgent
+              h('span', null, benefit.urgent
                 ? benefit.daysLeft === undefined || benefit.daysLeft === 0
                   ? t('row.poolBenefitDueToday', { title: benefit.title, count: formatNumber(benefit.creditNum) })
                   : t('row.poolBenefitUrgent', {
@@ -1513,7 +1592,18 @@ function renderAccountRow(input: {
                       count: formatNumber(benefit.creditNum),
                       days: formatNumber(benefit.daysLeft),
                     })
-                : t('row.poolBenefitClaimable', { title: benefit.title, count: formatNumber(benefit.creditNum) }),
+                : t('row.poolBenefitClaimable', { title: benefit.title, count: formatNumber(benefit.creditNum) })),
+              h('button', {
+                type: 'button',
+                className: 'dsm-btn dsm-btn-outline dsm-workbuddy-pool-small-btn dsm-workbuddy-pool-benefit-btn',
+                // Gated on ANY row action, not just this row's: a second write
+                // fired while the first is still landing would race the refresh
+                // and could overwrite the reading the first one is waiting for.
+                disabled: busy,
+                title: t('row.poolBenefitHint', { url: WORKBUDDY_PLAN_URL }),
+                'aria-label': t('row.poolBenefitClaimAria', { title: benefit.title, count: formatNumber(benefit.creditNum) }),
+                onClick: () => onClaim(benefit.kind, benefit.title, benefit.creditNum),
+              }, rowBusyAction === 'claim' ? t('row.poolBenefitClaiming') : t('row.poolBenefitClaim')),
             )),
           ),
     ),

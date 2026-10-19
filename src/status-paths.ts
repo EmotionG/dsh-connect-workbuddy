@@ -38,12 +38,20 @@ export const WORKBUDDY_GITHUB_URL = 'https://github.com/dingminhua/dsh-connect-w
 /**
  * The page where a human claims a benefit: 「套餐与积分」.
  *
- * Named here rather than inline in the card because the benefit line is a POINTER,
- * not an action (issue #79 asks for discovery only): the plugin never claims, so
- * the best it can do is say where claiming happens. One constant keeps that claim
- * honest if the page moves.
+ * Named here rather than inline in the card because it is the page the benefit
+ * line points at when the plugin itself declines to claim (an unknown campaign
+ * kind). One constant keeps that pointer honest if the page moves.
  */
 export const WORKBUDDY_PLAN_URL = 'https://www.workbuddy.cn/profile/plans-usage'
+/**
+ * Plugin-owned benefit claim endpoint: POST + loopback, ONE account per call.
+ *
+ * A credit grant is a write on a real account, so it carries the same guards as
+ * check-in, plus `?accountId=` because the pool can hold accounts this plugin
+ * did not pick. There is deliberately no batch action here — see
+ * `claimBenefit` and the route handler.
+ */
+export const WORKBUDDY_BENEFIT_CLAIM_PATH = '/plugins/dsh-connect-workbuddy/benefit/claim'
 /** Plugin-owned live model refresh endpoint. */
 export const WORKBUDDY_MODELS_REFRESH_PATH = '/plugins/dsh-connect-workbuddy/models/refresh'
 /** Plugin-owned local account rescan endpoint. */
