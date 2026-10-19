@@ -21,7 +21,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { WorkBuddyCredentialStore } from './auth.ts'
+import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { isVaultAccountId } from './auth.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { applyContextBudgets } from './catalog.ts'
@@ -38,7 +38,7 @@ import type {
   WorkBuddyPoolCheckinRow,
   WorkBuddyPoolTestRow,
 } from './account-pool-run.ts'
-import { regionOfStatusUrl, transferActionOf } from './status-paths.ts'
+import { fastDetailOf, regionOfStatusUrl, transferActionOf } from './status-paths.ts'
 import type { WorkBuddyCreditPosition } from './status-paths.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import {
@@ -297,6 +297,23 @@ export interface WorkBuddyPoolDeps {
   /** One region's CHECKED accounts, plus their credits and last measurements. */
   members(region: WorkBuddyRegion): Promise<readonly WorkBuddyPoolMember[]>
   /**
+   * One region's CHECKED accounts from LOCAL state only — the first-paint
+   * source (issue #77).
+   *
+   * Cheap by contract in the strongest sense: no upstream read at all. It
+   * returns the saved members with whatever credit reading a previous full
+   * document already recorded (a snapshot, possibly minutes old, possibly
+   * absent), so the card can paint the account table before any billing
+   * endpoint answers. `credits` being absent is normal here and renders as "—",
+   * which is why {@link WorkBuddyWebPoolAccount} makes every figure optional.
+   *
+   * A Host built without it degrades to omitting the pool block from a
+   * first-paint document (rather than paying {@link members} on that path):
+   * the card then paints its account list from the full document, exactly as
+   * before this contract existed.
+   */
+  localMembers?(region: WorkBuddyRegion): Promise<readonly WorkBuddyPoolMember[]>
+  /**
    * The checked accounts that actually RESOLVE to a local sign-in.
    *
    * Cheap by contract (a local scan, no upstream calls), unlike {@link members}
@@ -343,6 +360,16 @@ export interface WorkBuddyPoolDeps {
    * Only the CN region has a check-in to report; see {@link checkinSupported}.
    */
   checkedInToday?(region: WorkBuddyRegion): Promise<Readonly<Record<string, boolean>>>
+  /**
+   * Today's check-in state, from the cells already measured this process.
+   *
+   * The first-paint counterpart of {@link checkedInToday}: reads the Host's
+   * measurement cache and nothing else, so a first paint never waits on one
+   * upstream request per account. An account it has not measured is simply
+   * absent, which the card renders as unknown — the same meaning as a failed
+   * per-account read in the full document.
+   */
+  cachedCheckedInToday?(region: WorkBuddyRegion): Readonly<Record<string, boolean>>
   /**
    * Every local sign-in the pool does NOT cover, so the card can offer them to
    * check in. Absent means the card lists only pool members.
@@ -637,16 +664,90 @@ export async function workBuddyAccountCredits(
 }
 
 /**
+ * How much live measurement a status document carries (issue #77).
+ *
+ * `full` is the original answer: the selected account's credit and check-in
+ * plus every pool account's credit and check-in, all read from upstream now.
+ * It is what the card's 60-second poll, the composer panel and every
+ * measurement-driven control expect.
+ *
+ * `fast` is the FIRST PAINT. It answers from local state only — no token
+ * refresh, no billing endpoint, no check-in endpoint — so the account list can
+ * render in the first round trip and cannot be held up by a slow or
+ * rate-limited upstream. Live figures are absent from it by construction; the
+ * card then asks for the full document and upgrades the same snapshot.
+ */
+export type WorkBuddyStatusDetail = 'full' | 'fast'
+
+/** The live, possibly-slow half of a signed-in document. */
+type WorkBuddyLiveFigures = Pick<
+  Extract<WorkBuddyWebUsage, { status: 'signed-in' }>,
+  'credits' | 'creditsError' | 'checkin' | 'checkinError' | 'credentialRejected' | 'recovery'
+>
+
+/**
+ * Read the selected account's live figures, and classify a refusal.
+ *
+ * Extracted so the first-paint path can omit it as a unit: the two calls here
+ * are the ones that used to gate the account list (each up to the upstream
+ * client's 30-second ceiling, and the pool adds one pair per member on top).
+ */
+async function liveFigures(
+  deps: WorkBuddyStatusRouteOptions,
+  region: WorkBuddyRegion,
+  credential: WorkBuddyCredential,
+  selected: { id: string } | undefined,
+): Promise<WorkBuddyLiveFigures> {
+  const [creditsResult, checkinResult] = await Promise.allSettled([
+    deps.client.fetchCredits(credential),
+    deps.client.fetchCheckinStatus(credential),
+  ])
+  // Both calls carry the SAME credential, so either one reporting a refusal
+  // classifies the credential itself — and the honest advice depends on whether
+  // another local account would work, which is what the recovery pass answers.
+  // It runs only on this failure path, so a healthy account pays nothing.
+  const rejected = [creditsResult, checkinResult].some(
+    result => result.status === 'rejected' && isCredentialRejectedError(result.reason),
+  )
+  const recovery = !rejected ? undefined : await resolveCredentialRecovery({
+    region,
+    store: deps.store(region),
+    ...selected === undefined ? {} : { rejectedAccountId: selected.id },
+    // Without an injected probe nothing can be verified, so no account is
+    // claimed usable — `reloginRequired` then still reports the one case that
+    // needs no probe (there is nothing else to switch to).
+    probe: deps.accountUsable ?? (async () => false),
+  })
+  return {
+    ...creditsResult.status === 'fulfilled'
+      ? { credits: toCredits(creditsResult.value) }
+      : { creditsError: safeMessage(creditsResult.reason) },
+    ...checkinResult.status === 'fulfilled'
+      ? { checkin: checkinResult.value }
+      : { checkinError: safeMessage(checkinResult.reason) },
+    ...!rejected ? {} : { credentialRejected: true },
+    ...recovery === undefined ? {} : { recovery },
+  }
+}
+
+/**
  * Assemble one region's card document. `region` is the tab the card is on;
  * the region-scoped store already answers with only that region's accounts,
  * so the document's model slots and account list are that region's by
  * construction. Sign-in state is read-only; credit is a live billing answer
  * whose failure degrades to `creditsError` rather than failing the document.
+ *
+ * `options.detail` selects the first-paint variant: it uses the credential
+ * already known locally instead of resolving (resolving may refresh a token
+ * over the network) and skips {@link liveFigures} entirely, so nothing about
+ * the account list depends on how fast a billing endpoint answers.
  */
 export async function workBuddyWebStatus(
   deps: WorkBuddyStatusRouteOptions,
   region: WorkBuddyRegion,
+  options: { detail?: WorkBuddyStatusDetail } = {},
 ): Promise<WorkBuddyWebUsage> {
+  const fast = options.detail === 'fast'
   const store = deps.store(region)
   const accounts = await store.accounts()
   // The card is a live view of this same scan, so this is where a sign-in that
@@ -677,7 +778,17 @@ export async function workBuddyWebStatus(
   }
   let credential
   try {
-    credential = await store.resolve()
+    // The first paint reads the credential that is ALREADY known locally.
+    // `resolve()` is the right call for the full document — it makes sure the
+    // tokens handed to the upstream are usable — but it can refresh them over
+    // the network, and no token refresh may decide when the account list
+    // appears. An expired token is fine here: the card only needs identity and
+    // expiry to paint, and the follow-up full document still validates it.
+    credential = fast ? await store.current() : await store.resolve()
+    // With nothing known locally there is nothing to paint either; `resolve()`
+    // then only classifies WHY (it makes no network call without a credential),
+    // so the first paint still gets the same diagnosis as the full document.
+    if (credential === undefined) credential = await store.resolve()
   } catch (error: unknown) {
     // Account selection must remain available even when the selected token is
     // expired or its refresh request fails. Report that as account-level
@@ -725,26 +836,11 @@ export async function workBuddyWebStatus(
     imageModelIds: [...deps.imageModelIds(region)],
     offModelIds: [...deps.offModelIds(region)],
   }
-  const [creditsResult, checkinResult] = await Promise.allSettled([
-    deps.client.fetchCredits(credential),
-    deps.client.fetchCheckinStatus(credential),
-  ])
-  // Both calls carry the SAME credential, so either one reporting a refusal
-  // classifies the credential itself — and the honest advice depends on whether
-  // another local account would work, which is what the recovery pass answers.
-  // It runs only on this failure path, so a healthy account pays nothing.
-  const rejected = [creditsResult, checkinResult].some(
-    result => result.status === 'rejected' && isCredentialRejectedError(result.reason),
-  )
-  const recovery = !rejected ? undefined : await resolveCredentialRecovery({
-    region,
-    store: deps.store(region),
-    ...selected === undefined ? {} : { rejectedAccountId: selected.id },
-    // Without an injected probe nothing can be verified, so no account is
-    // claimed usable — `reloginRequired` then still reports the one case that
-    // needs no probe (there is nothing else to switch to).
-    probe: deps.accountUsable ?? (async () => false),
-  })
+  // The first paint carries no live figures at all: this is the await that used
+  // to make the account list wait on a billing endpoint (issue #77).
+  const figures: WorkBuddyLiveFigures = fast
+    ? {}
+    : await liveFigures(deps, region, credential, selected)
   return {
     status: 'signed-in',
     // The persisted per-region budgets, read straight from the Host config.
@@ -764,30 +860,31 @@ export async function workBuddyWebStatus(
       authFile: volatileFlagOf('authFile'),
     },
     ...account,
-    ...creditsResult.status === 'fulfilled'
-      ? { credits: toCredits(creditsResult.value) }
-      : { creditsError: safeMessage(creditsResult.reason) },
-    ...checkinResult.status === 'fulfilled'
-      ? { checkin: checkinResult.value }
-      : { checkinError: safeMessage(checkinResult.reason) },
-    ...!rejected ? {} : { credentialRejected: true },
-    ...recovery === undefined ? {} : { recovery },
+    ...figures,
     // The pool is assembled last and never allowed to fail the document: it is
     // an enhancement, and a credits read that failed inside it must not take
     // the whole status route down with it (the card would then show nothing at
     // all, including the account picker the user needs to recover).
-    ...await poolSectionOf(deps, region),
+    ...await poolSectionOf(deps, region, fast),
   }
 }
 
-/** The pool block for a status document, or nothing when it cannot be built. */
+/**
+ * The pool block for a status document, or nothing when it cannot be built.
+ *
+ * `fast` asks for the first-paint variant: local state only, no upstream call.
+ * A Host without a local member source then omits the block rather than paying
+ * the full read, so a first-paint document never regresses into the expensive
+ * path this mode exists to avoid.
+ */
 async function poolSectionOf(
   deps: WorkBuddyStatusRouteOptions,
   region: WorkBuddyRegion,
+  fast: boolean,
 ): Promise<{ pool?: WorkBuddyWebPool }> {
   if (deps.pool === undefined) return {}
   try {
-    const pool = await workBuddyWebPool(deps, region)
+    const pool = await workBuddyWebPool(deps, region, fast)
     return pool === undefined ? {} : { pool }
   } catch {
     return {}
@@ -810,11 +907,18 @@ async function poolSectionOf(
 async function workBuddyWebPool(
   deps: WorkBuddyStatusRouteOptions,
   region: WorkBuddyRegion,
+  fast = false,
 ): Promise<WorkBuddyWebPool | undefined> {
   const pool = deps.pool
   if (pool === undefined) return undefined
   const preferences = pool.preferences(region)
-  const members = await pool.members(region)
+  // THE first-paint decision (issue #77): the local source answers with saved
+  // members and whatever credit reading a previous document already recorded,
+  // so the account table never waits on one billing request per account. No
+  // local source means no pool block in a first-paint document — the card then
+  // waits for the full document, which is exactly the pre-#77 behaviour.
+  const members = fast ? await pool.localMembers?.(region) : await pool.members(region)
+  if (members === undefined) return undefined
   const nowMs = Date.now()
   const ranked = rankPool(members, nowMs, preferences.orderAccountIds)
   const catalog = pool.catalog?.(region) ?? []
@@ -830,10 +934,13 @@ async function workBuddyWebPool(
   // read for an account the pool does not cover.
   const others = await pool.otherAccounts?.(region) ?? []
   // Best-effort: a failure here leaves the column UNKNOWN, which is honest,
-  // rather than asserting a state nobody read.
-  const checkedIn: Readonly<Record<string, boolean>> =
-    await pool.checkedInToday?.(region).catch(() => ({} as Record<string, boolean>))
-    ?? {} as Record<string, boolean>
+  // rather than asserting a state nobody read. The first paint reads the
+  // already-measured cells only (no per-account request), so it can report
+  // nothing at all; the full document fills the column in later.
+  const checkedIn: Readonly<Record<string, boolean>> = fast
+    ? pool.cachedCheckedInToday?.(region) ?? {}
+    : await pool.checkedInToday?.(region).catch(() => ({} as Record<string, boolean>))
+      ?? {} as Record<string, boolean>
   const rows: readonly {
     account: { id: string, accountName: string }
     member: boolean
@@ -1002,8 +1109,13 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         }
         const region = requestRegion(req, res)
         if (region === undefined) return
+        // `detail=fast` is the card's first paint (issue #77): local state only,
+        // so the account list appears in one round trip no matter how slowly a
+        // billing endpoint answers. Absent or unrecognized means the full
+        // document, which is what every earlier caller gets.
+        const detail = fastDetailOf(req.url ?? '') ? 'fast' : 'full'
         try {
-          json(res, 200, await workBuddyWebStatus(deps, region))
+          json(res, 200, await workBuddyWebStatus(deps, region, { detail }))
         } catch (error: unknown) {
           json(res, 500, { error: safeMessage(error) })
         }

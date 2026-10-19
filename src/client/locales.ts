@@ -71,6 +71,10 @@ export const en = {
   'row.accountsHint': 'Choose from locally detected sign-ins. Tokens are never shown or saved in DSH settings.',
   'row.accountsRescan': 'Detect accounts again',
   'row.accountsScanning': 'Detecting…',
+  // Shown while the FIRST paint is in flight (issue #77). It replaces the
+  // signed-out guidance, which used to render here and told signed-in users
+  // they were not signed in for as long as the usage route took.
+  'row.accountsLoading': 'Loading your accounts…',
   'row.accountsWriteFailed': 'The account change was not saved: {message} — the active profile\'s configuration file could not be updated (on Windows it may be locked by an antivirus scanner or a sync client). Your previous choice is still in effect; close whatever holds that file and try again (see docs/WINDOWS.md in the plugin repo for the exact path).',
   'row.selectionLostHint': 'The saved account no longer exists locally.',
   'row.selectionLostMessage': 'The account saved for this region is no longer among the local sign-ins (WorkBuddy replaced its login or cleaned up backups). Your other sign-ins are fine — pick a current one from the list above. Signing in again in the desktop app will not fix this.',
@@ -471,6 +475,9 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.accountsHint': '选择本机检测到的登录账号；Token 不会显示，也不会保存到 DSH 设置。',
   'row.accountsRescan': '重新检测账号',
   'row.accountsScanning': '正在检测…',
+  // 首屏加载中的提示（issue #77）。它取代的正是「未登录」那段说明——
+  // 那一段在用量接口返回前一直显示，让已登录的用户以为自己没登录。
+  'row.accountsLoading': '正在加载账号…',
   'row.accountsWriteFailed': '账号改动未保存：{message} —— 当前 profile 的配置文件写入失败（Windows 上可能被杀毒软件或同步盘占用）。当前仍是原来保存的选择，请先关闭占用该文件的程序再重试（文件的确切路径见插件仓库的 docs/WINDOWS.md）。',
   'row.selectionLostHint': '已保存的账号在本机已不存在。',
   'row.selectionLostMessage': '该区域保存的账号已不在本机登录列表中（WorkBuddy 更换了登录或清理了备份文件）。本机其他登录仍然可用——请在上方列表中重新选择一个当前账号。重新登录桌面端 App 无法修复此问题。',

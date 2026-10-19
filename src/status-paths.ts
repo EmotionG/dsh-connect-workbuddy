@@ -240,6 +240,49 @@ export function withWorkBuddyRegion(path: string, region: WorkBuddyWebRegion): s
 }
 
 /**
+ * Query parameter selecting how much of a status document the Host assembles.
+ *
+ * The card's first paint only needs what local state already knows; live
+ * figures (credit, check-in, per-account readings) arrive through the SAME
+ * route once they have been measured. See {@link WORKBUDDY_DETAIL_FAST}.
+ */
+export const WORKBUDDY_DETAIL_PARAM = 'detail'
+
+/**
+ * The `detail` value asking for the first-paint document.
+ *
+ * Absent means the full document, which is what every earlier caller asks for
+ * and what the route keeps answering — the parameter only ever ADDS a cheap
+ * mode, it never changes an existing one.
+ */
+export const WORKBUDDY_DETAIL_FAST = 'fast'
+
+/**
+ * Address one region's status route for its first-paint document.
+ *
+ * The Host answers this from local state only (no upstream read, no token
+ * refresh), so a slow billing endpoint cannot decide when the account list
+ * appears. The card paints it first and then upgrades the same snapshot from
+ * the full document.
+ */
+export function withWorkBuddyRegionFastDetail(path: string, region: WorkBuddyWebRegion): string {
+  return `${withWorkBuddyRegion(path, region)}&${WORKBUDDY_DETAIL_PARAM}=${WORKBUDDY_DETAIL_FAST}`
+}
+
+/**
+ * Whether a status-route URL asks for the first-paint document.
+ *
+ * Only the exact `fast` value is recognized: an unknown or misspelled value
+ * degrades to the full document, which is what every earlier caller already
+ * gets. A typo must never produce an emptier panel than no parameter at all.
+ */
+export function fastDetailOf(url: string): boolean {
+  const at = url.indexOf('?')
+  if (at === -1) return false
+  return new URLSearchParams(url.slice(at + 1)).get(WORKBUDDY_DETAIL_PARAM) === WORKBUDDY_DETAIL_FAST
+}
+
+/**
  * Read the region parameter off a status-route URL. Absent means the domestic
  * tab (`cn`); a present-but-unknown value returns undefined so the route can
  * answer 400 instead of guessing.

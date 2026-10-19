@@ -42,6 +42,7 @@ import {
   WORKBUDDY_USAGE_PATH,
   toPersistedWorkBuddyModel,
   withWorkBuddyRegion,
+  withWorkBuddyRegionFastDetail,
 } from '../status-paths.ts'
 import type {
   WorkBuddyCreditPosition,
@@ -339,15 +340,16 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   /**
    * Last-known usage per region, so tab dots survive tab switches.
    *
-   * The placeholder carries `selectionExplicit: false` because that is the
-   * state the plugin documents as the default before any choice is saved. It
-   * is never rendered: the account picker and its state line only appear once
-   * a real fetch has populated `accounts`.
+   * EMPTY until a real document lands (issue #77). It used to be seeded with a
+   * `signed-out` placeholder, which was then rendered: for as long as the usage
+   * route took to answer — and that wait is exactly what #77 reports — a user
+   * with several signed-in accounts was told they were not signed in, with a
+   * "detect accounts" button as the only way out. An absent region now renders
+   * the loading line instead, and the first paint itself arrives from the
+   * `detail=fast` document (local state only, no upstream call), so the rows
+   * appear before anything billing-side has answered.
    */
-  const [statusByRegion, setStatusByRegion] = useState<Partial<Record<WorkBuddyWebRegion, WorkBuddyWebUsage>>>({
-    cn: { status: 'signed-out', accounts: [], selectionExplicit: false },
-    global: { status: 'signed-out', accounts: [], selectionExplicit: false },
-  })
+  const [statusByRegion, setStatusByRegion] = useState<Partial<Record<WorkBuddyWebRegion, WorkBuddyWebUsage>>>({})
   const [busy, setBusy] = useState(false)
   const [settingsRevision, setSettingsRevision] = useState(0)
   /** Per-region unsaved model edits; a draft on one tab is never dropped by
@@ -494,21 +496,109 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     }
   }, [t])
 
+  /**
+   * FIRST PAINT (issue #77): the same usage document, built from LOCAL state
+   * only — no billing request, no per-account check-in read.
+   *
+   * Why this exists. The card used to paint nothing until ONE monolithic
+   * document landed, and that document's tail awaited an upstream call per
+   * account (credits for every pool member, check-in for every account, plus
+   * the selected account's own two). Each of those has a 30-second timeout and
+   * no retry, so a slow or throttled upstream stacked the waits and the panel
+   * stayed empty for the reported 30–60 seconds — showing a "not signed in"
+   * placeholder the whole time, because that is what an absent document
+   * rendered as.
+   *
+   * The Host answers `detail=fast` from the credential store, the local pool
+   * roster and the measurement caches, so this is one local round trip. It
+   * carries the whole account table (the row list lives in the `pool` block),
+   * which is the part the user came for; credits, check-in and the selected
+   * account's live figures arrive with the full document that follows.
+   *
+   * Deliberately a SEPARATE callback instead of a `detail` argument on
+   * `refreshUsage`: the ordering guard inside that callback is pinned by a
+   * source test that counts its writes and freshness checks, and a second
+   * write path in there would either break the pin or hide a real regression
+   * behind it. Here the rules are simple and independent — this response never
+   * downgrades a region that has already answered in full.
+   */
+  const refreshUsageFast = useCallback(async (
+    region: WorkBuddyWebRegion,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const stale = usageGuard.current.begin(region)
+    try {
+      const response = await fetch(withWorkBuddyRegionFastDetail(WORKBUDDY_USAGE_PATH, region), {
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        ...signal === undefined ? {} : { signal },
+      })
+      if (!response.ok) return
+      const value: unknown = await response.json().catch(() => undefined)
+      const usage = value as WorkBuddyWebUsage | undefined
+      if (usage === undefined) return
+      // Superseded while in flight: a newer request owns this region now.
+      if (stale()) return
+      if (!mounted.current || signal?.aborted === true) return
+      setStatusByRegion(prev => {
+        const previous = prev[region]
+        // A later first paint never REPLACES a region that already answered in
+        // full: the fast document is the poorer one (it deliberately carries no
+        // credits and no live pool figures), so writing it over a complete
+        // snapshot would blank columns that were already on screen. Only a
+        // region with nothing — or with a bare error from an attempt that never
+        // loaded — takes the fast paint.
+        if (previous !== undefined && previous.status === 'signed-in') return prev
+        return { ...prev, [region]: usage }
+      })
+    } catch {
+      // A failed first paint is not an error state: it is simply no paint yet,
+      // and the full document is already on its way. The loading line stays up
+      // until one of them lands.
+    }
+  }, [])
+
   useEffect(() => {
     if (!open) return
     const controller = new AbortController()
-    // BOTH regions, not just the active tab: both switches are always rendered
-    // in the tab bar, and the Host is where `regionOn` reads their state from.
-    // Fetching only the active region left the other switch on the mirror
-    // fallback until its tab was clicked — which is exactly the stale source
-    // this card is trying to stop trusting.
-    for (const region of WORKBUDDY_REGIONS) {
-      void refreshUsage(region, controller.signal)
-    }
+    // The FIRST-PAINT fetch runs before the full one (issue #77), for every
+    // region and in parallel: the account table appears after one local round
+    // trip instead of after the billing reads. The full document is then issued
+    // as before, and because it begins its own generation after the fast one
+    // has landed, the two cannot invalidate each other — the fast answer is
+    // applied while it is still the newest request for that region.
+    void (async () => {
+      await Promise.all(WORKBUDDY_REGIONS.map(async region => {
+        await refreshUsageFast(region, controller.signal)
+      }))
+      // The card was closed (or the tab switched) while the first paint was in
+      // flight: the cleanup aborted this generation, so do not start the
+      // expensive one against a dead signal.
+      if (controller.signal.aborted) return
+      // BOTH regions, not just the active tab: both switches are always rendered
+      // in the tab bar, and the Host is where `regionOn` reads their state from.
+      // Fetching only the active region left the other switch on the mirror
+      // fallback until its tab was clicked — which is exactly the stale source
+      // this card is trying to stop trusting.
+      for (const region of WORKBUDDY_REGIONS) {
+        void refreshUsage(region, controller.signal)
+      }
+    })()
     return () => { controller.abort() }
-  }, [open, activeRegion, refreshUsage])
+  }, [open, activeRegion, refreshUsage, refreshUsageFast])
 
-  const status: WorkBuddyWebUsage = statusByRegion[activeRegion]
+  /**
+   * The document this tab is rendering, or `undefined` before ANY has landed.
+   *
+   * The distinction is the point of issue #77: an absent document used to be
+   * rendered as the `signed-out` placeholder below, so for the whole time the
+   * usage route was out the card told a signed-in user they were not signed in
+   * and offered "detect accounts" as the only remedy. `loading` now gates that
+   * branch, and the placeholder is only a safe shape for the reads below it.
+   */
+  const loaded: WorkBuddyWebUsage | undefined = statusByRegion[activeRegion]
+  const loading = loaded === undefined
+  const status: WorkBuddyWebUsage = loaded
     ?? { status: 'signed-out', accounts: [], selectionExplicit: false }
 
   /**
@@ -1759,7 +1849,17 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                     </section>
                   </>
                 : null}
-              {status.status === 'signed-out'
+              {status.status === 'signed-out' && loading
+                // NOT the signed-out branch: nothing has answered yet. Showing
+                // "not signed in" here was issue #77 — a signed-in user with a
+                // pool full of accounts was told to sign in, for as long as the
+                // usage route took, and the only control on screen detected
+                // accounts they already had. The line below is what a first
+                // paint in flight looks like; the `detail=fast` document
+                // normally replaces it within one local round trip.
+                ? <p className="dsm-workbuddy-usage-text" role="status">{t('row.accountsLoading')}</p>
+                : null}
+              {status.status === 'signed-out' && !loading
                 ? <>
                     <p className="dsm-workbuddy-usage-text">
                       {/* An orphaned saved id is NOT a signed-out machine: the

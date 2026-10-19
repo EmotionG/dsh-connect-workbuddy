@@ -1161,6 +1161,19 @@ export function apply(ctx: Context, config: Config): void {
       preferences: region => poolPreferencesOf(current(), region),
       members: region => poolMembersOf(region),
       /**
+       * The first-paint member list (issue #77): local state only.
+       *
+       * This is `localPoolMembers`, i.e. the SAME list the request path already
+       * consults — saved members, their last credit snapshot (if it is still
+       * fresh), and their last probe result. No upstream call, so the card's
+       * account table can paint before any billing endpoint answers; live
+       * figures arrive with the full document a moment later.
+       *
+       * A member whose credit snapshot has expired simply carries no `credits`,
+       * which the card renders as "—" rather than as zero.
+       */
+      localMembers: region => localPoolMembers(region),
+      /**
        * The checked accounts that resolve to a local sign-in.
        *
        * A local scan only — no upstream calls — so the route's empty-pool guard
@@ -1245,6 +1258,27 @@ export function apply(ctx: Context, config: Config): void {
           return [account.id, status.todayCheckedIn] as const
         }))
         return Object.fromEntries(entries.filter(entry => entry !== undefined))
+      },
+      /**
+       * Today's check-in state from the cells already measured this process.
+       *
+       * The first-paint counterpart (issue #77) of `checkedInToday`: it reads
+       * `checkinStateCache` and nothing else, so painting the table never waits
+       * on one request per account. An unmeasured account is absent, which the
+       * card already renders as unknown rather than as "not checked in".
+       */
+      cachedCheckedInToday(region) {
+        // Same guard as the full read: with the pool off there is no table to
+        // fill, so nothing is reported.
+        if (!poolPreferencesOf(current(), region).enabled) return {}
+        const now = Date.now()
+        const state = checkinStateCache[region] ?? {}
+        const cached: Record<string, boolean> = {}
+        for (const [accountId, entry] of Object.entries(state)) {
+          if (now - entry.atMs >= CHECKIN_CACHE_MS) continue
+          cached[accountId] = entry.checkedIn
+        }
+        return cached
       },
       async currentAccountId(region) {
         // Apply the SAME selection the request path applies, then report what the
