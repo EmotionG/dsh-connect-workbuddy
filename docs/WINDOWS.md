@@ -25,6 +25,9 @@ Windows 在本项目里不是「顺带能跑」的平台，而是**有专属分�
 | 3 | `src/host-heartbeat.ts` `processStartTimeMs()` → `processStartProbe()` | 走 PowerShell `Get-Process` 的 `StartTime`，以 UTC ISO 8601 输出供 `Date.parse` 解析 | PID 复用判定失准 → 心跳误判宿主存活 |
 | 4 | 设置写入回读校验（`src/client/account-selection.ts`） | 写入后**回读校验**：profile 的 `cordis.patch.yml` 被占用会让 rename 覆盖失败，而 `set()` 的 promise 仍 resolve | 用户看到假确认（显示「已清除」但没落盘）→ issue #11 |
 | 5 | 子进程启动选项：`src/host-heartbeat.ts` `PROCESS_PROBE_OPTIONS` 与 `src/at-rest.ts` `fetchAtRestKeyPayload()` | 一律带 `windowsHide: true`（POSIX 忽略该选项） | **宿主本身没有控制台**（Electron GUI 进程，实测 `MainWindowHandle = 0`），Windows 会给子进程**新建一个可见的控制台窗口** → 每次进程存活判定都在屏幕上闪一次黑框 |
+| 6 | `src/at-rest.ts` `readAtRestKey()` → `findWorkbuddyAppExecutableWithSource()` | 字段密钥**不带参数**调用时才走注册表回退（`reg query` × 3 个卸载 hive）；这个探测曾被**只按成功结果**缓存 | 桌面端不在候选目录、凭据又是加密的机器上，`scanAll()` 会**逐文件**重跑整套探测。issue #77 实测：19.1 s 的请求里 15.3 s 花在 `spawnSync`，约 **135 个 `reg query` 子进程**（`findWorkbuddyAppExecutable()` 被调用 45 次）→ 打开页面白等 60 s。POSIX 上这一支根本不跑，**在 macOS 开发机上永远看不到** |
+
+**第 6 条为什么单列**：这是**第 5 条之外的第二个**「只在 Windows 才付费」形态——不是正确性错误，而是**成本随文件数 × 读取次数放大**的性能缺陷，且两个乘数都在 Windows 特有的分支里。`tests/issue77-at-rest-key-cache.spec.ts` 用 `process.platform` 影子 + `execFileSync` 打桩，在**任何宿主**上都能数出这三件事（失败结果被记住、一次探测 3 次 `reg`、5 个加密文件的一轮读取仍是 3 次）。
 
 **第 5 条为什么单列**：它不是路径或逻辑错误，而是**只在「父进程无控制台」时才出现**的一类缺陷——而这恰是 GUI 宿主的常态、终端里的例外。在终端手工跑插件时父进程有控制台，子进程只是继承，**永远看不到这个现象**；它因此逃过了所有本地验证，直到在真机上以「父进程无控制台」的形态复现（§2 A 档）。
 
@@ -118,6 +121,7 @@ WMI 服务（`Win32_Process.Create`）创建的进程与 Electron 宿主同为�
 | 2.1.0（本次） | 宿主内每次进程存活判定都闪一次黑色控制台窗口 | 心跳探测未设 `windowsHide`，而宿主是无控制台的 GUI 进程（§1-5、§2 A 档取证） |
 | 未发布（PR #44） | 「重新检测账号」没能把删掉的账号找回来，而界面什么都不说 | 隐藏名单删除被拒时异常被吞掉（`rm` 的 `force` 不忽略 `EPERM`）——详见下节（B 档） |
 | 未发布（PR #44 追加） | `tests/windows-file-lock.spec.ts` 在真机上恒红，而 CI 恒绿 | **测试自身的清场竞态**（不是产品缺陷）：`kill()` 只投递信号，内核关闭句柄在其后数毫秒，此窗口内 `rm` 必得 `EBUSY`——详见下节 |
+| 4.10.1（issue #77 第二轮） | 打开设置页要等 60 s；CPU profile 里 19.1 s 的请求有 15.3 s 在 `spawnSync`（约 135 个 `reg query`） | 字段密钥的探测**只缓存成功**，且共享扫描窗口从**开始**时刻计窗——两个乘数叠在 `scanAll()` 的逐文件探测上（§1-6）。**根因跨平台**，Windows 只是把重复探测换成了同步子进程，才变成 60 秒 |
 
 ### 「重新检测账号」的静默失败（PR #44，**B 档 CI 实测**）
 
@@ -181,6 +185,7 @@ WMI 服务（`Win32_Process.Create`）创建的进程与 Electron 宿主同为�
 | 可执行文件候选与测试 | `src/at-rest.ts` `workbuddyAppExecutableCandidates()`；`tests/at-rest.spec.ts` |
 | 心跳时间戳与测试 | `src/host-heartbeat.ts` `processStartTimeMs()` / `processStartProbe()`；`tests/host-heartbeat.spec.ts` |
 | 子进程启动选项（`windowsHide`）与测试 | `src/host-heartbeat.ts` `PROCESS_PROBE_OPTIONS`、`src/at-rest.ts` `fetchAtRestKeyPayload()`；`tests/platform-standing.spec.ts`、`tests/host-heartbeat.spec.ts` |
+| 字段密钥探测的缓存与注册表子进程计数 | `src/at-rest.ts` `readAtRestKey()` / `clearAtRestKeyCache()`、`SCAN_SHARE_WINDOW_MS`（`src/auth.ts`）；`tests/issue77-at-rest-key-cache.spec.ts` |
 | 真机文件占用取证与测试自身清场 | `tests/windows-file-lock.spec.ts`（`kill()` 后必须 `await` `exit` 再 `rm`，见 §3 末） |
 | 写入回读校验与测试 | `src/client/account-selection.ts`；`tests/client-account-selection.spec.ts` |
 | 设置隔离（供测试） | `vitest.config.ts`（`LOCALAPPDATA` / `APPDATA` / `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME`） |
