@@ -112,15 +112,21 @@ async function errorTextFromHostClient(shim: WorkBuddyShim): Promise<string> {
     reasoning: true,
     compat: {},
   }
+  // The context is cast for the same reason the model is: this file runs against
+  // BOTH pi-ai generations (0.85 in this checkout, 1.x in CI), and their
+  // context types disagree about the message shape while both accept this one
+  // at run time. Asserting through one generation's type would silently stop
+  // covering the other — and the wire body this test is about is identical.
+  const context = {
+    messages: [{
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: 'hi' }],
+      timestamp: Date.now(),
+    }],
+  }
   const events = stream(
     model as unknown as Parameters<typeof stream>[0],
-    {
-      messages: [{
-        role: 'user' as const,
-        content: [{ type: 'text' as const, text: 'hi' }],
-        timestamp: Date.now(),
-      }],
-    },
+    context as unknown as Parameters<typeof stream>[1],
     { apiKey: shim.token(), maxRetries: 0 },
   )
   for await (const event of events) void event
