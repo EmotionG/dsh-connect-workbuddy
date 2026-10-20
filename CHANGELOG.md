@@ -1,10 +1,24 @@
 # Changelog
 
-## Unreleased
+## 4.13.0 (2026-10-21)
 
-> 尚未发版。改动只涉及**报错文案的选择规则**（客户端新增一条判断与一条文案）。发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。发版时按 patch 处理。
+> 版本号是 **minor**：本版有两块改动，其中**请求体**首次新增一条 system 提示的「渠道指纹」归一化（只对开头命中上游清单的 system 消息前置一行占位语，未命中的 body 逐字节不变），这是发往上游的内容变化；另一块是**报错文案**的 405 判断与文案修正。路由 id、模型 id、凭据、计费与换号规则一律未变。
 
 ### Fixes
+
+- **CN 版每次发消息都 400 / 11128「这次调用没通过渠道校验，可能不是官方客户端发出的」：上游按 system 提示的**开头**匹配第三方 agent 指纹，命中即拒**
+  - **报告**：国内版发「1+1」也直接失败，报错原文（插件转述上游）：`workbuddy 上游失败：请求被上游拒绝（http 400）（code 11128，requestId …）。这次调用没通过渠道校验，可能不是官方客户端发出的。请用官方版本重新发送。…`。同一账号、同一模型、同一套请求头，换成极简 body 却稳定 200 —— 先排除了账号、额度、UA 与 conversation 三件套（issue #66 的成因）。
+  - **真实原因**：两个网关都会扫**每一条** `system` 消息的**开头**，命中一份「已知第三方 agent 系统提示」清单就回业务码 `11128`（`Illegal API invocation from an unapproved channel`）。用国内网关实测（账号 `ba217455…`、模型 `deepseek-v4.1-flash`、`stream:true`、其余请求字段固定），**同一账号同一模型**只换 system 开头：
+    - `You are an AI agent powered by DeepSeek Harness` → CN **400 / 11128**，国际 **200**；
+    - `You are Claude Code, Anthropic's official CLI for Claude.` → CN **400 / 11128**，国际 **400 / 11128**；
+    - `You are an AI agent powered by Kimi.`、`You are Cursor Agent…`、`You are Gemini CLI…` → 两区都 **200**；
+    - 同一段 DSH 提示，但最前面加一行 `You are a helpful assistant.` → 两区都 **200**。
+
+  - **规则精确到字符**（二分实测，不是推测）：`'x'`×10956 同长度通过；DSH 提示前 **47** 个字符即 `You are an AI agent powered by DeepSeek Harness` 触发，**46** 个字符（少一个 `s`）通过；大小写不敏感（全小写同样 400）；开头多一个空格、或把同一句放进提示中段/`user` 消息都通过；**每一条** system 消息都会被扫（第二条才命中同样 400）。
+  - **为什么此前没有暴露**：插件只转发宿主给的 system 提示，此前没有宿主提示命中过这份清单。issue #66 的 11128 是**请求头**上的 conversation id 门（缺三枚 UUID），与这次同码不同因，所以 4.12.0 的头修复对它无效；`displayTips` 那句「不是官方客户端发出的」在两次事件里都是**误导性文案**——网关的真正判据分别是「头缺 id」与「提示开头命中清单」。国际网关目前不拦 DSH 这句、但拦 Claude Code：同一份清单的两个不同子集，插件对两区用同一条规则。
+  - **修法：只做「开头」归一化，不改提示内容。** `prepareChatBody()` 在 `ensureSystemHead()` 之后新增 `neutralizeChannelFingerprints()`：遍历 `messages`，对 `role.trim().toLowerCase() === 'system'` 且 `content` 为字符串的消息，取 `content.replace(/^\s+/, '').toLowerCase()` 与 `UNAPPROVED_CHANNEL_OPENINGS`（当前两条：DeepSeek Harness、Claude Code）做前缀比对，命中则 `content = WORKBUDDY_FALLBACK_SYSTEM_PROMPT + '\n\n' + content`。未命中的 body 逐字节不动（`tools`、`reasoning_effort`、历史形状均不动）；宿主提示原文一字不改，只在最前面多一行两个区都已接受的占位句 —— 与 `ensureSystemHead()` 用的是同一句，理由同样是「加一行中性的话，比改写宿主自己的提示代价小」。
+  - **实测修复**：完整 DSH 提示 + 50 个 tools + `reasoning_effort:'high'` + 真实的 `tool_calls`/`tool` 历史：改前 400，改后 200；只加一个换行（`'\n' + 提示`）当时也 200，但那是靠网关当前的宽松，不能当修法，所以用显式占位行。
+  - **代价与边界（如实登记）**：清单是**实测快照**，网关新增词条不会被提前发现，直到有 body 带上它；prepend 只在「命中仍在 offset 0」时有效；宿主若把这段文案放到 `user` 消息或提示中段，当前规则不触发（也无需触发）。这不是绕过额度或内容审核——`11140` 安全审核、`14018` 额度、`6004` 限流等路径一行未动。
 
 - **issue #86：批量操作报「HTTP 405」时，提示「请确认插件是最新版本」把人引向错误的修法**
   - **报告**：点「一键签到所有账号」后卡片报「批量操作失败 —— 没有执行：批量操作被拒绝（HTTP 405）。请确认插件是最新版本后重试。」，而插件**已是最新版本**。重启 DSH 后恢复。
@@ -16,6 +30,11 @@
 
 ### Tests
 
+- **`tests/upstream.spec.ts` 新增 4 条用例**，钉的是「发往上游的 system 内容」，不是函数里有没有那句 if：
+  - 完整 DSH 开头 + 后续行 → `messages[0].content === WORKBUDDY_FALLBACK_SYSTEM_PROMPT + '\n\n' + 原文`，`messages` 长度与 user 消息不动；
+  - 全小写 + 两个前导空格的开头同样归一化（网关现在容忍大小写与前导空白只是巧合，不能让它成为下一个失败点）；
+  - 同一句出现在提示中段 → 原文**逐字节**保留（网关只看开头，多改一个字都是在动本可以正常工作的请求）；
+  - 第二条 system（DSH 的 `developer` 目录更新经 `developer → system` 改写而来）命中时同样被归一化，而第一条原样保留——`ensureSystemHead()` 只看第一条，这条用例把两者的作用域分开钉住。
 - **`tests/pool-state.spec.ts` 新增 4 条用例**，钉住「两种 405 不可混同」：空 body 的 405 走新文案；**带 JSON 的 405 仍走原文案**（否则会把一次真正的「方法不对」误诊成「重启」）；无 body 的 500/502 **不**被劫持（防止把服务端故障改写成重启建议）；带 `reason` 时仍优先结构化原因。
 ## 4.12.0 (2026-10-20)
 

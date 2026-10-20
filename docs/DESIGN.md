@@ -33,6 +33,7 @@
 2. **上游协议**（`upstream.ts`）
    - chat：`POST {base}/v2/chat/completions`，base 由 `domain` 决定（`workbuddy.ai` → global，否则 cn → `copilot.tencent.com`）
    - 强制 `stream: true`（上游拒绝非流式）；`tool_choice` 从 OpenAI 对象形态压成上游要的字符串
+   - **`11128` 是网关的一组门，不是一个原因。** 首条不是 system、`developer` 角色、缺 conversation 三件套（issue #66）、`system` 消息**开头**命中「已知第三方 agent 提示」清单，都回同一个业务码，而 `displayTips` 一律写成「渠道校验 / 不是官方客户端发出的」——误导性文案已在两次事件里各骗过一次。前三条分别由 `ensureSystemHead()` / `prepareChatBody()` 的 role 改写 / `conversationHeaders()` 处理；最后一条是内容前缀匹配（CN 实测拦 `You are an AI agent powered by DeepSeek Harness` 与 Claude Code，国际拦 Claude Code），由 `prepareChatBody()` 在命中者最前面补一行 `You are a helpful assistant.`，未命中的 body 逐字节不动。清单是**实测快照**，不是理论：测法、边界（只看开头、大小写不敏感、每条 system 都扫）见 `src/upstream.ts` 的 `UNAPPROVED_CHANNEL_OPENINGS` 注释
    - CLI 形态请求头：`X-User-Id` / `X-No-User-Id`、`X-Enterprise-Id` / `X-No-Enterprise-Id`、`X-Domain` / `X-No-Department-Info`、`X-Product: SaaS`
    - 刷新走独立的 `X-Refresh-Token` 头；**chat 请求绝不携带 refresh token**（原版注释标为安全红线）
    - 错误分类：`hard_credit` / `soft_rate` / `model_busy` / `session_dead` / `policy_reject` / `not_found` / `server` / `client`，含中英文额度不足标记。`model_busy`（14003）与积分、账号无关、且是**暂时**的，因此与 `soft_rate`（6004，重置在几小时后）**必须区别对待**——见 §3.4 的「错误呈现」

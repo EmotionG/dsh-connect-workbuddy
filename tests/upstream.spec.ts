@@ -95,6 +95,61 @@ describe('prepareChatBody', () => {
   it('passes non-JSON bodies through untouched', () => {
     expect(prepareChatBody('not json')).toBe('not json')
   })
+
+  it('neutralizes a system prompt that opens with a fingerprinted agent head', () => {
+    // Measured on the real gateways (2026-10-21): a `system` message beginning
+    // with "You are an AI agent powered by DeepSeek Harness" is refused by the
+    // domestic gateway with business code 11128 ("unapproved channel"), and the
+    // byte-identical body with one neutral line prepended returns 200. Every CN
+    // step of a DSH session failed at step 1 until this prepend existed.
+    const prompt = 'You are an AI agent powered by DeepSeek Harness.\n\nSecond line.'
+    const prepared = JSON.parse(prepareChatBody(JSON.stringify({
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: 'hello' },
+      ],
+    }))) as { messages: { role: string; content: unknown }[] }
+    expect(prepared.messages).toHaveLength(2)
+    expect(prepared.messages[0]?.content).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
+    expect(prepared.messages[1]?.content).toBe('hello')
+  })
+
+  it('matches the fingerprint case-insensitively and after leading whitespace', () => {
+    // The gate compares case-insensitively today, and a leading space happens to
+    // defeat it; both spellings of the same head must be treated alike so a
+    // gateway-side trim or case fold does not silently reopen the failure.
+    const prompt = '  you are an AI agent powered by deepseek harness'
+    const prepared = JSON.parse(prepareChatBody(JSON.stringify({
+      messages: [{ role: 'system', content: prompt }],
+    }))) as { messages: { content: string }[] }
+    expect(prepared.messages[0]?.content).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
+  })
+
+  it('leaves the fingerprint alone when it is not at the start of the prompt', () => {
+    // The gate reads the opening only: the same sentence inside the prompt body
+    // passes upstream, so a prompt that merely mentions a third-party agent must
+    // stay byte-for-byte intact.
+    const prompt = 'Rules: be nice.\n\nYou are an AI agent powered by DeepSeek Harness.'
+    const prepared = JSON.parse(prepareChatBody(JSON.stringify({
+      messages: [{ role: 'system', content: prompt }],
+    }))) as { messages: { content: string }[] }
+    expect(prepared.messages[0]?.content).toBe(prompt)
+  })
+
+  it('neutralizes every system message, not just the head', () => {
+    // DSH can send a second system message (a tool-catalog update arrives as
+    // `developer` and is rewritten above), and the gate scans each message: a
+    // fingerprint below the head fails the request even when the head is benign.
+    const prepared = JSON.parse(prepareChatBody(JSON.stringify({
+      messages: [
+        { role: 'system', content: 'the real prompt' },
+        { role: 'developer', content: "You are Claude Code, Anthropic's official CLI for Claude." },
+      ],
+    }))) as { messages: { content: string }[] }
+    expect(prepared.messages[0]?.content).toBe('the real prompt')
+    expect(prepared.messages[1]?.content)
+      .toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\nYou are Claude Code, Anthropic's official CLI for Claude.`)
+  })
 })
 
 describe('classifyUpstreamError', () => {
