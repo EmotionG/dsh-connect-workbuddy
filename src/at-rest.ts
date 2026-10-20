@@ -747,24 +747,101 @@ export function fetchAtRestKeyPayload(executable: string): Promise<string> {
 /** Process-lifetime cache of the derived key; never persisted. */
 let cachedKey: Buffer | undefined
 let inflightKey: Promise<Buffer | undefined> | undefined
+/**
+ * When the last FAILED lookup finished, epoch ms; 0 means "no recent failure".
+ *
+ * Issue #77: only a SUCCESS was remembered, so a machine where the key cannot
+ * be obtained re-ran the whole discovery on every single probe. `scanAll()`
+ * probes one auth file at a time, and a usage request scans several times, so
+ * one page open re-ran the discovery dozens of times — each run being three
+ * SYNCHRONOUS `reg query` child processes on the host's main thread when the
+ * desktop app is not installed (measured 15.3 s of a 19.1 s request, 135
+ * `reg.exe` spawns). A failure is therefore remembered for
+ * {@link AT_REST_KEY_FAILURE_TTL_MS}: the answer cannot change within one page
+ * open, while a user who installs or launches the app still sees it pick up
+ * within that window instead of only after a restart.
+ */
+let failedKeyAtMs = 0
+/** The discovery result behind the current key (or failure); see {@link discoverAppExecutable}. */
+let cachedAppExecutable: { readonly executable: string; readonly foundAtMs: number } | undefined
+
+/**
+ * How long a failed key lookup is remembered. Long enough to collapse the
+ * dozens of probes one request makes, short enough that installing (or
+ * launching) the desktop app takes effect without a restart.
+ */
+const AT_REST_KEY_FAILURE_TTL_MS = 60_000
+
+/**
+ * How long a NEGATIVE executable discovery is remembered.
+ *
+ * The negative answer is the expensive one: every candidate path misses, then
+ * the Windows fallback shells out to `reg query` once per uninstall hive. The
+ * positive answer is cached for the process lifetime instead — its path is
+ * retried with `existsSync` on every call anyway, so an app that was moved or
+ * removed still falls through to a fresh discovery.
+ */
+const APP_EXECUTABLE_MISS_TTL_MS = 60_000
+
+/**
+ * Locate the desktop executable through {@link findWorkbuddyAppExecutable},
+ * remembering a MISS for {@link APP_EXECUTABLE_MISS_TTL_MS}.
+ *
+ * Only this module's own lookup is cached, and only when it goes through the
+ * real seams: `findWorkbuddyAppExecutable` stays a pure function of its
+ * arguments for `doctor` and for the injected-platform tests, which must keep
+ * seeing the machine as it is right now.
+ */
+function discoverAppExecutable(): string | undefined {
+  const now = Date.now()
+  if (cachedAppExecutable !== undefined) {
+    if (now - cachedAppExecutable.foundAtMs < APP_EXECUTABLE_MISS_TTL_MS) return cachedAppExecutable.executable
+    cachedAppExecutable = undefined
+  }
+  const executable = findWorkbuddyAppExecutable()
+  if (executable === undefined) {
+    cachedAppExecutable = { executable: '', foundAtMs: now }
+    return undefined
+  }
+  cachedAppExecutable = { executable, foundAtMs: Number.POSITIVE_INFINITY }
+  return executable
+}
 
 /**
  * The desktop app's at-rest field key, or undefined when it cannot be obtained
  * (app not installed, an older build without the native module, or a future
- * build that rotates the payload). Cached after the first success so the app is
- * spawned at most once per process; a failure is retried on the next call,
- * because the user may install or start the app between reads.
+ * build that rotates the payload).
+ *
+ * Both outcomes are cached: a success for the process lifetime (the app is
+ * spawned at most once), a failure for {@link AT_REST_KEY_FAILURE_TTL_MS}. The
+ * failure TTL is what keeps a machine WITHOUT the app from paying the
+ * synchronous registry probe on every credential file — see {@link failedKeyAtMs}.
  */
 export function readAtRestKey(): Promise<Buffer | undefined> {
   if (cachedKey !== undefined) return Promise.resolve(cachedKey)
-  inflightKey ??= (async () => {
-    const executable = findWorkbuddyAppExecutable()
+  if (inflightKey !== undefined) return inflightKey
+  if (failedKeyAtMs !== 0 && Date.now() - failedKeyAtMs < AT_REST_KEY_FAILURE_TTL_MS) {
+    return Promise.resolve(undefined)
+  }
+  inflightKey = (async (): Promise<Buffer | undefined> => {
+    const executable = discoverAppExecutable()
     if (executable === undefined) return undefined
     const payload = await fetchAtRestKeyPayload(executable)
-    const key = deriveAtRestKey(payload)
+    return deriveAtRestKey(payload)
+  })().then(key => {
     cachedKey = key
+    failedKeyAtMs = key === undefined ? Date.now() : 0
     return key
-  })().finally(() => {
+  }, (error: unknown) => {
+    // A THROWN failure is cached on the same terms as an empty answer: the app
+    // is installed but did not hand over its key, and retrying that per file is
+    // exactly the repeated-cost bug this cache exists to stop. The error is
+    // still rethrown, so the caller's `encrypted` diagnosis keeps its message;
+    // the next caller inside the window gets `undefined` (the same diagnosis,
+    // minus the app's own wording).
+    failedKeyAtMs = Date.now()
+    throw error
+  }).finally(() => {
     inflightKey = undefined
   })
   return inflightKey
@@ -774,4 +851,6 @@ export function readAtRestKey(): Promise<Buffer | undefined> {
 export function clearAtRestKeyCache(): void {
   cachedKey = undefined
   inflightKey = undefined
+  failedKeyAtMs = 0
+  cachedAppExecutable = undefined
 }

@@ -1112,8 +1112,17 @@ export class WorkBuddyCredentialStore {
    * Undefined means "no scan in flight and nothing cached".
    */
   private scanInflight: Promise<readonly WorkBuddyCredential[]> | undefined
-  /** When the cached scan was STARTED, epoch ms; only meaningful with it set. */
-  private scanAtMs = 0
+  /**
+   * When the cached scan FINISHED, epoch ms; 0 means "not finished yet".
+   *
+   * Deliberately the finish time, not the start time (issue #77). The window
+   * used to be measured from the START, so a scan that took longer than the
+   * window was already outside it the moment it landed: the very next `readAll`
+   * started a fresh scan, and the sharing this cache exists for never happened.
+   * On the machine in that report one scan took 1.4–2.1 s against a 1000 ms
+   * window, so every one of a page open's ~6 reads re-scanned the filesystem.
+   */
+  private scanFinishedAtMs = 0
 
   /**
    * A RUNTIME account override from the pool's rotation, or undefined.
@@ -1303,33 +1312,45 @@ export class WorkBuddyCredentialStore {
   /**
    * The account list, sharing one scan across concurrent and repeated reads.
    *
-   * See {@link scanInflight}: the whole performance fix lives in these four
-   * lines. Every caller keeps its OWN semantics (`current`, `accounts`,
-   * `status`, `selectionLost`), because this returns the same array they used
-   * to build themselves — only the filesystem work is shared.
+   * See {@link scanInflight}: the whole performance fix lives in these lines.
+   * Every caller keeps its OWN semantics (`current`, `accounts`, `status`,
+   * `selectionLost`), because this returns the same array they used to build
+   * themselves — only the filesystem work is shared.
+   *
+   * The window runs from the FINISH time ({@link scanFinishedAtMs}), so a scan
+   * slower than the window still serves the reads that follow it. A scan in
+   * flight is always joined, however long it has been running.
    *
    * A failed scan is NOT cached: the rejection clears the slot so the next read
    * retries, rather than pinning every later caller to one transient failure.
    */
   private async readAll(): Promise<readonly WorkBuddyCredential[]> {
-    const now = Date.now()
-    if (this.scanInflight !== undefined && now - this.scanAtMs < SCAN_SHARE_WINDOW_MS) {
-      return this.scanInflight
+    if (this.scanInflight !== undefined) {
+      // In flight: join it. Finished: share it only inside the window, counted
+      // from when it FINISHED — see {@link scanFinishedAtMs}.
+      if (this.scanFinishedAtMs === 0 || Date.now() - this.scanFinishedAtMs < SCAN_SHARE_WINDOW_MS) {
+        return this.scanInflight
+      }
     }
-    this.scanAtMs = now
-    this.scanInflight = this.scanAll().catch(error => {
+    this.scanFinishedAtMs = 0
+    const scan = this.scanAll().then((credentials) => {
+      this.scanFinishedAtMs = Date.now()
+      return credentials
+    }, (error: unknown) => {
       // A failed scan is not cached: the next read retries instead of every
       // later caller inheriting one transient failure.
-      this.scanInflight = undefined
+      if (this.scanInflight === scan) this.scanInflight = undefined
+      this.scanFinishedAtMs = 0
       throw error
     })
-    return this.scanInflight
+    this.scanInflight = scan
+    return scan
   }
 
   /** Drop the shared scan so the next read re-reads the filesystem. */
   private invalidateScan(): void {
     this.scanInflight = undefined
-    this.scanAtMs = 0
+    this.scanFinishedAtMs = 0
   }
 
   /** The one real scan: read every candidate file, then merge the vault. */
