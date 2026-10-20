@@ -602,6 +602,28 @@ export interface WorkBuddyWebModel {
      * level). Same shape as `supportsImages` above.
      */
     canDisableThinking?: boolean
+    /**
+     * This model is on the reviewed `off`-refusal table (`src/off-thinking.ts`),
+     * so ticking its checkbox cannot take effect (issue #83).
+     *
+     * The verdict, derived on the host — not a stored preference, and not
+     * something the card has to recompute. It exists so the card can explain a
+     * tick that did not stick instead of leaving the user staring at a checkbox
+     * that looks saved. Like every other `reasoning` field it rides along in
+     * the saved `lastCatalog` entry, where it is ignored on load: the verdict is
+     * always recomputed from `id`.
+     */
+    offRefused?: boolean
+    /**
+     * A REQUEST really carried `reasoning_effort: "off"` for this model and the
+     * upstream answered HTTP 400 / code 11133 (issue #83).
+     *
+     * Row-level, DERIVED on write from the last refusal's `modelIdOfBody` —
+     * never typed in by hand. Merged rather than replaced when the saved
+     * catalog is refreshed, so the badge survives the full-table overwrite a
+     * model refresh performs.
+     */
+    refusesOff?: boolean
   }
   description?: string
 }

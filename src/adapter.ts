@@ -26,6 +26,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WorkBuddyCredentialStore } from './auth.ts'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
 import type { WorkBuddyShim } from './shim.ts'
+import { offRefused } from './off-thinking.ts'
 import { WORKBUDDY_FALLBACK_SYSTEM_PROMPT } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { piAiRuntimeInfo } from './pi-ai-runtime.ts'
@@ -33,6 +34,14 @@ import type { PiAiGeneration } from './pi-ai-runtime.ts'
 import type { ContextRescue } from './context-rescue.ts'
 
 /** Provider route this bundle owns for the domestic (CN) gateway. */
+/**
+ * The tier a request gets when it names none — compaction summaries, above all
+ * (issue #83). See the `reasoning` field in `profileFor` for why an absent
+ * default is not "no opinion" but "whatever pi-ai's level map says", which is
+ * how `off` became the silent default for `/compact`.
+ */
+export const WORKBUDDY_DEFAULT_EFFORT = 'high' as const
+
 export const WORKBUDDY_PROVIDER = 'workbuddy'
 
 /** Provider route this bundle owns for the international gateway. */
@@ -253,10 +262,15 @@ export function workBuddyDisplayName(info: WorkBuddyModelInfo): string {
  *
  * The value read here is already the EFFECTIVE one: the runtime catalog is
  * stamped by `withEffectiveOff()` before it reaches the adapter, so this is the
- * user's `off` selection when they made one (and the upstream declaration,
- * minus `REFUSES_OFF_MODEL_IDS`, when they never did). Absence is "unknown" and
- * stays unoffered, matching how the rest of the plugin treats undeclared
- * capability.
+ * user's `off` selection when they made one — except for the ids on
+ * `REFUSES_OFF_MODEL_IDS`, which the stamp forces to `false` no matter what the
+ * user asked for (issue #83: this level, once ticked, also became the IMPLICIT
+ * default for every request that carries no effort at all, which is how
+ * compaction went to 100% failure). The table is re-checked here as well so the
+ * wall does not depend on every caller remembering to stamp first.
+ *
+ * Absence is "unknown" and stays unoffered, matching how the rest of the plugin
+ * treats undeclared capability.
  */
 export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyThinkingLevelMap | undefined {
   const supported = info.reasoning?.supportedEfforts?.filter((effort): effort is WorkBuddyThinkingLevel =>
@@ -266,7 +280,7 @@ export function workBuddyThinkingLevelMap(info: WorkBuddyModelInfo): WorkBuddyTh
   const map: WorkBuddyThinkingLevelMap = Object.fromEntries(
     THINKING_LEVELS.map(level => [level, supported.includes(level) ? level : null]),
   )
-  if (info.reasoning?.canDisableThinking === true) map.off = 'off'
+  if (info.reasoning?.canDisableThinking === true && !offRefused(info.id)) map.off = 'off'
   else map.off = null
   return map
 }
@@ -727,6 +741,20 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // route must never pre-condemn a model that the catalog later supplies.
     // (Required by ResolvedPiAiProviderProfile since 0.1.5-rc.1.)
     modelErrors: new Map(),
+    /**
+     * The default tier, pinned to the SAME value pi-ai's level map would fill in
+     * for an absent one (issue #83).
+     *
+     * `dsh-llm-pi-ai` resolves every request's tier as
+     * `options.reasoningEffort ?? profile.reasoning`, so an absent default here
+     * means "whatever pi-ai fills in" — and for a model whose map carried
+     * `off → "off"`, that was `"off"`, i.e. every compaction summary asked a
+     * model like `deepseek-v4.1-flash` to disable thinking, which it answers with
+     * 400 / 11133. Nothing structurally prevents a level or a catalog snapshot
+     * from disagreeing with the adapter's own map, so the default must never be
+     * that. This is the same value the host asks for explicitly on normal turns.
+     */
+    reasoning: WORKBUDDY_DEFAULT_EFFORT,
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: key === providerId ? provider : { ...provider, id: key },
   })

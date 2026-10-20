@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { defaultOffModelIds, offDefaultFor, REFUSES_OFF_MODEL_IDS, withEffectiveOff } from '../src/off-thinking.ts'
+import {
+  defaultOffModelIds,
+  forgetRefusals,
+  lastRefusalFor,
+  offDefaultFor,
+  offRefused,
+  recentRefusals,
+  recordRefusal,
+  REFUSES_OFF_MODEL_IDS,
+  withEffectiveOff,
+} from '../src/off-thinking.ts'
 
 /**
  * Which models can actually turn thinking off (issue #34).
@@ -132,12 +142,13 @@ describe('withEffectiveOff', () => {
     expect(accepted?.reasoning?.canDisableThinking).toBe(true)
   })
 
-  it('lets the user offer off for a model the table withdraws', () => {
-    // The escape hatch: the table errs towards hiding, so a wrong entry must be
-    // correctable by the person who hit it.
+  it('does NOT let the user offer off for a model the table withdraws (issue #83)', () => {
+    // What used to be the escape hatch. It is closed on purpose: the escape hatch
+    // was also the trigger, because a stamped `off` is what pi-ai sends for
+    // requests that name no reasoning tier at all.
     const roster = [declaring('deepseek-v4.1-flash'), declaring('gemini-3.5-flash')]
     for (const model of withEffectiveOff(roster, new Set(roster.map(m => m.id)))) {
-      expect(model.reasoning?.canDisableThinking, model.id).toBe(true)
+      expect(model.reasoning?.canDisableThinking, model.id).toBe(false)
     }
   })
 
@@ -179,11 +190,21 @@ describe('withEffectiveOff', () => {
     expect(output[0]?.reasoning).toBeUndefined()
   })
 
-  it('stamps a selection member true even if the table would refuse it', () => {
-    // The user's Set is the truth at this point: the table only shaped the
-    // seed (see `defaultOffModelIds`), and re-applying it here would undo a
-    // user who ticked a refused model back on.
+  it('REFUSES to honour a selection for a model the table says refuses off (issue #83)', () => {
+    // This used to assert the opposite. The tick is not a capability claim: with
+    // `off` stamped on, pi-ai sends `reasoning_effort: "off"` for EVERY request
+    // that carries no effort at all — compaction summaries are exactly that — so
+    // one tick failed every `/compact` with 400 / 11133, for good. The table wins
+    // because the asymmetry is unchanged: a hidden level costs one option, a
+    // failing one costs every request for the model.
     const [model] = withEffectiveOff([declaring('deepseek-v4.1-flash')], new Set(['deepseek-v4.1-flash']))
+    expect(model?.reasoning?.canDisableThinking).toBe(false)
+  })
+
+  it('still honours the selection for a model the table does not list', () => {
+    // The wall is the table, not the checkbox: an entry the table has not learned
+    // about keeps the user's answer.
+    const [model] = withEffectiveOff([declaring('grok-4.7')], new Set(['grok-4.7']))
     expect(model?.reasoning?.canDisableThinking).toBe(true)
   })
 
@@ -192,5 +213,50 @@ describe('withEffectiveOff', () => {
     for (const model of withEffectiveOff(roster, new Set())) {
       expect(model.reasoning?.canDisableThinking, model.id).toBe(false)
     }
+  })
+})
+
+describe('offRefused', () => {
+  it('answers for the table, by exact id', () => {
+    for (const id of REFUSING_PER_ISSUE_34) expect(offRefused(id), id).toBe(true)
+    for (const id of ACCEPTING_PER_ISSUE_34) expect(offRefused(id), id).toBe(false)
+    expect(offRefused('deepseek-v4.1-flash-next')).toBe(false)
+  })
+
+  it('is the SAME predicate the catalog stamping uses', () => {
+    // One source of truth: if these could disagree, the card would say "cannot be
+    // enabled" on a row the runtime happily offered the level for.
+    for (const id of [...REFUSING_PER_ISSUE_34, ...ACCEPTING_PER_ISSUE_34]) {
+      const [model] = withEffectiveOff([declaring(id)], new Set([id]))
+      expect(model?.reasoning?.canDisableThinking, id).toBe(!offRefused(id))
+    }
+  })
+})
+
+describe('observed refusals (issue #83)', () => {
+  it('records newest first and answers per model', () => {
+    forgetRefusals()
+    recordRefusal({ param: 'reasoning_effort', tier: 'off', code: 11133, modelId: 'gpt-6-astra', at: 1 })
+    recordRefusal({ param: 'reasoning_effort', tier: 'off', code: 11133, modelId: 'glm-5.3', at: 2 })
+    expect(recentRefusals().map(report => report.modelId)).toEqual(['glm-5.3', 'gpt-6-astra'])
+    expect(lastRefusalFor('gpt-6-astra')?.code).toBe(11133)
+    expect(lastRefusalFor('kimi-k3')).toBeUndefined()
+  })
+
+  it('is bounded, so a refusal storm cannot grow memory', () => {
+    forgetRefusals()
+    for (let index = 0; index < 50; index += 1) {
+      recordRefusal({ param: 'reasoning_effort', at: index })
+    }
+    expect(recentRefusals()).toHaveLength(20)
+    expect(recentRefusals()[0]?.at).toBe(49)
+  })
+
+  it('hands out a copy, so a reader cannot mutate the ring', () => {
+    forgetRefusals()
+    recordRefusal({ param: 'reasoning_effort', at: 1 })
+    const copy = recentRefusals() as unknown as Array<{ at: number }>
+    copy.pop()
+    expect(recentRefusals()).toHaveLength(1)
   })
 })

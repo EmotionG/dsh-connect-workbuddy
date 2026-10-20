@@ -71,6 +71,7 @@ function mount(options: {
   failover?: (tried: readonly string[]) => Promise<WorkBuddyCredential | undefined>
   failoverAccountAbsent?: boolean
   shortfall?: () => Promise<string | undefined>
+  reportRefusal?: (report: unknown) => void
 }): WorkBuddyShim {
   const client = {
     chatStream: async () => options.result,
@@ -81,8 +82,19 @@ function mount(options: {
     catalog: new WorkBuddyCatalog(),
     ...options.failover === undefined ? {} : { failoverAccount: options.failover },
     ...options.shortfall === undefined ? {} : { failoverShortfall: options.shortfall },
+    ...options.reportRefusal === undefined ? {} : { reportRefusal: options.reportRefusal as never },
   })
 }
+
+/**
+ * The 11133 body a refusing model sends when it is asked for `off` — the shape
+ * issue #83 reported: the SAME envelope as #78, but with `extError.param`
+ * naming the parameter that was rejected.
+ *
+ * `param` is the whole point: without it the reply can only say "the upstream
+ * rejected your request", which is what made the reporter read the log.
+ */
+const OFF_REJECTED_BODY = '{"code":11133,"msg":"the request parameters were rejected by the model provider","requestId":"8f1c0000-0000-4000-8000-000000000001","extError":{"code":"invalid_request_error","message":"reasoning_effort is not supported","param":"reasoning_effort","value":"off","type":"invalid_request_error","StatusCode":400,"Request":null,"Response":null},"displayMsg":{"zh":"模型无法处理此请求，请重试"},"displayTips":{"zh":"这次对话的内容这个模型不接受，与网络无关。请新建任务、换个模型或稍后重试。"},"actions":["SWITCH_MODEL"]}'
 
 /** Drive one chat through the shim and return the host-facing error message. */
 async function messageOf(instance: WorkBuddyShim): Promise<{ status: number, message: string, type: string }> {
@@ -292,5 +304,62 @@ describe('issue #78: displayTips is parsed as data', () => {
     const detail = parseUpstreamErrorDetail(JSON.stringify({ code: 2, msg: 'nope' }))
     expect(detail?.tips).toBeUndefined()
     expect(detail?.displayMsg).toBe('nope')
+  })
+})
+
+describe('issue #83: an `off` refusal names the tier and reports it', () => {
+  it('says WHICH tier was refused, instead of only that the request failed', async () => {
+    // The reported experience: compaction showed "could not produce a useful
+    // summary" and the log showed a bare 400 / 11133. The reader could act on
+    // this — the remedy is one checkbox.
+    shim = mount({ result: failure(400, 'client', OFF_REJECTED_BODY) })
+    await shim.ready
+
+    const { message } = await messageOf(shim)
+    expect(message).toContain('推理档位')
+    expect(message).toContain('off')
+    expect(message).toContain('reasoning_effort')
+    // ...and the remedy, which is in the plugin's own words because the
+    // upstream's tips describe a different problem.
+    expect(message).toContain('可关闭思考')
+  })
+
+  it('does not blame the upgrade for a refusal it cannot attribute', async () => {
+    // The #78 body has an EMPTY `param`. Guessing "reasoning tier" there would
+    // put a wrong cause in front of a user whose request failed for another
+    // reason, so the generic advice must survive untouched.
+    shim = mount({ result: failure(400, 'client', PARAMS_REJECTED_BODY) })
+    await shim.ready
+
+    const { message } = await messageOf(shim)
+    expect(message).not.toContain('推理档位')
+    expect(message).toContain('这次对话的内容这个模型不接受，与网络无关。请新建任务、换个模型或稍后重试。')
+  })
+
+  it('reports the refusal so a surface that swallows the reply can still show it', async () => {
+    // Compaction reads the failure as a boolean; this callback is the only route
+    // the observation takes to the model card.
+    const seen: { param?: string, tier?: string, code?: number, modelId?: string }[] = []
+    shim = mount({
+      result: failure(400, 'client', OFF_REJECTED_BODY),
+      reportRefusal: report => { seen.push(report as { param?: string }) },
+    })
+    await shim.ready
+
+    await messageOf(shim)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ param: 'reasoning_effort', tier: 'off', code: 11133 })
+    // The model the body NAMED, not the account's route alias — otherwise the
+    // badge would never attach to a row in the card.
+    expect(seen[0]?.modelId).toBe('deepseek-v4.1-flash')
+  })
+
+  it('reports nothing for a failure that names no parameter', async () => {
+    const seen: unknown[] = []
+    shim = mount({ result: failure(500, 'server', '{"code":500,"msg":"internal"}'), reportRefusal: report => { seen.push(report) } })
+    await shim.ready
+
+    await messageOf(shim)
+    expect(seen).toHaveLength(0)
   })
 })

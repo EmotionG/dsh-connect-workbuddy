@@ -232,6 +232,8 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-model-image input{margin:0;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
 .dsm-workbuddy-model-off{display:inline-flex;align-items:center;gap:5px;flex:none;cursor:pointer;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:11px;line-height:16px}
 .dsm-workbuddy-model-off input{margin:0;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-workbuddy-model-off-blocked{cursor:not-allowed;opacity:.75}
+.dsm-workbuddy-model-off-flag{margin-left:2px;padding:0 4px;border-radius:4px;background:var(--dsw-alias-label-caution-background,#4a3a1f);color:var(--dsw-alias-label-caution,#e8b34b);font-size:10px;line-height:14px;white-space:nowrap}
 .dsm-workbuddy-model-copy{display:flex;align-items:baseline;gap:8px;min-width:0}
 .dsm-workbuddy-model-name{display:inline-flex;align-items:baseline;gap:7px;color:var(--dsw-alias-label-primary,#e6e6e6);font-size:13px;font-weight:500;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-model-name-rate{color:var(--dsw-alias-label-tertiary,#999);font-size:11px;font-weight:400;line-height:16px;flex:none}

@@ -104,11 +104,35 @@ describe('issue #34: the off checkbox renders on every row, defaulted by the Hos
     await m.unmount()
   })
 
-  it('shows a row the Host list includes as checked, whatever the declaration says', async () => {
-    // The saved set is the truth at render time: a refused model ticked back
-    // on by the user renders as checked.
-    const { m } = await renderCard(usageOf({ offModelIds: ['glm-5.3', 'deepseek-v4.1-flash'] }))
-    expect(offBoxFor(m, 'Deepseek').checked).toBe(true)
+  it('still SHOWS a leftover tick on a row the Host refuses, but cannot re-apply it', async () => {
+    // Issue #83: an older build could save a tick for a refusing model. Hiding it
+    // would make the saved state invisible and leave the user with no way to see
+    // why compaction kept failing — so it renders as checked, disabled, and
+    // labelled, instead of as a working control.
+    const { m } = await renderCard(usageOf({
+      offModelIds: ['glm-5.3', 'deepseek-v4.1-flash'],
+      models: [
+        { id: 'glm-5.3', name: 'GLM-5.3', reasoning: { supportedEfforts: ['low', 'high'] } },
+        {
+          id: 'deepseek-v4.1-flash',
+          name: 'Deepseek',
+          reasoning: { supportedEfforts: ['low', 'high'], offRefused: true },
+        },
+      ],
+    }))
+    const box = offBoxFor(m, 'Deepseek')
+    expect(box.checked).toBe(true)
+    expect(box.disabled).toBe(true)
+    const flag = m.container.querySelector('.dsm-workbuddy-model-off-flag')
+    expect(flag?.textContent ?? '').not.toBe('')
+    await m.unmount()
+  })
+
+  it('does not disable a row the Host has not flagged', async () => {
+    // The flag is the Host's verdict, never the card's guess: disabling on this
+    // side would withdraw a working level from models nobody measured.
+    const { m } = await renderCard(usageOf())
+    expect(offBoxFor(m, 'GLM-5.3').disabled).toBe(false)
     await m.unmount()
   })
 })

@@ -29,6 +29,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
+import { offRefused } from './off-thinking.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -78,6 +79,15 @@ export interface WorkBuddyReasoning {
   supportedEfforts?: readonly string[]
   defaultEffort?: string
   canDisableThinking?: boolean
+  /**
+   * An OBSERVED refusal of the `off` tier for this model (issue #83).
+   *
+   * Never declared by the upstream: it is stamped from this plugin's own
+   * refusal record, and it outlives the catalog that witnessed it so the card
+   * can keep showing the badge after a refresh. `undefined` means "never
+   * observed", which is not the same claim as "accepts".
+   */
+  refusesOff?: boolean
 }
 
 /** One CLI-usable model, carrying everything the plugin card displays. */
@@ -529,6 +539,17 @@ export interface UpstreamErrorDetail {
    * clause losing its own meaning.
    */
   tips?: string
+  /**
+   * The request parameter the upstream named as rejected, from
+   * `extError.param` (issue #83).
+   *
+   * Kept because the generic sentences cannot say WHICH parameter was at fault:
+   * a 11133 caused by `reasoning_effort` reads exactly like a model that is
+   * unavailable, and the fix (untick one checkbox) lives nowhere in the reply.
+   */
+  rejectedParam?: string
+  /** The offending value of {@link rejectedParam}, when the body carries one. */
+  rejectedTier?: string
 }
 
 /**
@@ -574,6 +595,16 @@ export function parseUpstreamErrorDetail(body: string): UpstreamErrorDetail | un
   if (typeof raw.requestId === 'string') detail.requestId = raw.requestId
   if (displayMsg !== undefined) detail.displayMsg = displayMsg
   if (tips !== undefined) detail.tips = tips
+  // `extError` carries the parameter-level verdict. Read defensively: it is
+  // absent on most failures, and a malformed one must not cost the fields above.
+  const ext = raw.extError
+  if (typeof ext === 'object' && ext !== null && !Array.isArray(ext)) {
+    const extRaw = ext as Record<string, unknown>
+    const param = extRaw['param']
+    if (typeof param === 'string' && param !== '') detail.rejectedParam = param
+    const value = extRaw['value']
+    if (typeof value === 'string' && value !== '') detail.rejectedTier = value
+  }
   return detail
 }
 
@@ -864,7 +895,36 @@ export function prepareChatBody(source: string): string {
   }
   ensureSystemHead(obj)
   normalizeToolChoice(obj)
+  dropRefusedReasoning(obj)
   return JSON.stringify(obj)
+}
+
+/**
+ * Remove `reasoning_effort: "off"` when it would only ever fail (issue #83).
+ *
+ * The refusal table is keyed by exact model id, but the model a request
+ * actually names can change AFTER the catalog was built: account-pool failover
+ * re-points the body at another account's model, and `primary-model` is an
+ * alias whose concrete id the gateway resolves. A tick on such a row therefore
+ * reaches this plugin's prepared body as a bare `"off"` — exactly the value the
+ * table says the upstream answers with HTTP 400 / code 11133.
+ *
+ * Stripped HERE because this is the last thing the plugin controls before the
+ * upstream counts the body, and because the test is {@link offRefused} — the
+ * same single source of truth the catalog stamping uses, so the two cannot
+ * drift apart.
+ *
+ * Only the literal `"off"` is touched. Every other effort value returned 200 on
+ * every model measured for issue #34, and a body naming no effort is left
+ * alone: deleting a field the caller never sent would be inventing an opinion
+ * about how the model should think.
+ */
+function dropRefusedReasoning(obj: Record<string, unknown>): void {
+  const effort = obj['reasoning_effort']
+  if (typeof effort !== 'string' || effort.trim().toLowerCase() !== 'off') return
+  const model = obj['model']
+  if (typeof model !== 'string' || !offRefused(model)) return
+  delete obj['reasoning_effort']
 }
 
 /** Rewrite OpenAI `tool_choice` spellings into the upstream's string form. */

@@ -127,11 +127,20 @@ describe('issue #34: the runtime catalog withdraws off for models that refuse it
 })
 
 describe('issue #34: the saved selection wins over the built-in seed', () => {
-  it('honours a saved selection that offers off for a refused model', async () => {
-    // The user ticked it back on — the checkbox is the truth, so the level
-    // comes back even though the built-in rule withdraws it.
+  it('does NOT honour a saved selection for a refused model (issue #83)', async () => {
+    // This used to assert that "the checkbox is the truth". Issue #83 showed what
+    // that bought: a stamped `off` is what pi-ai sends for every request that
+    // names no reasoning tier, so one tick failed every `/compact` for that
+    // model. The table now wins, and the card disables the row to say so.
     const ctx = await mount({ offModelIds: ['deepseek-v4.1-flash'] })
-    expect(await effortsOf(ctx, 'deepseek-v4.1-flash')).toContain('off')
+    expect(await effortsOf(ctx, 'deepseek-v4.1-flash')).not.toContain('off')
+  })
+
+  it('still honours a saved selection for a model the table does not list', async () => {
+    // The wall is scoped to the table: an id it has not learned about keeps the
+    // user's own answer, or the fix would silently withdraw a working level.
+    const ctx = await mount({ offModelIds: ['grok-4.7'] })
+    expect(await effortsOf(ctx, 'grok-4.7')).toContain('off')
   })
 
   it('honours a saved selection that withdraws off for an accepted model', async () => {

@@ -993,6 +993,13 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * "reset" control: once an answer matches the rule, the two are
    * indistinguishable in effect, and the tooltip already names the override.
    */
+  // Models on the reviewed refusal table, plus the ones whose `off` tier this
+  // process actually saw refused (issue #83). The checkbox stays visible but
+  // disabled: hiding it would make a saved tick invisible, and the user would
+  // have no way to discover why compaction kept failing.
+  const offBlocked = (model: WorkBuddyWebModel): boolean =>
+    model.reasoning?.offRefused === true || model.reasoning?.refusesOff === true
+
   const toggleOff = (modelId: string): void => {
     editDraft(current => {
       const next = new Set(current.offIds)
@@ -1707,16 +1714,21 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                 <span>{t('row.modelImage')}</span>
                               </label>
                               <label
-                                className="dsm-workbuddy-model-off"
-                                title={t('row.modelOffHint')}
+                                className={`dsm-workbuddy-model-off${offBlocked(model) ? ' dsm-workbuddy-model-off-blocked' : ''}`}
+                                title={offBlocked(model) ? t('row.modelOffRefusedHint') : t('row.modelOffHint')}
                               >
                                 <input
                                   type="checkbox"
                                   checked={activeOffIds.has(model.id)}
-                                  disabled={!canWrite || saving}
+                                  disabled={!canWrite || saving || offBlocked(model)}
                                   onChange={() => { toggleOff(model.id) }}
                                 />
                                 <span>{t('row.modelOff')}</span>
+                                {/* The tick can be a leftover from an older build,
+                                    and this build will not send the level anyway —
+                                    so say so instead of leaving a checkbox that
+                                    looks saved but cannot take effect (issue #83). */}
+                                {offBlocked(model) ? <span className="dsm-workbuddy-model-off-flag">{t('row.modelOffRefused')}</span> : null}
                               </label>
                               <fieldset className="dsm-workbuddy-context-budget" aria-label={t('row.contextBudget')}>
                                 {model.nativeContextWindow > 200_000

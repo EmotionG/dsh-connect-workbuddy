@@ -20,6 +20,38 @@
   - **变异验证**：把修复回退后这两条断言分别报 **15 ≠ 3** 与 **9 ≠ 3**；三个用例在修复后全绿。写入后再读的用例在前修复/后修复两种状态下都绿——它守的是「共享窗口不得变成 TTL」，是回归护栏而非修复证据。
   - 文件里的凭据夹具用**真实的加密字段形状** `{$wbEncrypted: 1, envelope: "<base64>"}`；写成嵌套对象会被 `isEncryptedFieldWrapper()` 判为「未加密」，让整条用例静默走错分支（写测试时踩到过，已在夹具注释里记下）。
 
+## 4.11.0 (2026-10-20)
+
+> 版本号是 **minor**：有行为变更（对实测拒绝 `off` 的那 9 个模型，卡片上的「可关闭思考」变为不可勾选）。发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。
+
+### Fixes
+
+- **issue #83：给「实测拒绝 off」的模型勾上「可关闭思考」后，该模型的每一次 `/compact` 必定 400 / 11133**
+  - **报告链路**：用户在卡片上给 `deepseek-v4.1-flash` 之类**实测拒绝 `off`** 的模型勾了「可关闭思考」→ `withEffectiveOff()` 用保存的勾选覆盖 `canDisableThinking` → `workBuddyThinkingLevelMap()` 把 `off` 映成 `"off"` → pi-ai 的 `openai-completions` 在**调用方没传 `reasoningEffort`** 时用 `model.thinkingLevelMap?.off` 兜底 → 压缩摘要请求（`summarizeWithLlm`）恰好**不传**档位 → 每次 `/compact` 都带 `reasoning_effort:"off"` → 两个网关都回 400 / 11133，界面只说 `Compaction could not produce a useful summary`。
+  - **多写出来的那一条**：`REFUSES_OFF_MODEL_IDS` 一直被当作「种子」而不是「墙」，3.5.0 的说明写着「用户勾选即生效」。但它与同一条 changelog 里写下的取舍原则相反：**提供一个必定失败的档位，代价是该模型每一次请求；误藏一个本来可用的档位，代价只是一个选项**。而且这次失败的不只是「某个请求」——pi-ai 会把这个档位当成**所有未指定档位请求的默认值**。
+  - **三道防线（独立失效点，各自有测试）**：
+    1. **层级映射墙**：`withEffectiveOff()` 对名单内 id 恒置 `canDisableThinking: false`（`offRefused()` 与 `offDefaultFor()` 同口径），`workBuddyThinkingLevelMap()` 再查一次名单，所以 `off` 根本不会被提供，也不依赖调用方先盖章。
+    2. **请求体兜底**：`prepareChatBody()` 新增 `dropRefusedReasoning()`——名单内模型的 `reasoning_effort: "off"` 在发往上游前被摘掉。这一层守的是**目录建好之后才变**的情形：账号池换号会把 body 指向另一个账号的模型，`primary-model` 还是个由网关解析的别名。
+    3. **显式默认档位**：`dsh-llm-pi-ai` 按 `options.reasoningEffort ?? profile.reasoning` 解析档位，此前 `profile.reasoning` 是 `undefined`，等于把默认值交给 pi-ai 的层级映射——也就是交给那个 `off`。现在 profile 显式声明 `reasoning: 'high'`（`WORKBUDDY_DEFAULT_EFFORT`），所有注册键一致。
+  - **只摘 `off`**：其他档位在 issue #34 的实测里全部 200；body 里**本来就没有**档位时不补任何值——插件不替模型决定该怎么思考。
+  - **列表外模型不受影响**：名单按**精确 id** 匹配，`grok-4.7` 这类未记录的模型仍然由用户勾选与自身声明决定，修复不会顺手拿走一个本来能用的档位。
+  - **错误信息可诊断**：`parseUpstreamErrorDetail()` 现在读 `extError.param` / `extError.value`；当被拒参数与推理档位有关时，回复直接点名「上游拒绝了推理档位「off」（reasoning_effort）」并给出「取消可关闭思考勾选」的处置建议，而不是只说「请求被上游拒绝」。`param` 为空时（issue #78 的那类 body）**不猜**，原有文案原样保留。
+  - **观测记录**：`reportRefusal` 回调把「某模型确实被拒了 off」记进一个有界环形缓冲（20 条，进程内、不落盘）。这是压缩路径唯一能把事实送到界面上的通路——它只把失败当布尔值，正文被丢掉。
+
+### Features
+
+- **卡片上如实标注拒绝 `off` 的行**：名单内模型（以及进程内实测被拒的模型）的「可关闭思考」显示为**勾选但禁用**，旁边多一枚 `拒绝 off` 标记，tooltip 说明「实测两个网关都回 400 / code 11133，勾选后所有未指定档位的请求（尤其压缩摘要）都会失败」。**不禁用、不隐藏**这个勾选框：旧版本可能已经把勾存下来了，藏起来等于把用户保存的状态和失败原因一起藏掉。判定值 `offRefused` / `refusesOff` 由宿主给出，卡片不自行推断。
+
+### Tests
+
+- **`tests/issue83-off-refusal.spec.ts`：钉请求体，而不是钉函数返回值**
+  - 用**真实 pi-ai `openai-completions`** 经**真实 adapter** 构建请求，注入 `fetch` 捕获 body，再断言 `reasoning_effort` 不在其中——「盖了章」不等于「没发出去」，只有 body 能证明。模型描述符取自 adapter 自己的目录（声明 `canDisableThinking: true`，与上游对这 9 个 id 的声明一致），所以手写描述符绕过的 profile 级修复在这里藏不住。
+  - 另外三条守 `prepareChatBody`：名单内摘除、名单外保留、其他档位一格不动、原本没有档位就不补。
+- **`tests/issue83-profile-default.spec.ts`**：profile 的默认档位是 `'high'` 而不是 `undefined`/`'off'`，且**每一个注册键**都一致（issue #75 的身份键也算）。
+- **`tests/off-thinking.spec.ts` / `off-thinking-runtime.spec.ts` / `off-thinking-card.spec.tsx` 改了三条断言**：此前它们断言「用户勾选优先于名单」，而那正是 issue #83 的成因。现在改为断言墙生效、名单外仍然尊重勾选、以及卡片对宿主标记的行渲染成「勾选但禁用 + 有标记」。
+- **`tests/upstream-error-copy.spec.ts` 加了 4 条**：11133 且 `param` 指向档位时点名档位与处置；`param` 为空时**不**归因到档位；拒绝被上报（含被请求命名的 `modelId`，不是账号别名）；非参数类失败不上报。
+- **变异验证**：单独回退「层级映射墙」→ 1 条红；单独回退「adapter 名单判断」→ 2 条红；单独回退「显式默认档位」→ profile 那 2 条红。撤回其中任一层都有测试当场报错。全量 1536 passed / 2 skipped，`pnpm run typecheck` 与 `pnpm run build` 均干净。
+
 ## 4.10.0 (2026-10-19)
 
 > 版本号是 **minor**：4.9.5 / 4.9.6 两个 patch 从未单独发布到 npm（npm 上仍是 4.9.4），本次一次性带上它们，并新增福利活动的完整链路。**发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。**

@@ -105,7 +105,7 @@ export {
   nativeModalityOf,
   type WorkBuddyNativeModality,
 } from './native-modality.ts'
-import { defaultOffModelIds, offDefaultFor, REFUSES_OFF_MODEL_IDS, withEffectiveOff } from './off-thinking.ts'
+import { defaultOffModelIds, offDefaultFor, lastRefusalFor, recordRefusal, REFUSES_OFF_MODEL_IDS, withEffectiveOff } from './off-thinking.ts'
 export { defaultOffModelIds, offDefaultFor, REFUSES_OFF_MODEL_IDS, withEffectiveOff }
 export {
   authFileName,
@@ -849,6 +849,11 @@ export function apply(ctx: Context, config: Config): void {
           .catch((error: unknown) => ctx.logger.warn('dsh-connect-workbuddy: body report failed', error))
       },
       onUpstreamUsage: usage => { pendingUsage?.(usage) },
+      // Remember a tier refusal so the model card can name it (issue #83). The
+      // reply text is not enough: compaction reads the failure as a boolean and
+      // renders "could not produce a useful summary", so this is the only route
+      // the observation takes to a surface the user can see.
+      reportRefusal: report => { recordRefusal(report) },
       prepareAccount: () => applyPoolSelection(region),
       failoverAccount: triedAccountIds => failoverAccountFor(region, triedAccountIds),
       // Asked only after a request has ALREADY failed and the pool found nowhere
@@ -923,7 +928,13 @@ export function apply(ctx: Context, config: Config): void {
       deriveCatalog(roster, new Set(state.enabledModelIds ?? []), state.contextBudgets ?? {}),
       new Set(state.imageModelIds ?? []),
     )
-    return withEffectiveOff(declared, new Set(savedOffModelIds(state, declared)))
+    // A refusal observed at request time is an OBSERVATION about the model, so it
+    // is stamped beside the table's verdict — the card shows both, and one
+    // cannot be mistaken for the other (issue #83).
+    const stamped = withEffectiveOff(declared, new Set(savedOffModelIds(state, declared)))
+    return stamped.map(model => model.reasoning === undefined || lastRefusalFor(model.id) === undefined
+      ? model
+      : { ...model, reasoning: { ...model.reasoning, refusesOff: true } })
   }
 
   /**

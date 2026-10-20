@@ -24,6 +24,7 @@ import { Readable } from 'node:stream'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { workbuddyAccountId } from './auth.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
+import type { WorkBuddyRefusalReport } from './off-thinking.ts'
 import { usageOfChunk } from './body-report.ts'
 import { DsmlStreamBuffer } from './dsml-recovery.ts'
 import type { RecoveredToolCall, RecoveryGate } from './dsml-recovery.ts'
@@ -115,6 +116,18 @@ export interface WorkBuddyShimOptions {
    * it produces the same reply as before this option existed.
    */
   failoverShortfall?: WorkBuddyFailoverShortfall
+  /**
+   * Told about every refused request the plugin can attribute to a MODEL, right
+   * before the failure is rendered (issue #83).
+   *
+   * Separate from the rendered reply because the caller that hit the refusal is
+   * not always the user: compaction reads the failure as a boolean and shows
+   * "could not produce a useful summary", so the one fact that explains it (this
+   * model refuses `off`) never reaches any surface. This callback is how the
+   * card learns it happened. Must not throw: a bookkeeping failure must never
+   * replace the upstream's own failure.
+   */
+  reportRefusal?: (refusal: WorkBuddyRefusalReport) => void
   /**
    * Called before the FIRST attempt of every chat request, so the plugin can
    * point the store at the account the pool's ranking says should serve.
@@ -907,6 +920,53 @@ function describeAccount(credential: WorkBuddyCredential): string {
  * turn in this product reads Chinese, and an English clause inside Chinese prose
  * was the previous build's most visible rough edge.
  */
+/**
+ * Name the rejected PARAMETER when the upstream refused a reasoning tier, or
+ * `undefined` when it is any other failure (issue #83).
+ *
+ * The compaction path used to surface "Compaction could not produce a useful
+ * summary" and nothing else, so a 11133 caused by `reasoning_effort: "off"` was
+ * indistinguishable from a model that was simply unavailable — the reporter had
+ * to read the raw body to learn that one parameter was at fault. When the body
+ * names the offending parameter (`extError.param`) the reply says so; this is a
+ * refusal the plugin can explain without guessing, because it is the union of
+ * two facts the upstream stated in the response.
+ */
+/**
+ * Turn a failure into a refusal report for {@link WorkBuddyShimOptions.reportRefusal},
+ * or `undefined` when it is not a tier refusal worth recording.
+ *
+ * Only refusals the upstream attributed to a PARAMETER are reported: a plain
+ * 500 or a quota error says nothing about `off`, and recording it would pin a
+ * "refuses off" badge on a model that never refused anything.
+ */
+function refusedTierReport(
+  failure: WorkBuddyChatResult,
+  modelId: string | undefined,
+): WorkBuddyRefusalReport | undefined {
+  if (failure.ok || failure.kind !== 'client') return undefined
+  const param = failure.detail?.rejectedParam
+  if (param === undefined || !param.includes('reasoning')) return undefined
+  const tier = failure.detail?.rejectedTier
+  return {
+    param,
+    ...tier === undefined ? {} : { tier },
+    ...failure.detail?.upstreamCode === undefined ? {} : { code: failure.detail.upstreamCode },
+    ...modelId === undefined ? {} : { modelId },
+    at: Date.now(),
+  }
+}
+
+function reasoningTierRefusal(failure: WorkBuddyChatResult): string | undefined {
+  if (failure.ok || failure.kind !== 'client') return undefined
+  const param = failure.detail?.rejectedParam
+  if (param === undefined || !param.includes('reasoning')) return undefined
+  const tier = failure.detail?.rejectedTier
+  return tier === undefined
+    ? `上游拒绝了推理档位参数（${param}）`
+    : `上游拒绝了推理档位「${tier}」（${param}）`
+}
+
 function failoverReasonText(failure: WorkBuddyChatResult): string {
   // The union is discriminated by `ok`; only a failure carries a kind, and this
   // is only ever called on the failed attempt that triggered a switch.
@@ -1192,6 +1252,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const logger = options.logger
   const failoverAccount = options.failoverAccount
   const failoverShortfall = options.failoverShortfall
+  const reportRefusedTier = options.reportRefusal ?? (() => {})
   const prepareAccount = options.prepareAccount
   const onAccountFailure = options.onAccountFailure
   const onRequestBody = options.onRequestBody
@@ -1543,6 +1604,11 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         failoverShortfall !== undefined && failoverAccount !== undefined && isFailoverWorthy(result.kind)
       const shortfall = poolSearched ? await failoverShortfall().catch(() => undefined) : undefined
       const why = shortfall === undefined ? '' : `：${shortfall}`
+      // Emit what the reply is about to say BEFORE the branches, so the model
+      // card can show "this model was refused on `off`" even when the caller
+      // (compaction, for one) swallows the reply text (issue #83).
+      const refusedReport = refusedTierReport(result, requestModelId)
+      if (refusedReport !== undefined) reportRefusedTier(refusedReport)
       if (result.kind === 'policy_reject') {
         // A content-policy refusal is the one upstream failure whose own words
         // the user needs: the server tells them WHAT to change ("内容未通过安全
@@ -1618,16 +1684,25 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
       if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
       const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
-      const receipt = detail?.tips ?? detail?.displayMsg ?? clippedUpstreamText(result.message, 400)
+      // An `off`-tier refusal is the one parameter rejection this plugin can name
+      // itself (issue #83), and the reader cannot act on the generic sentence:
+      // the remedy is unticking one checkbox, not "adjust the request".
+      const refusedTier = reasoningTierRefusal(result)
+      const receipt = refusedTier
+        ?? detail?.tips
+        ?? detail?.displayMsg
+        ?? clippedUpstreamText(result.message, 400)
       // A `client` failure is the one class the pool never searched (issue #78),
       // so the advice must not imply an account problem at all: the same request
       // is refused by every account, and the fix is in the request or the model.
       // The pool sentence is emitted only when a search really produced a verdict.
-      const advice = result.kind === 'client'
-        ? '该请求被上游按参数拒绝：与网络、账号、额度都无关，换账号也不会改变结果，请按上面的提示调整后重试'
-        : shortfall === undefined
-          ? ''
-          : '建议换一个模型继续，或稍后等待该账号的额度恢复'
+      const advice = refusedTier !== undefined
+        ? '这不是账号或网络问题：该模型实测拒绝「off」推理档位，请到模型卡片里取消该行的「可关闭思考」勾选后重试'
+        : result.kind === 'client'
+          ? '该请求被上游按参数拒绝：与网络、账号、额度都无关，换账号也不会改变结果，请按上面的提示调整后重试'
+          : shortfall === undefined
+            ? ''
+            : '建议换一个模型继续，或稍后等待该账号的额度恢复'
       // `displayTips` and most `msg` bodies already end in a full stop, so gluing
       // an advice sentence on would read "。。" — the upstream's sentence is left
       // exactly as it arrived, minus that final stop, and the join supplies one.

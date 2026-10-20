@@ -23,6 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { isVaultAccountId } from './auth.ts'
+import { lastRefusalFor, offRefused } from './off-thinking.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { applyContextBudgets } from './catalog.ts'
 import { resolveCredentialRecovery } from './credential-recovery.ts'
@@ -586,6 +587,14 @@ function toWebModel(
         // model, and since an absent declaration never offers `off` (issue #34's
         // default), the level silently vanished for the models that accept it.
         ...model.reasoning.canDisableThinking === undefined ? {} : { canDisableThinking: model.reasoning.canDisableThinking },
+        // The table's verdict, not the declaration, so the card's warning hint
+        // and the runtime catalog (which stamps `off` off for these ids) cannot
+        // disagree (issue #83).
+        ...offRefused(model.id) ? { offRefused: true } : {},
+        // Only ever added, never cleared by this projection: the flag records an
+        // observed refusal, and a refresh that recomputes every other field must
+        // not erase the one piece of evidence the user can act on (issue #83).
+        ...model.reasoning.refusesOff === true ? { refusesOff: true } : {},
       },
     },
   }
@@ -868,7 +877,15 @@ export async function workBuddyWebStatus(
     showCreditsInMainUi,
     creditPosition,
     accounts: accounts.map(toWebAccount),
-    models: deps.displayModels(region).map(model => toWebModel(model, deps.contextBudgets(region))),
+    // Stamped with what the plugin OBSERVED, not just what the catalog declares:
+    // `displayModels` is the saved/live directory and knows nothing about a
+    // refusal the shim recorded, so the badge would never appear on the one row
+    // it exists for (issue #83).
+    models: deps.displayModels(region)
+      .map(model => toWebModel(model, deps.contextBudgets(region)))
+      .map(model => model.reasoning === undefined || lastRefusalFor(model.id) === undefined
+        ? model
+        : { ...model, reasoning: { ...model.reasoning, refusesOff: true } }),
     enabledModelIds: [...deps.enabledModelIds(region)],
     imageModelIds: [...deps.imageModelIds(region)],
     offModelIds: [...deps.offModelIds(region)],

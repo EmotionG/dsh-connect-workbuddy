@@ -288,6 +288,15 @@ if (info.reasoning?.canDisableThinking !== true) map.off = null
 **修法**：`if (info.reasoning?.canDisableThinking === true) { /* 保留 off */ } else map.off = null`
 —— 即把条件反过来，并同时补一条 `canDisableThinking: true` 的用例。
 
+> **2026-10-20 补记（issue #83）**：上面这条已修，但只修了一半。条件反过来了，
+> 而 `withEffectiveOff` 仍会把「用户勾选」写进 `canDisableThinking`，于是
+> `REFUSES_OFF_MODEL_IDS` 里那 9 个**实测拒绝 `off`** 的模型只要被勾上，
+> `map.off` 就落成 `'off'`。更关键的是 pi-ai 在**调用方没传 `reasoningEffort`** 时会用
+> 这个值兜底（`openai-completions.js` 的 `!options?.reasoningEffort && model.reasoning`
+> 分支），而压缩摘要请求恰好不传档位——结果是勾一次就等于让该模型每一次 `/compact`
+> 都 400 / 11133。现在名单是**硬墙**，另加请求体兜底与 profile 显式默认档位两道防线，
+> 详见 CHANGELOG 4.11.0 与 `tests/issue83-off-refusal.spec.ts`。
+
 ---
 
 ## 七、证据来源
