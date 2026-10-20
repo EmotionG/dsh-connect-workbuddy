@@ -44,6 +44,7 @@
    - 真实 WorkBuddy token 不交给 pi-ai；shim 自己从 store 解析
 
 4. **适配器**（`adapter.ts`）：`createProvider` + `openAICompletionsApi()` + inert auth plane + `resolveApiKey: () => shim.token()`
+   - **默认档位按路由定，能不能吃档位按模型定，两者的差必须由插件自己补。** `profileFor()` 给整条路由钉 `reasoning: WORKBUDDY_DEFAULT_EFFORT`（`'high'`，issue #83 的修法：缺省默认在 pi-ai 眼里等于 `off`，`/compact` 因此 100% 400 / 11133），而 `dsh-llm-pi-ai` 每次解析都用 `options.reasoningEffort ?? profile.reasoning`。目录里没有 `reasoning` 块的模型（`toPiModel()` 据此产出 `reasoning: false`）只支持 `['off']`，继承来的 `'high'` 接不了 ⇒ 组装请求时就抛 `UNSUPPORTED_REASONING_EFFORT`（issue #90 后半段，4.13.1 修）。修法：`EffortNormalizingAdapter extends PiAiAdapter`，对 `effortCapable(model) === false` 的模型①在 `resolveModel()`/`prepareCall()` 返回的信息里补 `reasoning: { efforts: [{ id: 'off', name: 'Off' }] }`（**不带 `defaultEffort`**——宿主会把它物化进每个未带档位的请求，随后 `callConfigEquals()` 逐字段比对会抛 `INVALID_PREPARED_CALL`），②在 `stream()`/`prepareCall().stream` 里把 `options.reasoningEffort` 归一成 `'off'`（宿主 `profileOptions()` 把 `'off'` 翻成不下发字段）⇒ 上游请求体一个字节不变。路由默认一字未动，显式请求不支持的档位仍由宿主如实拒绝
 
 5. **保留 CLI 诊断**：`status` / `doctor` / `logout` + host heartbeat 文件（用户明确要求保留）
 

@@ -19,9 +19,10 @@
 import { createAssistantMessageEventStream, createProvider, isContextOverflow } from '@earendil-works/pi-ai'
 import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AuthContext, Context, CredentialStore, Message, Model, Provider, ProviderStreams } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WorkBuddyCredentialStore } from './auth.ts'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
@@ -667,6 +668,109 @@ function withContextRescue(
 }
 
 /**
+ * The tier {@link EffortNormalizingAdapter} pins a model to when the model
+ * carries no reasoning metadata of its own.
+ *
+ * `off` is the ONE tier pi-ai offers for such a model (`getSupportedThinkingLevels`
+ * returns `['off']` whenever `model.reasoning` is false), and the host's own
+ * translation of it is "send no reasoning field at all" (`profileOptions` turns
+ * `off` into `enabledReasoning = undefined`). So pinning it neither invents a
+ * capability nor changes one byte of the upstream request body.
+ */
+const NO_REASONING_EFFORT = ReasoningEffortId('off')
+
+/** What the host is told a reasoning-less model supports: exactly that tier. */
+const NO_REASONING_EFFORTS: LlmModelReasoningInfo = {
+  efforts: [{ id: NO_REASONING_EFFORT, name: 'Off' }],
+}
+
+/**
+ * pi-ai adapter that keeps a model WITHOUT reasoning metadata dispatchable
+ * (issue #90, the `UNSUPPORTED_REASONING_EFFORT` half).
+ *
+ * THE FAILURE. `profileFor` pins one default tier per ROUTE
+ * (`reasoning: WORKBUDDY_DEFAULT_EFFORT`, issue #83), and `dsh-llm-pi-ai`
+ * resolves every request as `options.reasoningEffort ?? profile.reasoning`. For
+ * a model whose catalog entry carries no `reasoning` block at all — the live CN
+ * catalog has six of them (`default`, `glm-5.0`, `glm-4.7`, `glm-4.6`,
+ * `hunyuan-chat`, `hunyuan-image-alpha`), the live global one two
+ * (`default-model`, `deep-model`), and EVERY entry of both static fallback lists
+ * — the inherited `high` is not a tier that model has. `resolveReasoningLevel`
+ * then throws `UNSUPPORTED_REASONING_EFFORT` before the request is even built,
+ * so the model is unusable locally: no wire call, no upstream error, nothing to
+ * retry. Introduced by v4.11.0, which made the profile default explicit; before
+ * it the default was absent and pi-ai clamped instead of throwing.
+ *
+ * TWO GATES, BOTH CLOSED. The host checks the adapter's own model metadata
+ * first: `resolveCallWithInfo` rejects ANY explicitly requested tier on a model
+ * whose `reasoning` is absent, and `reasoningInfo` omits the field exactly for
+ * models without metadata — so even `off` was refused. Then `PiAiAdapter.streamWithSnapshot`
+ * rejects the route default it inherited. A fix at either seam alone still
+ * fails at the other.
+ *
+ * THE FIX. Advertise the one tier pi-ai will actually accept for such a model
+ * (`off`) and normalize the request to it at the dispatch seam, so
+ * `resolveReasoningLevel` sees a supported tier and `profileOptions` sends no
+ * reasoning field. Nothing about the wire body changes — pi-ai never emits
+ * `reasoning_effort` for a model whose descriptor has `reasoning: false`.
+ *
+ * WHAT STAYS STRICT. A tier the caller EXPLICITLY asks for on a model that
+ * cannot do it is still rejected, by the host, with an accurate message. That
+ * is the pre-v4.11.0 contract too, and it is not this bug: the bug is a request
+ * that named no tier being killed by the route's own default.
+ */
+class EffortNormalizingAdapter extends PiAiAdapter {
+  /**
+   * Whether one exact model id currently carries reasoning metadata. Read live
+   * on every call because the catalog is refreshed behind the adapter
+   * (`invalidate`), and a model that gains metadata mid-session must stop being
+   * normalized at once.
+   */
+  private readonly effortCapable: (model: string) => boolean
+
+  constructor(config: PiAiAdapterOptions, effortCapable: (model: string) => boolean) {
+    super(config)
+    this.effortCapable = effortCapable
+  }
+
+  override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    return this.advertiseOffOnly(await super.resolveModel(provider, model, signal))
+  }
+
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const call = await super.prepareCall(provider, model, signal)
+    // Both halves matter: the host validates `model` before it ever calls
+    // `stream`, and `stream` is what actually reaches `resolveReasoningLevel`.
+    return {
+      model: this.advertiseOffOnly(call.model),
+      stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => call.stream(this.pinEffort(options)),
+    }
+  }
+
+  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    return super.stream(this.pinEffort(options))
+  }
+
+  /**
+   * Give a reasoning-less model the one tier it can dispatch at. No
+   * `defaultEffort` on purpose: the host materializes one into EVERY request
+   * that names no tier, and that would turn the host's own prepared-call config
+   * check (`callConfigEquals`) against callers that omit the field.
+   */
+  private advertiseOffOnly(info: LlmResolvedModelInfo): LlmResolvedModelInfo {
+    return info.reasoning === undefined ? { ...info, reasoning: NO_REASONING_EFFORTS } : info
+  }
+
+  /** Replace an unusable tier with the one pi-ai accepts for this model. */
+  private pinEffort(options: GenerateOptions): GenerateOptions {
+    if (this.effortCapable(options.model)) return options
+    return options.reasoningEffort === NO_REASONING_EFFORT
+      ? options
+      : { ...options, reasoningEffort: NO_REASONING_EFFORT }
+  }
+}
+
+/**
  * Assemble the adapter. The provider's `getModels` reads the live catalog,
  * and every model's `baseUrl` is re-resolved per read so the shim's
  * ephemeral port applies from the first snapshot after startup.
@@ -770,7 +874,18 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
   // adapter's next profiles read to rebuild its snapshot.
   let profiles = buildProfiles()
 
-  const adapter = new PiAiAdapter({
+  /**
+   * Whether one exact model id currently advertises ANY thinking tier.
+   *
+   * Same predicate `toPiModel` derives the descriptor's `reasoning` flag from,
+   * so the two can never disagree — and it reads the live catalog, so a refresh
+   * that adds (or drops) metadata for a model takes effect on the next request
+   * without an `invalidate` round trip.
+   */
+  const effortCapable = (model: string): boolean =>
+    catalog.current().some(info => info.id === model && workBuddyThinkingLevelMap(info) !== undefined)
+
+  const adapter = new EffortNormalizingAdapter({
     profiles: () => profiles,
     auth: INERT_AUTH,
     // Resolve the shim's per-process shared secret as the OpenAI apiKey so
@@ -779,7 +894,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // itself via the store, so the secret never reaches upstream.
     resolveApiKey: async () => shim.token(),
     ...resolveAttachments === undefined ? {} : { resolveAttachments },
-  })
+  }, effortCapable)
 
   return {
     adapter,
