@@ -306,7 +306,12 @@ describe('shim inbound hardening', () => {
     // Only `soft_rate` moves: `hard_credit` is 402 (quota by status anyway) and
     // the rest already land outside the host's retry set. A translation nobody
     // needs is a lie waiting to drift.
-    for (const kind of ['hard_credit', 'session_dead', 'server', 'not_found', 'client'] as const) {
+    //
+    // `model_busy` is in this list precisely BECAUSE issue #84: it used to be
+    // translated onto `quota_exceeded`, which the host reads as an exhausted
+    // balance and answers by replacing the message with 「当前请求的额度已用尽」.
+    // See the test below for the classification that matters.
+    for (const kind of ['hard_credit', 'model_busy', 'session_dead', 'server', 'not_found', 'client'] as const) {
       shim = makeShim({ chatStream: async () => ({ ok: false, status: 500, kind, message: 'x' }) })
       await shim.ready
       const response = await request(shim, {

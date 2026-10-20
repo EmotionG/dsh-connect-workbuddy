@@ -210,10 +210,15 @@ describe('pool failover: retrying a failed chat on another account', () => {
     await shim.ready
 
     const response = await chat(shim)
-    // `code` carries the host-facing translation (a 429 that must stay OUT of
-    // the host's in-place retry set), `type` names the class honestly.
-    expect(response.body).toContain('"code":"quota_exceeded"')
+    // `code` names the class honestly now: spelling it `quota_exceeded` (as
+    // issues #56 and #63 did) made the host classify a busy model as an
+    // exhausted balance and replace this message with 「当前请求的额度已用尽」
+    // (issue #84). Untranslated, the host reads `RATE_LIMIT` — outside its
+    // substitution list, so the sentence below is what the user sees, and
+    // inside its in-place retry set, so a transient 14003 is retried.
+    expect(response.body).toContain('"code":"model_busy"')
     expect(response.body).toContain('"type":"model_busy"')
+    expect(response.body).not.toContain('quota_exceeded')
     // The three things the user needs: it is not the account, what to do, and the
     // upstream's own words as the receipt.
     expect(response.body).toContain('这不是账号被限流')

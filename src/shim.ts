@@ -320,17 +320,34 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
  * and cross-provider failover cannot help a policy decision either. The code the
  * host receives therefore names the class honestly.
  *
- * `model_busy` gets the same `quota_exceeded` translation as `soft_rate`, and
- * for a sharper version of the same reason: it arrives as a 429, and the host's
- * in-place retry set is exactly where a request that is about to be refused
- * again must not go. A model that is loaded for everyone will not clear inside
- * one turn's backoff, so spending five attempts on it delays the honest answer
- * without ever producing one. `type` still says `model_busy`, which is what a
- * human reads and what routes the wording below.
+ * `model_busy` used to get the same `quota_exceeded` translation, for what
+ * looked like the same reason, and that was WRONG in a way users reported
+ * (issue #84). The reasoning above assumed `quota_exceeded` only influenced
+ * retryability. It does more than that: `isQuotaExceededError` is matched
+ * against `type + " " + code + " " + message`, the match yields host code
+ * `QUOTA`, and the chat client hard-codes its copy for `QUOTA`/`ACCOUNT_QUOTA`
+ * — substituting 「当前请求的额度已用尽」 and DISCARDING this plugin's message.
+ * So a loaded model was shown to the user as an exhausted balance: an
+ * actionable, transient condition rendered as a terminal, account-level one.
+ *
+ * Leaving `model_busy` untranslated is the correct spelling, and it was
+ * verified end to end rather than reasoned about: driving pi-ai against a
+ * server replaying this shim's real bodies, `code: 'model_busy'` classifies as
+ * `RATE_LIMIT` — which (a) is outside the substitution list, so the plugin's
+ * own honest sentence is what the user reads, and (b) IS in the host's
+ * in-place retry set, so `dsh-llm-retry` performs a bounded retry with the
+ * default 500 ms→10 s backoff instead of failing the turn on one 14003. That
+ * retry is what makes "the model is momentarily busy" recoverable, which is
+ * exactly what a 14003 is: measured against the same credential and second,
+ * five consecutive sends gave 200/200/200/200/429.
+ *
+ * `soft_rate` keeps the translation, and the contrast is the whole point: its
+ * reset is hours away, so the retry budget cannot produce an answer and must
+ * not be spent. One word, two opposite temporal claims — so the spelling
+ * follows the clock, not the status code both share.
  */
 const KIND_HOST_CODE: Partial<Readonly<Record<UpstreamErrorKind, string>>> = {
   soft_rate: 'quota_exceeded',
-  model_busy: 'quota_exceeded',
 }
 
 /**
@@ -1644,6 +1661,12 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         // says it too, and the plugin deliberately does NOT switch accounts on
         // this failure: every account shares the model, so a retry elsewhere
         // would spend a request to be told the same thing (issue #56).
+        //
+        // The reply reaches the user only after the HOST's bounded in-place
+        // retry is spent, because `code: model_busy` now classifies as
+        // `RATE_LIMIT` (issue #84 — see KIND_HOST_CODE). The sentence says so,
+        // otherwise the user reads "wait a minute" about a request that was
+        // already retried five times and concludes the plugin did nothing.
         const detail = result.detail
         // Same LAST-resort clipping as the generic path: a body that parsed
         // never reaches it, and one that did not must not end mid-word.
@@ -1652,8 +1675,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
         const message =
-          `${lead}（${meta.join('，')}）${note}。这不是账号被限流——同一凭据下换一个模型即可正常使用；` +
-          '插件不会为此切换账号，因为该限制跟随模型本身。建议等待约 1 分钟后重试，或切换到负载较低的模型'
+          `${lead}（${meta.join('，')}）${note}。这不是账号被限流，也与积分、额度无关——` +
+          '同一凭据下换一个模型即可正常使用；插件不会为此切换账号，因为该限制跟随模型本身。' +
+          '这类失败会被自动重试几次；若仍然失败，请等待约 1 分钟后重试，或切换到负载较低的模型'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }

@@ -299,6 +299,20 @@ if (info.reasoning?.canDisableThinking !== true) map.off = null
 
 ---
 
+## 六之二、2026-10-20 补记（issue #84）：宿主「按文本正则分类」还有第三个后果
+
+§1 与本文其他地方都只把宿主的 `classifyPiAiError()` 当作「决定要不要原地重试」的判据。**它还会决定用户看到哪句话**，这一点是 issue #84 才查清的：
+
+- 分类器读的是 `type + " " + code + " " + message` 这段**文本**（`@deepseek-ai/dsh-llm-pi-ai` 的 `classifyPiAiError`），宿主的 pi-ai 客户端在失败时把 HTTP 状态与响应体拼成 `"<status>: <body>"` 挂到 `errorMessage` 上，所以文本里**总有**状态码。
+- 判定顺序：`401`/`403` → `AUTH`；**quota 措辞 → `QUOTA`**；`429`/rate-limit → `RATE_LIMIT`；`400` → `INVALID_REQUEST`；`5xx` → `SERVER`；……
+- `@deepseek-ai/dsh-client-ui-chat` 的 `failureMessage(message, code, t)` **对 `QUOTA`/`ACCOUNT_QUOTA` 直接返回写死的 `message.failure.quota`（「当前请求的额度已用尽」/「Request quota exhausted.」）并丢弃传入的 message**；其他类别才把 message 原样显示。
+
+因此插件写回宿主的 `error.code` 不是日志字段，而是**用户可见文案的开关**。本插件原来的 `KIND_HOST_CODE` 把 `model_busy` 也译成 `quota_exceeded`（issue #56/#63 为「挡在重试集合外」而做），恰好被那条 quota 正则命中——于是模型繁忙被显示成额度耗尽，并且因为 `QUOTA` 不在重试集合里一次就失败。4.12.0 起 `model_busy` 不再翻译；`soft_rate` 保留翻译（6004 的重置在几小时后，重试无意义）。详见 CHANGELOG 4.12.0 与 `tests/issue84-model-busy-not-quota.spec.ts`。
+
+> 写这段是为了让下一个读 §1 的人不要只记住「影响重试」——**这条文本还影响措辞**，而且措辞那一层连 `error.code` 都没机会参与：分类器只看文本，不看 code 字段。
+
+---
+
 ## 七、证据来源
 
 - 宿主版本：`runtime/primary-runtime/runtime.json` → `desktopVersion: 0.2.1-rc.1`

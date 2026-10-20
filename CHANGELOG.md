@@ -1,24 +1,30 @@
 # Changelog
 
-## 4.10.1 (2026-10-20)
+## 4.12.0 (2026-10-20)
 
-> 版本号是 **patch**：没有接口、配置项或请求结构的变更，发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。**但它是 issue #77 的正解**——4.9.3 起的 `detail=fast` 只去掉了上游调用，真正吃掉 60 秒的本地开销一直没动；本版把每次打开设置页的 `reg query` 子进程从约 **135 个**降到 **3 个以内**。
+> 版本号是 **minor**：有用户可见的行为变更（模型繁忙不再显示成「额度已用尽」，且会被宿主原地重试几次）。发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。
 
 ### Fixes
 
-- **issue #77（第二轮）：字段密钥的探测按「失败也记住」缓存，一次打开页面不再逐文件重跑注册表探测**
-  - **报告与归因**：4.9.3 加了 `detail=fast` 之后，用户在 4.9.4、4.10 上仍然等 60 s。其 CPU profile 指出：19.1 s 的请求里 **15.3 s 在 `spawnSync`**，来自约 **135 个同步 `reg query` 子进程**——`findWorkbuddyAppExecutable()` 每次请求被调用 45 次，每次查三个卸载 hive。
-  - **根因**：`readAtRestKey()` 只缓存**成功**。当凭据字段是 `$wbEncrypted` 而桌面端又不在候选目录里时，每次探测都会重跑整套发现；`scanAll()` 是**逐文件**调用的，一次打开页面又要读多次，两个乘数叠在一起。
-  - **第二个乘数**：`SCAN_SHARE_WINDOW_MS` 从扫描的**开始**时刻计窗——比窗口更慢的那次扫描**在完成时就已经过期**，永远无法服务它之后的读取。现在从**完成**时刻计窗，并单独保留 `invalidateScan()` 供写入路径强制刷新（写完再读不会看到旧列表）。
-  - **两处顺手的去重**：`findWorkbuddyAppExecutableWithSource()` 会在默认布局 → 注册表 → `findWorkbuddyAppExecutable()` 的回落链里对同一个答案问两遍注册表，现在只问一遍；失败结果带上过期时间缓存，所以「先不装、后装 App」的用户**不需要重启**就能被看见。
-  - **代价**：第一次真正的读取仍付一次探测的钱（3 次 `reg`），此后每一轮读取都是 0。
+- **issue #84：模型繁忙（14003）在聊天窗口被显示成「当前请求的额度已用尽」，并因此一次就失败**
+  - **报告**：issue #84 的评论里先有「国际版用deepseek模型会提示额度不足，step模型可以正常调用。但是我用workbuddy国际版正常使用deepseek免费模型」，随后又被同一线程的第二位报告者（zhangxinhang）收窄到真正的缺陷：**DeepSeek 用的人太多，经常 `model_busy`，而插件对于 `model_busy`，聊天窗口似乎会显示为「当前请求的额度已用尽」**；并请求「对于这种模型繁忙，是否可以进行适当次数的重试」。两条都要修，且它们是同一个原因的两个后果。
+  - **根因是一行映射，不是额度**：`src/shim.ts` 的 `KIND_HOST_CODE` 把 `model_busy` 翻成了 `quota_exceeded`（issue #56/#63 的取舍，理由是把 429 挡在宿主的原地重试集合之外）。但宿主判定失败类别靠的是**对错误文本跑正则**：`classifyPiAiError()` 把 `type + " " + code + " " + message` 交给 `@deepseek-ai/dsh-llm` 的 `isQuotaExceededError()`，而它的 `(?:quota|usage[_\s-]+limit)[_\s-]+(?:exceeded|exhausted|reached)` 恰好匹配 `quota_exceeded` 这个**字面拼写**。于是类别落到 `QUOTA`，而 `@deepseek-ai/dsh-client-ui-chat` 的 `failureMessage()` 对 `QUOTA`/`ACCOUNT_QUOTA` **硬编码固定文案并丢弃插件自己的 message**——「当前请求的额度已用尽」其实**不是插件写的**，是宿主替插件写的。
+  - **后果比措辞严重**：一个**暂时**、**与账号无关**、**换模型即可绕开**的状况，被渲染成一个**终局**、**账号级**的结论；同时 `QUOTA` 不在宿主的重试集合里（`DEFAULT_RETRYABLE_CODES` = `EMPTY_RESPONSE/RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT`），所以一次 14003 就直接结束这一轮——正是报告者要求补救的那件事。
+  - **修法：不再翻译 `model_busy`。** 不翻译之后同一份 wire body 的文本里只剩 `429`，宿主读作 `RATE_LIMIT`，于是一举两得：**(a)** `RATE_LIMIT` 不在 `failureMessage()` 的替换名单里，插件自己那句诚实的说明原样显示给用户；**(b)** `RATE_LIMIT` **在**宿主的默认重试集合里，`dsh-llm-retry` 按默认的 500 ms→10 s 指数退避**原地重试**——报告者要的「适当次数的重试」由宿主自己的机制完成，插件不新增重试循环，也不引入无界重试。
+  - **`soft_rate` 保留翻译，这正是关键对比**：它的 6004 重置时刻在**几小时后**，重试预算换不出答案，所以必须继续挡在重试集合外。**同一个状态码 429，两种相反的时间判断**——所以拼写跟的是**时钟**，而不是两者共用的状态码。
+  - **文案跟着改**：`model_busy` 的回复现在明确写出「这与积分、额度无关」，并说明「这类失败会被自动重试几次」。不加这两句，用户读到的「建议等待约 1 分钟」会让一个已经被重试过五次的请求看起来像插件什么都没做。
+  - **不是推断，是端到端验过**：用本地 `node:http` 服务器重放这个 shim 真实产出的错误体，驱动**真实的 pi-ai `stream()`**（宿主用的就是它）拿到 `errorMessage`，再跑**宿主自己的** `isQuotaExceededError()`。改前 `model_busy` 判 `QUOTA`，改后判 `RATE_LIMIT`；`hard_credit`（报文里真有 `Credits exhausted`）两条路径都仍是 `QUOTA`——真花光积分时宿主仍显示它的终局文案，这个修复没有把真额度问题一起放过。
+  - **同时确认不是这个原因的两件事**（都已实测排除，记在这里省下后来人重走）：**a.** 与**请求的 User-Agent 通道**无关——CLI UA 与桌面 UA 各发 5 次，`deepseek-v4.1-flash` 200/200/200/200/429 与 200×5，`step-5-preview` 全 200，付费的 `deepseek-v4.1-flash-sg` 全 14018；**b.** 与**请求大小**无关——8k/16k/30k/50k 输入下 14003 时有时无、非单调，纯属瞬时繁忙。
+  - **一个仍存在的相邻陷阱（本轮未改，如实登记）**：国际版 `/v3/config` 的 28 个模型里，`deepseek-v4.1-flash`（`x0.00`，免费）与 `deepseek-v4.1-flash-sg`（`x0.03`，付费）**显示名完全相同**（都是 `Deepseek-V4.1-Flash`），说明与能力字段也逐字相同，选择器里只有 ` · x0.00` / ` · x0.03` 这个后缀能区分；零积分账号选中付费那一个就会拿到 14018，而那是**真的**额度不足，宿主显示「额度已用尽」是对的。`step-5-preview` 没有付费孪生，所以「deepseek 报额度不足、step 正常」也可能来自**选错了同名的付费孪生**。改名会影响用户已保存的模型身份与全部按 id 的 join，需要单独一轮评估，因此不在本版顺手改。
 
 ### Tests
 
-- **`tests/issue77-at-rest-key-cache.spec.ts`：用「子进程次数」钉住，不靠计时措辞**
-  - `process.platform` 影子成 `win32` + `execFileSync` 在模块边界打桩，于是**任何宿主（含 CI 的 macOS/Linux）**都会真的走进 Windows 分支并把 `reg` 调用数出来：一次探测恰好 3 次、5 个加密凭据文件的一轮读取（`accounts` → `status` → `current` → `accounts`）仍是 3 次、失败结果被记住、过期后重新探测。
-  - **变异验证**：把修复回退后这两条断言分别报 **15 ≠ 3** 与 **9 ≠ 3**；三个用例在修复后全绿。写入后再读的用例在前修复/后修复两种状态下都绿——它守的是「共享窗口不得变成 TTL」，是回归护栏而非修复证据。
-  - 文件里的凭据夹具用**真实的加密字段形状** `{$wbEncrypted: 1, envelope: "<base64>"}`；写成嵌套对象会被 `isEncryptedFieldWrapper()` 判为「未加密」，让整条用例静默走错分支（写测试时踩到过，已在夹具注释里记下）。
+- **`tests/issue84-model-busy-not-quota.spec.ts`：钉「宿主实际看到的那段文本」，而不是「映射表里没有那个键」**
+  - 关键断言不是实现细节，而是宿主的判定：测试用**真实的 pi-ai `stream()`**（宿主用的同一个客户端）打到**真实的 shim**（真的开 socket），把 pi-ai 产出的 `errorMessage` 交给**宿主自己的** `isQuotaExceededError()`。重新实现一份分类器只能证明两份正则今天一致；而决定文案的是宿主那份。
+  - 四条用例覆盖两种失败的两侧：`model_busy` **不是** quota 且文案里带「与积分、额度无关」；`hard_credit`（真实 14018 报文）**仍是** quota；`soft_rate`（真实 6004 报文）**仍是** quota 且保留上游的重置时刻——「不该改的那半边别一起扫掉」。
+  - **重试那条断言读的是 adapter 自己发布的策略**（`config.profiles()` 的 `retryPolicy`，也就是宿主经 `providerRetryPolicy` 读到的同一个对象），不是 `resolveRetryPolicy(undefined)` 的默认值：后者在 adapter 干脆不再发布策略时**依然会绿**。断言含 `RATE_LIMIT` 在内、`QUOTA` 不在内、`maxRetries` 有界（>0 且 ≤10，即「适当次数」而不是无界循环）。
+  - **变异验证**：把 `model_busy: 'quota_exceeded'` 加回 `KIND_HOST_CODE`，`issue84` 的第一条与 `shim-failover` 的对应用例**当场变红**；恢复后全绿。`shim.spec.ts` 的「只有 soft_rate 需要翻译」那条清单把 `model_busy` 也收了进去，且注释写明它会红在哪。
+  - **改了两条既有断言**：`tests/shim.spec.ts`（`model_busy` 现在也属于「按自己的名字拼写」那一组）与 `tests/shim-failover.spec.ts`（`"code":"quota_exceeded"` → `"code":"model_busy"`，并新增 `not.toContain('quota_exceeded')`）。两条都是原先在**钉住缺陷**的断言，不是回归。
 
 ## 4.11.0 (2026-10-20)
 
@@ -51,6 +57,26 @@
 - **`tests/off-thinking.spec.ts` / `off-thinking-runtime.spec.ts` / `off-thinking-card.spec.tsx` 改了三条断言**：此前它们断言「用户勾选优先于名单」，而那正是 issue #83 的成因。现在改为断言墙生效、名单外仍然尊重勾选、以及卡片对宿主标记的行渲染成「勾选但禁用 + 有标记」。
 - **`tests/upstream-error-copy.spec.ts` 加了 4 条**：11133 且 `param` 指向档位时点名档位与处置；`param` 为空时**不**归因到档位；拒绝被上报（含被请求命名的 `modelId`，不是账号别名）；非参数类失败不上报。
 - **变异验证**：单独回退「层级映射墙」→ 1 条红；单独回退「adapter 名单判断」→ 2 条红；单独回退「显式默认档位」→ profile 那 2 条红。撤回其中任一层都有测试当场报错。全量 1536 passed / 2 skipped，`pnpm run typecheck` 与 `pnpm run build` 均干净。
+
+## 4.10.1 (2026-10-20)
+
+> 版本号是 **patch**：没有接口、配置项或请求结构的变更，发往上游的请求体、路由 id、模型 id、凭据、计费与换号规则一律未变。**但它是 issue #77 的正解**——4.9.3 起的 `detail=fast` 只去掉了上游调用，真正吃掉 60 秒的本地开销一直没动；本版把每次打开设置页的 `reg query` 子进程从约 **135 个**降到 **3 个以内**。
+
+### Fixes
+
+- **issue #77（第二轮）：字段密钥的探测按「失败也记住」缓存，一次打开页面不再逐文件重跑注册表探测**
+  - **报告与归因**：4.9.3 加了 `detail=fast` 之后，用户在 4.9.4、4.10 上仍然等 60 s。其 CPU profile 指出：19.1 s 的请求里 **15.3 s 在 `spawnSync`**，来自约 **135 个同步 `reg query` 子进程**——`findWorkbuddyAppExecutable()` 每次请求被调用 45 次，每次查三个卸载 hive。
+  - **根因**：`readAtRestKey()` 只缓存**成功**。当凭据字段是 `$wbEncrypted` 而桌面端又不在候选目录里时，每次探测都会重跑整套发现；`scanAll()` 是**逐文件**调用的，一次打开页面又要读多次，两个乘数叠在一起。
+  - **第二个乘数**：`SCAN_SHARE_WINDOW_MS` 从扫描的**开始**时刻计窗——比窗口更慢的那次扫描**在完成时就已经过期**，永远无法服务它之后的读取。现在从**完成**时刻计窗，并单独保留 `invalidateScan()` 供写入路径强制刷新（写完再读不会看到旧列表）。
+  - **两处顺手的去重**：`findWorkbuddyAppExecutableWithSource()` 会在默认布局 → 注册表 → `findWorkbuddyAppExecutable()` 的回落链里对同一个答案问两遍注册表，现在只问一遍；失败结果带上过期时间缓存，所以「先不装、后装 App」的用户**不需要重启**就能被看见。
+  - **代价**：第一次真正的读取仍付一次探测的钱（3 次 `reg`），此后每一轮读取都是 0。
+
+### Tests
+
+- **`tests/issue77-at-rest-key-cache.spec.ts`：用「子进程次数」钉住，不靠计时措辞**
+  - `process.platform` 影子成 `win32` + `execFileSync` 在模块边界打桩，于是**任何宿主（含 CI 的 macOS/Linux）**都会真的走进 Windows 分支并把 `reg` 调用数出来：一次探测恰好 3 次、5 个加密凭据文件的一轮读取（`accounts` → `status` → `current` → `accounts`）仍是 3 次、失败结果被记住、过期后重新探测。
+  - **变异验证**：把修复回退后这两条断言分别报 **15 ≠ 3** 与 **9 ≠ 3**；三个用例在修复后全绿。写入后再读的用例在前修复/后修复两种状态下都绿——它守的是「共享窗口不得变成 TTL」，是回归护栏而非修复证据。
+  - 文件里的凭据夹具用**真实的加密字段形状** `{$wbEncrypted: 1, envelope: "<base64>"}`；写成嵌套对象会被 `isEncryptedFieldWrapper()` 判为「未加密」，让整条用例静默走错分支（写测试时踩到过，已在夹具注释里记下）。
 
 ## 4.10.0 (2026-10-19)
 

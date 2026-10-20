@@ -35,7 +35,7 @@
    - 强制 `stream: true`（上游拒绝非流式）；`tool_choice` 从 OpenAI 对象形态压成上游要的字符串
    - CLI 形态请求头：`X-User-Id` / `X-No-User-Id`、`X-Enterprise-Id` / `X-No-Enterprise-Id`、`X-Domain` / `X-No-Department-Info`、`X-Product: SaaS`
    - 刷新走独立的 `X-Refresh-Token` 头；**chat 请求绝不携带 refresh token**（原版注释标为安全红线）
-   - 错误分类：`hard_credit` / `soft_rate` / `session_dead` / `not_found` / `server` / `client`，含中英文额度不足标记
+   - 错误分类：`hard_credit` / `soft_rate` / `model_busy` / `session_dead` / `policy_reject` / `not_found` / `server` / `client`，含中英文额度不足标记。`model_busy`（14003）与积分、账号无关、且是**暂时**的，因此与 `soft_rate`（6004，重置在几小时后）**必须区别对待**——见 §3.4 的「错误呈现」
 
 3. **shim 加固**（`shim.ts`）—— 全部保留
    - 随机端口 + 进程内随机 secret（`randomBytes(32).toString('base64url')`），`timingSafeEqual` 常量时间比对
@@ -218,6 +218,14 @@ uin <B> (<账号乙>): catalog HTTP 200, 28 models, 16 cli, credits total=0
 - **每日签到**：`/plugins/dsh-connect-workbuddy/checkin`（POST）提供一键签到，查询状态与领取均走该路由，回环来源校验 + 领取前二次确认，不重复领取
 - **卡片外观**：从 workbuddy 的 inline style 换成 trae 的 `dsm-*` CSS 类 + `--dsw-alias-*` 主题变量 + LD 图标
 - **错误呈现**：上游错误分类映射到人话（额度不足 / 需重新登录 / 限流），而不是抛 HTTP 状态码
+
+  **写回宿主的 `error.code` 不是自由选择，它决定用户看到哪句话**（issue #84）。宿主的分类器 `classifyPiAiError()` 对 `type + " " + code + " " + message` 跑一串正则，命中顺序是：`401`/`403` 数字 → `AUTH`，**quota 措辞 → `QUOTA`**，`429`/rate-limit → `RATE_LIMIT`，`400` → `INVALID_REQUEST`，`5xx` → `SERVER`……而 `@deepseek-ai/dsh-client-ui-chat` 的 `failureMessage()` **对 `QUOTA`/`ACCOUNT_QUOTA` 写死自己的文案并丢弃插件自己的 message**。因此：
+
+  - `model_busy` **不翻译**（拼写成自己的名字）。文本里只剩 `429` ⇒ 宿主读作 `RATE_LIMIT` ⇒ 文案保留插件那句，**且**进入原地重试集合，由 `dsh-llm-retry` 有界重试几次。这正是 issue #84 报告的「模型繁忙显示成额度已用尽 + 请求重试」两件事的正解。
+  - `soft_rate` **翻译成 `quota_exceeded`**：它的 6004 重置在几小时后，重试预算换不出答案，必须继续挡在重试集合外。
+  - `hard_credit` **不翻译**：报文里就有 `Credits exhausted`，`isQuotaExceededError` 自然命中 ⇒ `QUOTA`，宿主的终局文案此时是**对的**。
+
+  同一个 HTTP 429 有两种相反的时间判断，所以**拼写跟的是时钟，不是状态码**。回归：`tests/issue84-model-busy-not-quota.spec.ts` 用真实 pi-ai 客户端打真实 shim，把产出的文本交给**宿主自己的** `isQuotaExceededError()` 断言。
 - **区域开关**（对齐 trae 的 issue #11）：每个 tab 一个勾选框，取消即 `AdapterRegistrationHandle.replace([])` + `DirectoryRegistrationHandle.replace([])`，把该供应商从选择器与「设置 → 模型」页**彻底摘除**（不是只藏 tab）。改动只落在 `regions.<region>.enabled` 一个字段上，其余槽位原样带过。
 
   三个必须说清的约束：
