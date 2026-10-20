@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.13.1 (2026-10-21)
+
+> 版本号是 **patch**：没有接口、配置项或请求结构的变更。发往上游的请求体**一个字节都没变**——修的是「请求根本没被发出去」这条本地失败路径：目录里没有 reasoning 元数据的模型，此前在组装请求时就被本地判定失败（`UNSUPPORTED_REASONING_EFFORT`），网络一个字节都没出。路由 id、模型 id、凭据、计费与换号规则一律未变。
+
+### Fixes
+
+- **issue #90（后半段）：选到「没有推理档位元数据」的模型时，消息发不出去，本地直接报 `UNSUPPORTED_REASONING_EFFORT`**
+  - **报告**：`#90` 里一位用户在国内区被 11128 挡住（本版 4.13.0 修的那件事），想切国际区绕开，结果撞上**另一个纯本地**的失败：`pi-ai provider "workbuddy-global" model "default-model" does not support reasoning effort "high"`，请求未出网。这条与 11128 相互独立，4.13.0 没有修它。
+  - **真实原因：默认档位是「按路由」定的，而能不能接受档位是「按模型」定的。** `profileFor()` 给整条路由钉了 `reasoning: WORKBUDDY_DEFAULT_EFFORT`（`'high'`，issue #83 的修法），`dsh-llm-pi-ai` 每次解析请求都用 `options.reasoningEffort ?? profile.reasoning`。而目录里没有 `reasoning` 块的模型（`toPiModel()` 据此产出 `reasoning: false`）在 pi-ai 眼里只支持 `['off']` 一个档位，继承来的 `'high'` 它接不了，于是 `resolveReasoningLevel()` 在**组装请求时**就抛错。
+  - **影响面（实测，不是推测）**：用真实凭据打真实网关取目录——国内区 34 个模型里 **6 个**无 reasoning 元数据（`default`、`glm-5.0`、`glm-4.7`、`glm-4.6`、`hunyuan-chat`、`hunyuan-image-alpha`），国际区 21 个里 **2 个**（`default-model`、`deep-model`）；而两份**静态兜底目录**（`FALLBACK_WORKBUDDY_MODELS` / `_GLOBAL`，共 32 条）**全部**没有 reasoning 字段，所以在第一次目录刷新落地之前，**每个模型都会中**。
+  - **两道门，都得开**：①宿主 `dsh-llm` 的 `resolveCallWithInfo()` 看到「模型元数据里根本没有 `reasoning`」而调用方**显式**给了任何档位（**连 `'off'` 也算**）就拒；②`PiAiAdapter` 在隐式继承路由默认时于 `resolveReasoningLevel()` 拒。前者早于 adapter，所以只改派发路径修不掉显式 `'off'`。
+  - **引入时间**：`git log -S 'reasoning: WORKBUDDY_DEFAULT_EFFORT'` 只指向 `1801b01`（v4.11.0，issue #83 的修法）。在那之前路由默认是缺省的，pi-ai 会自己就近降级（`clampThinkingLevel()` 不抛），所以这个回归是 **4.11.0 起的**。
+  - **修法：在插件自己的 adapter 层做「按模型」的档位归一化，不动路由默认。** 新增 `EffortNormalizingAdapter extends PiAiAdapter`（`src/adapter.ts`），判据 `effortCapable(model)` = `catalog.current().some(info => info.id === model && workBuddyThinkingLevelMap(info) !== undefined)`——与 `toPiModel()` 用的是同一个判据，且读**活目录**，所以目录刷新后自动生效，不需要重建 adapter。对判据为假的模型：
+    - `resolveModel()` / `prepareCall()` 返回的模型信息补上 `reasoning: { efforts: [{ id: 'off', name: 'Off' }] }`——这正是 pi-ai 认为它唯一支持的档位，于是宿主的门①放行，`'off'` 也成为用户在界面上唯一能选到的档位（此前这类模型只有「Provider default」一个不可选项）；
+    - `prepareCall().stream` 与 `stream()` 把 `options.reasoningEffort` 归一成 `'off'`，于是门②放行，而 `profileOptions()` 又把 `'off'` 翻成「不下发 reasoning 字段」，pi-ai 侧 `model.reasoning === false` 也保证 `openai-completions` 不会写 `reasoning_effort` ⇒ **上游收到的请求体与修复前完全一致**（修复前是「没收到」）。
+  - **一个必须记下的坑：注入的 `reasoning` 不能带 `defaultEffort`。** 宿主 `prepareCall()` 会把 `defaultEffort` **物化**进每一个「没带档位」的请求（`resolvedConfig.reasoningEffort = effective`），随后用 `callConfigEquals()` 逐字段比对调用方的 config，不一致就抛 `INVALID_PREPARED_CALL`。补 `defaultEffort: 'off'` 会让宿主给这类请求凭空加一个字段，正好撞上这条校验——所以只给 `efforts`，让宿主保持「调用方没给就是没给」。
+  - **刻意不改的行为**：显式请求一个该模型做不到的档位（例如给 `glm-5.0` 选 `high`）仍然被宿主拒，消息如实说明原因。那是宿主自 v4.11.0 之前就有的契约，静默降级会把一次真实的配置错误藏起来。同理，`profileFor()` 的路由默认**一个字符都没动**：issue #83 靠它才成立（缺省默认在 pi-ai 眼里等于 `off`，`/compact` 因此 100% 400 / 11133），`tests/issue83-profile-default.spec.ts` 的三条断言也照旧全绿。
+  - **代价与边界**：判据来自目录的 `reasoning` 元数据；上游哪天给 `glm-5.0` 补上元数据，插件下一次目录刷新就会自动改走正常档位路径（新测试第 6 条钉的就是这个）。反过来，若上游漏报元数据而模型其实支持档位，这类模型会停在 `off`——与 4.11.0 之前的行为一致，不会更糟。
+
+### Tests
+
+- **`tests/issue90-unsupported-reasoning-effort.spec.ts` 新增 6 条用例**：真实 `Context` + 真实 `LlmRuntime` + 真实插件 `apply()`，只把网关调用替换成三帧 SSE 并录下请求体，钉的是「请求到底出没出去、body 里有没有 `reasoning_effort`」，不是函数里有没有那个 if：
+  - 无元数据模型不带档位 → 成功派发，body **不含** `reasoning_effort`（修复前：本地 `UNSUPPORTED_REASONING_EFFORT`，body 一个都没有）；
+  - 显式 `'off'` → 同样成功（修复前宿主连 `'off'` 都拒）；
+  - 显式 `'high'` → 仍被拒且 `code === 'UNSUPPORTED_REASONING_EFFORT'`、message 含 `does not support reasoning effort "high"`、**没有任何请求出网**；
+  - 有元数据模型不带档位 → body 里 `reasoning_effort === 'high'`（issue #83 的护栏，确保这次没把它修坏）；
+  - `resolveModelInfo()` 对无元数据模型严格返回 `{ efforts: [{ id: 'off', name: 'Off' }] }`（**没有** `defaultEffort`），对有元数据模型仍是 `['low','high','max']` + `defaultEffort: 'high'`；
+  - 目录补上元数据后（改写 `liveConfig` + 发 `loader/volatile-update`）→ 档位自动回到 `high`，证明判据读的是活目录。
+  - **变异验证**：`git checkout src/adapter.ts` 回退修复后，6 条里 **4 条失败**（三条报 `+ "code": "UNSUPPORTED_REASONING_EFFORT"`，一条报 `expected undefined to deeply equal { efforts: [ { id: 'off', … } ] }`）；仍然通过的 2 条正是「显式 high 必须被拒」与「有元数据模型档位必须上线」——它们在修复前后行为一致，是护栏而非修复证据。
+
 ## 4.13.0 (2026-10-21)
 
 > 版本号是 **minor**：本版有两块改动，其中**请求体**首次新增一条 system 提示的「渠道指纹」归一化（只对开头命中上游清单的 system 消息前置一行占位语，未命中的 body 逐字节不变），这是发往上游的内容变化；另一块是**报错文案**的 405 判断与文案修正。路由 id、模型 id、凭据、计费与换号规则一律未变。
