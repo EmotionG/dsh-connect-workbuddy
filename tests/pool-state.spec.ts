@@ -383,4 +383,46 @@ describe('poolFailureText (the three-tier resolution, incl. the unguarded status
   it('treats a reason with no matching branch as unknown, not as the reason text', () => {
     expect(poolFailureText(keyT, { status: 409, reason: 'unmapped' })).toBe('row.poolErrHttp')
   })
+
+  describe('a 405 whose body was not JSON (issue #86)', () => {
+    // A real report: the card said 「批量操作被拒绝（HTTP 405）。请确认插件是最新版本
+    // 后重试。」 while the plugin WAS the latest — the DSH Host process was still
+    // running an older build, so the route had never been registered and the
+    // Host's own HTTP layer answered 405 with an EMPTY body. "Update the plugin"
+    // sent the user after the wrong fix; the actual fix was restarting DSH.
+
+    it('names the stale Host instead of the plugin version', () => {
+      expect(poolFailureText(keyT, { status: 405, bodyUnreadable: true }))
+        .toBe('row.poolErrRouteMissing')
+    })
+
+    it('keeps the status tier for a 405 that DID answer in JSON', () => {
+      // The plugin's own guard is `json(res, 405, {error:'method not allowed'})`,
+      // so a parseable body means the route exists and this really is a method
+      // mismatch. Conflating the two would replace a correct diagnosis.
+      expect(poolFailureText(keyT, { status: 405, bodyUnreadable: false }))
+        .toBe('row.poolErrHttp')
+      expect(poolFailureText(keyT, { status: 405 })).toBe('row.poolErrHttp')
+    })
+
+    it('does not hijack other statuses that happen to have no body', () => {
+      // Only 405 is the missing-route fingerprint: the client only ever POSTs
+      // here, so an unregistered path can only come back as 405. A bodiless 500
+      // or 502 is a real server failure and must keep its own wording.
+      expect(poolFailureText(keyT, { status: 500, bodyUnreadable: true }))
+        .toBe('row.poolErrHttp')
+      expect(poolFailureText(keyT, { status: 502, bodyUnreadable: true }))
+        .toBe('row.poolErrHttp')
+    })
+
+    it('still prefers a structured cause when one is present', () => {
+      // A future Host could send `reason` alongside an unparseable body; the
+      // localized cause is strictly more informative than either status tier.
+      expect(poolFailureText(keyT, {
+        status: 405,
+        reason: 'no-members',
+        bodyUnreadable: true,
+      })).toBe('row.poolErrNoMembers')
+    })
+  })
 })

@@ -238,18 +238,44 @@ export function poolErrorText(
  *     (405/403/400 and the generic 500) otherwise reached the user as bare
  *     English like `HTTP 405`.
  *
+ * Tier 3 splits once more when the response body was not JSON at all: see
+ * {@link PoolFailureInput.bodyUnreadable}. A 405 with an empty body is not the
+ * plugin refusing the method — it is the Host's HTTP layer answering for a route
+ * that was never registered, i.e. a Host process still running older code.
+ *
  * Extracted from the card for the same reason as {@link poolErrorText}: a rule
  * inside the browser-only `.tsx` cannot be tested, and the status tier in
  * particular had no guard at all — reverting it to `` `HTTP ${status}` `` left
  * the entire suite green.
  */
+export interface PoolFailureInput {
+  status: number
+  reason?: string | undefined
+  error?: string | undefined
+  /**
+   * The response carried no JSON document at all (the body would not parse).
+   *
+   * Every handler behind these routes answers in JSON, INCLUDING its own 405
+   * (`{error:'method not allowed'}`). So a 405 whose body is empty or unparseable
+   * did not come from the plugin: it is the Host's HTTP layer, which only answers
+   * that way when the path was never registered. In practice that means the Host
+   * process is still running a build from before this route existed, and the fix
+   * is to restart DSH — NOT to check the plugin version, which is the misleading
+   * advice this branch replaces (issue #86: a real 405 from exactly this cause
+   * told the user "请确认插件是最新版本" while the plugin was already current).
+   */
+  bodyUnreadable?: boolean
+}
+
 export function poolFailureText(
   t: Translate,
-  input: { status: number, reason?: string | undefined, error?: string | undefined },
+  input: PoolFailureInput,
 ): string {
   return poolErrorText(t, input.reason, input.error)
     ?? input.error
-    ?? t('row.poolErrHttp', { status: String(input.status) })
+    ?? (input.bodyUnreadable === true && input.status === 405
+      ? t('row.poolErrRouteMissing')
+      : t('row.poolErrHttp', { status: String(input.status) }))
 }
 
 /**

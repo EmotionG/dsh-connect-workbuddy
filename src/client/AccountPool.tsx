@@ -724,6 +724,9 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
             status: response.status,
             reason: body?.reason,
             error: body?.error,
+            // See the row call sites: a non-JSON body means the route itself is
+            // missing, not that the Host refused the method (issue #86).
+            bodyUnreadable: body === undefined,
           }))
         }
         if (!mounted.current) return
@@ -809,7 +812,14 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
         | { rows?: WorkBuddyWebPoolTestRow[], reason?: string, error?: string }
         | undefined
       if (!response.ok) {
-        throw new Error(poolFailureText(t, { status: response.status, reason: body?.reason, error: body?.error }))
+        throw new Error(poolFailureText(t, {
+          status: response.status,
+          reason: body?.reason,
+          error: body?.error,
+          // No JSON at all means the request never reached a plugin handler: every
+          // route here answers in JSON, its own 405 included (issue #86).
+          bodyUnreadable: body === undefined,
+        }))
       }
       if (!mounted.current) return
       const row = body?.rows?.[0]
@@ -882,7 +892,14 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
         | { reason?: string, error?: string }
         | undefined
       if (!response.ok) {
-        throw new Error(poolFailureText(t, { status: response.status, reason: body?.reason, error: body?.error }))
+        throw new Error(poolFailureText(t, {
+          status: response.status,
+          reason: body?.reason,
+          error: body?.error,
+          // No JSON at all means the request never reached a plugin handler: every
+          // route here answers in JSON, its own 405 included (issue #86).
+          bodyUnreadable: body === undefined,
+        }))
       }
       if (!mounted.current) return
       appendLog(t('row.poolLogBenefitClaimed', {
@@ -936,7 +953,14 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
         | { removed?: boolean, error?: string, reason?: string }
         | undefined
       if (!response.ok) {
-        throw new Error(poolFailureText(t, { status: response.status, reason: body?.reason, error: body?.error }))
+        throw new Error(poolFailureText(t, {
+          status: response.status,
+          reason: body?.reason,
+          error: body?.error,
+          // No JSON at all means the request never reached a plugin handler: every
+          // route here answers in JSON, its own 405 included (issue #86).
+          bodyUnreadable: body === undefined,
+        }))
       }
       if (!mounted.current) return
       appendLog(
