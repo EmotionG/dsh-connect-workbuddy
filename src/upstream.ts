@@ -1413,8 +1413,20 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
  * selector serves them. Without a usable `cli` roster the whole parsed catalog
  * is exposed rather than nothing: the roster is an upstream detail that may
  * change, and an empty answer would silently disarm the provider.
+ *
+ * `keepIds` is the user's own selection riding along with the refresh. The
+ * upstream roster may drop a model the user is actually running — the app
+ * channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 while the SAME
+ * document still publishes it (`x0.26`) and the chat endpoint still answers for
+ * it (measured HTTP 200). A roster read is therefore the upstream's roster PLUS
+ * the kept ids this document still lists: a refresh may add or withdraw
+ * upstream models, but it never silently withdraws a model the user is on.
  */
-export function selectCliModels(rawModels: unknown, agents: unknown): WorkBuddyUpstreamModel[] {
+export function selectCliModels(
+  rawModels: unknown,
+  agents: unknown,
+  keepIds: readonly string[] = [],
+): WorkBuddyUpstreamModel[] {
   const byId = new Map<string, WorkBuddyUpstreamModel>()
   for (const model of Array.isArray(rawModels) ? rawModels : []) {
     const parsed = parseUpstreamModel(model)
@@ -1435,7 +1447,11 @@ export function selectCliModels(rawModels: unknown, agents: unknown): WorkBuddyU
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
   if (models.length === 0) throw new Error('workbuddy model catalog resolved to an empty list')
-  return models
+  const kept = keepIds
+    .filter(id => !ids.includes(id))
+    .map(id => byId.get(id))
+    .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
+  return [...models, ...kept]
 }
 
 /**
@@ -1618,8 +1634,18 @@ export class WorkBuddyUpstreamClient {
    *
    * No user-side toggle is involved: the region comes from the credential's
    * `domain`.
+   *
+   * `keepModelIds` is the user's own selection, passed through to
+   * {@link selectCliModels}: a model the upstream roster dropped but the SAME
+   * document still publishes stays in the roster, so reading the directory
+   * never withdraws a model the user is running (issue #32's failure mode,
+   * one step upstream of it).
    */
-  async fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]> {
+  async fetchModels(
+    credential: WorkBuddyCredential,
+    signal?: AbortSignal,
+    keepModelIds: readonly string[] = [],
+  ): Promise<readonly WorkBuddyUpstreamModel[]> {
     const timeout = signal ?? AbortSignal.timeout(JSON_TIMEOUT_MS)
     const global = regionOf(credential.domain) === 'global'
     if (global) {
@@ -1641,7 +1667,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return withPromos(selectCliModels(data['models'], data['agents']), data)
+      return withPromos(selectCliModels(data['models'], data['agents'], keepModelIds), data)
     }
     const readCatalog = async (path: string): Promise<readonly WorkBuddyUpstreamModel[]> => {
       const response = await fetch(`${chatBase(credential)}${path}`, {
@@ -1659,7 +1685,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return withPromos(selectCliModels(data['models'], data['agents']), data)
+      return withPromos(selectCliModels(data['models'], data['agents'], keepModelIds), data)
     }
     try {
       return await readCatalog(GLOBAL_CONFIG_PATH)

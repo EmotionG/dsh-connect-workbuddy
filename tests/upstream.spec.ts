@@ -398,6 +398,55 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
     expect(models[0]?.promos?.[0]?.badge.label).toBe('夜间折扣')
   })
 
+  it('keeps a model the user runs that the upstream roster dropped', async () => {
+    // The app channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 (the
+    // roster now lists `auto` instead), while the SAME document still publishes
+    // `minimax-m2.7` at `x0.26` and the chat endpoint still answers for it
+    // (measured HTTP 200). The runtime catalog filters the roster by the user's
+    // selection, so a refresh that simply followed the upstream roster would
+    // silently withdraw a model the user is running — issue #32's failure mode.
+    // The user's selection therefore rides along with the roster read.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [
+            { id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000 },
+            { id: 'minimax-m2.7', name: 'MiniMax-M2.7', maxInputTokens: 200_000, maxOutputTokens: 48_000, credits: 'x0.26' },
+          ],
+          agents: [{ name: 'cli', models: ['auto'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient()
+      .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
+    expect(models.map(model => model.id)).toEqual(['auto', 'minimax-m2.7'])
+    expect(models[1]?.creditMultiplier).toBe(0.26)
+  })
+
+  it('does not resurrect a kept model the document no longer publishes', async () => {
+    // The keep rule is bounded by the document: an id the upstream dropped
+    // entirely is not re-added from thin air.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [{ id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000 }],
+          agents: [{ name: 'cli', models: ['auto'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient()
+      .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
+    expect(models.map(model => model.id)).toEqual(['auto'])
+  })
+
   it('falls back to the legacy CN catalog when the app config fails', async () => {
     // The CN branch prefers /v3/config so the card matches the app's roster and
     // prices. A gateway that cannot serve it must degrade to the previous
