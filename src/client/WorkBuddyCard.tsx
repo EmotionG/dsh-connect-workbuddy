@@ -1390,6 +1390,18 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   }
 
   /**
+   * Whether ANY speed run is in flight, for the sweep button's disabled state.
+   *
+   * NOT `tpsProbing !== undefined`. `tpsProbing` is a record that is ALWAYS an
+   * object, so that comparison is permanently true and the button was
+   * permanently disabled — the defect this corrects. The other two sweep buttons
+   * compare `sweeping !== undefined` because `sweeping` really is an
+   * `{done,total} | undefined` pair; this map has no such absent state, so the
+   * emptiness of its keys is what "busy" means.
+   */
+  const tpsBusy = Object.keys(tpsProbing).length > 0
+
+  /**
    * Sweep speed for the models this region has ENABLED.
    *
    * Enabled-only rather than the whole catalog: a speed run is three real
@@ -2039,7 +2051,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                             <button
                               type="button"
                               className="dsm-btn dsm-btn-outline dsm-workbuddy-models-sweep"
-                              disabled={busy || tpsSweeping !== undefined || tpsProbing !== undefined
+                              disabled={busy || tpsSweeping !== undefined || tpsBusy
                                 || activeEnabledIds.size === 0}
                               title={t('row.tpsSweepEnabledHint')}
                               onClick={sweepTpsEnabledModels}
