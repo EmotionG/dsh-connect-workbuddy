@@ -74,6 +74,7 @@ import { readPoolProbes, writePoolProbes } from './account-pool-store.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { WorkBuddyUpstreamClient, knownRegionOf, regionOf } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
+import { attachBusyLevels } from './busy.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
 
@@ -992,6 +993,39 @@ export function apply(ctx: Context, config: Config): void {
     // and the chat endpoint still answers for it, so it stays in the roster.
     const keep = regionStateOf(current(), region).enabledModelIds ?? []
     return client.fetchModels(credential, signal, keep)
+  }
+
+  /**
+   * Stamp each model's LIVE load level onto the runtime roster.
+   *
+   * Deliberately NOT part of {@link discoverModels}: that reader feeds the
+   * settings card's "Refresh from WorkBuddy" draft, which is SAVED into
+   * `lastCatalog` — and a saved load level is a lie the moment the settings page
+   * is closed (`src/busy.ts`). So the level is stamped only on the path that
+   * builds the RUNTIME catalog, and it dies with the process.
+   *
+   * Fail-soft on purpose: a refresh that cannot read the load probe still
+   * delivers the roster. Losing a badge is nothing; losing the model list
+   * because a 5-second probe timed out would be the same defect this plugin
+   * spends most of its comments avoiding.
+   */
+  const withBusyLevels = async (
+    region: WorkBuddyRegion,
+    models: readonly WorkBuddyModelInfo[],
+    signal?: AbortSignal,
+  ): Promise<readonly WorkBuddyModelInfo[]> => {
+    if (models.length === 0) return models
+    try {
+      const credential = await stacks[region].store.resolve()
+      const levels = await client.fetchModelBusy(credential, models.map(model => model.id), signal)
+      return levels.size === 0 ? models : attachBusyLevels(models, levels)
+    } catch (error: unknown) {
+      ctx.logger.warn(
+        'dsh-connect-workbuddy: model load probe unavailable; refreshing the roster without load levels',
+        error,
+      )
+      return models
+    }
   }
 
   /** Push the current config into every region's store selection and catalog. */
@@ -2262,10 +2296,13 @@ export function apply(ctx: Context, config: Config): void {
           // this is defence in depth against a stale model-picker refresh.
           if (!regionEnabled(current(), region)) return []
           const discovered = await discoverModels(region, signal)
+          // Load levels are stamped on the RUNTIME roster only — see
+          // `withBusyLevels` for why the settings draft stays free of them.
+          const live = await withBusyLevels(region, discovered, signal)
           const state = regionStateOf(current(), region)
           const next = withImageSelection(
             deriveCatalog(
-              discovered,
+              live,
               new Set(state.enabledModelIds ?? []),
               state.contextBudgets ?? {},
             ),
@@ -2302,10 +2339,13 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const credential = await stacks[region].store.resolve()
             if (stopped) return
-            const models = await client.fetchModels(
-              credential,
-              undefined,
-              regionStateOf(current(), region).enabledModelIds ?? [],
+            const models = await withBusyLevels(
+              region,
+              await client.fetchModels(
+                credential,
+                undefined,
+                regionStateOf(current(), region).enabledModelIds ?? [],
+              ),
             )
             if (stopped) return
             const state = regionStateOf(current(), region)
