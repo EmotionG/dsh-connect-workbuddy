@@ -316,6 +316,26 @@ describe('card class names are styled', () => {
     expect(missing).toEqual([])
   })
 
+  it('lets the model list be as tall as its rows, with no inner scrollbar', () => {
+    // The picker's whole job is "let me see every model and tick it". A
+    // `max-height` + `overflow-y: auto` here showed roughly seven of the
+    // twenty-odd rows and hid the rest behind a second scrollbar inside a panel
+    // that already scrolls — the user had to discover the inner one, then drag
+    // it, to find out that a model even existed.
+    //
+    // `overflow:hidden` MUST stay even though nothing overflows any more: the
+    // rounded corners are drawn by this bordered box, so without clipping the
+    // first and last row would paint square corners over the radius. Asserting
+    // the absence of a cap alone would let that be "cleaned up" later.
+    const css = cardCss()
+    const start = css.indexOf('.dsm-workbuddy-model-list{')
+    expect(start, '.dsm-workbuddy-model-list disappeared from the stylesheet').toBeGreaterThanOrEqual(0)
+    const rule = css.slice(start, css.indexOf('}', start))
+    expect(rule, 'the model list must not cap its own height').not.toContain('max-height')
+    expect(rule, 'the model list must not scroll inside the panel').not.toContain('overflow-y')
+    expect(rule).toContain('overflow:hidden')
+  })
+
   it('keeps the bar classes the resting layout depends on', () => {
     // Named explicitly because the one-line layout is carried by these
     // specific properties, not by the class merely existing: without

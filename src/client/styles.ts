@@ -252,14 +252,22 @@ export const WORKBUDDY_CARD_CSS = `
    an error banner, because the fact it states is normal product behaviour
    rather than a failure. Weight is the only signal it needs. */
 .dsm-workbuddy-free-quota-warn{font-weight:600}
-/* The rows scroll INSIDE the box once the list outgrows it: the section owns a
-   fixed share of the card instead of setting its height from the roster's
-   length. Without this the list was the card's height all by itself — 20-odd
-   models, each carrying a budget field, a reasoning picker and an image toggle.
-   The rounded corners survive because the scroll container is the bordered box
-   itself, so the first and last row are clipped by the same radius the border
-   already draws. */
-.dsm-workbuddy-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden;max-height:520px;overflow-y:auto}
+/* Every model is laid out in full — NO inner scroll box.
+ *
+ * The previous rule capped this at max-height 520px with overflow-y auto, so a
+ * 20-model roster showed about seven rows and hid the rest behind a scrollbar
+ * the user had to discover and then drag inside a panel that already scrolls.
+ * A model picker whose whole job is "let me see and tick models" should not
+ * have two scrollbars stacked on top of each other.
+ *
+ * overflow:hidden stays, and it is load-bearing rather than vestigial: the
+ * rounded corners are drawn by this bordered box, so without clipping the first
+ * and last row would paint square corners over it. Nothing is CLIPPED by it any
+ * more, because the box is now exactly as tall as its contents.
+ *
+ * NOTE: no backticks in CSS comments inside this template literal — one would
+ * terminate the string early and silently drop every rule after it. */
+.dsm-workbuddy-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden}
 .dsm-workbuddy-model{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:10px 12px;background:var(--dsw-alias-bg-layer-2,#232529);transition:opacity .16s}
 .dsm-workbuddy-model-disabled{opacity:.55}
 .dsm-workbuddy-model+.dsm-workbuddy-model{border-top:1px solid var(--dsw-alias-border-l2,#36373b)}
