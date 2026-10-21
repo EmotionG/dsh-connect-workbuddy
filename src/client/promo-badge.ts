@@ -75,31 +75,51 @@ export function promoBadgeColor(promo: WorkBuddyPromo): string | undefined {
 }
 
 /**
- * A calendar day, in the user's own locale.
+ * A calendar day, in the user's own locale — read in the ZONE the upstream
+ * wrote the instant in.
  *
- * `medium` rather than the card's numeric `MM/DD` form: this is a
- * promotion's lifetime, and "Jul 6, 2026" reads as a date while "07/06"
- * reads as a number the user has to decode.
+ * The zone is part of the statement, exactly as it is for the daily hours. The
+ * upstream publishes `validFrom: "2026-07-06T00:00:00+08:00"` and describes the
+ * same campaign as "7月6日–10月31日". Formatting that instant in the reader's
+ * own zone shows 7月5日 to anyone west of UTC, contradicting the upstream's own
+ * copy in the same tooltip. Keeping the upstream's zone makes the tooltip
+ * self-consistent wherever it is read.
+ *
+ * `medium` rather than the card's numeric `MM/DD` form: this is a promotion's
+ * lifetime, and "Jul 6, 2026" reads as a date while "07/06" reads as a number
+ * the user has to decode.
  */
-function formatDay(ms: number, language?: string): string {
+function formatDay(ms: number, language?: string, timeZone?: string): string {
   try {
     return new Intl.DateTimeFormat(language === undefined || language === '' ? undefined : language, {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
+      ...timeZone === undefined ? {} : { timeZone },
     }).format(new Date(ms))
   } catch {
-    // An unusable locale tag must not cost the user the whole tooltip.
+    // An unusable locale tag OR zone must not cost the user the whole tooltip.
     return new Date(ms).toISOString().slice(0, 10)
   }
 }
 
-/** The promotion's lifetime, as the upstream's own two ends. */
+/**
+ * The promotion's lifetime, as the upstream's own two ends.
+ *
+ * `validUntil` is EXCLUSIVE — see `promoWithinAbsoluteWindow`: the promotion is
+ * over AT that instant. The upstream writes it as the midnight that opens the
+ * day after the campaign, and says "– Oct 31" in its own copy for a
+ * `validUntil` of `2026-11-01T00:00:00+08:00`. Printing the raw instant would
+ * put "Nov 1, 2026" in the same tooltip and read as if the campaign ran a day
+ * longer than it does. One millisecond before the boundary is the last instant
+ * that still belongs to it, so that is what gets rendered.
+ */
 function promoRangeText(promo: WorkBuddyPromo, language?: string): string | undefined {
   const schedule = promo.schedule
   if (schedule === undefined) return undefined
-  const from = schedule.validFrom === undefined ? undefined : formatDay(schedule.validFrom, language)
-  const to = schedule.validUntil === undefined ? undefined : formatDay(schedule.validUntil, language)
+  const zone = schedule.timezone
+  const from = schedule.validFrom === undefined ? undefined : formatDay(schedule.validFrom, language, zone)
+  const to = schedule.validUntil === undefined ? undefined : formatDay(schedule.validUntil - 1, language, zone)
   if (from === undefined && to === undefined) return undefined
   if (from === undefined) return `– ${to ?? ''}`
   if (to === undefined) return `${from} –`

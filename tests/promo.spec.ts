@@ -213,4 +213,92 @@ describe('which badge holds now', () => {
     expect(selectPromoBadge(undefined, NIGHT_2330)).toBeUndefined()
     expect(selectPromoBadge([], NIGHT_2330)).toBeUndefined()
   })
+
+  it('treats a published-but-unreadable daily window as never running, not as all day', () => {
+    // The upstream DID say this campaign has hours; every one of them failed to
+    // parse. Reading that as "no hours" would turn a night-only discount into a
+    // badge shown around the clock — the one direction that overstates the
+    // offer. The parse failure must hide the badge, not widen it.
+    const broken = [
+      { start: '23:00', end: '25:00' },       // hour out of range
+      { start: '23:00:00', end: '07:50:00' }, // seconds in the clock value
+      { from: '23:00', to: '07:50' },         // renamed keys
+    ]
+    for (const daily of broken) {
+      const [promo] = parseWorkBuddyPromos([{
+        ...hy3Promotion,
+        id: 'broken',
+        badge: { label: '限时免费', display: 'activeOnly' },
+        schedule: { timezone: 'Asia/Shanghai', daily: [daily] },
+      }], [])
+      expect(promo?.schedule?.dailyUnusable).toBe(true)
+      // 13:00 is outside the intended night window; it must draw nothing.
+      expect(selectPromoBadge([promo!], Date.parse('2026-10-21T13:00:00+08:00'))).toBeUndefined()
+      // And it must not stand as a badge either.
+      expect(selectPromoBadge([promo!], NIGHT_2330)).toBeUndefined()
+    }
+  })
+
+  it('keeps the upstream saying nothing about hours as a 24-hour campaign', () => {
+    // No `daily` at all is a genuinely 24-hour campaign (the tier badge is the
+    // real instance). It must NOT be lumped in with the parse failures above.
+    const [tier] = parseWorkBuddyPromos([], [gptProTier])
+    expect(tier?.schedule).toBeUndefined()
+    expect(selectPromoBadge([tier!], MORNING_0800)?.id).toBe('gpt-pro-only')
+  })
+
+  it('reads a window that ends at 24:00 without leaving a midnight hole', () => {
+    const [promo] = parseWorkBuddyPromos([{
+      ...hy3Promotion,
+      id: 'all-day',
+      badge: { label: '全天', display: 'activeOnly' },
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '0:00', end: '24:00' }] },
+    }], [])
+    for (const iso of ['2026-10-21T00:00:00+08:00', '2026-10-21T12:00:00+08:00', '2026-10-21T23:59:00+08:00']) {
+      expect(promoActiveAt(promo!, Date.parse(iso))).toBe(true)
+    }
+  })
+
+  it('reads a window whose endpoints are equal as a 24-hour window', () => {
+    // docs/PROMO_BADGE.md states this rule; it must be pinned so the "start
+    // inclusive, end exclusive" reading cannot silently turn it into an empty
+    // interval. This branch had no coverage before.
+    const [promo] = parseWorkBuddyPromos([{
+      ...hy3Promotion,
+      id: 'same',
+      badge: { label: 'Same', display: 'activeOnly' },
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '08:00', end: '08:00' }] },
+    }], [])
+    expect(promoActiveAt(promo!, Date.parse('2026-10-21T03:00:00+08:00'))).toBe(true)
+    expect(promoActiveAt(promo!, Date.parse('2026-10-21T13:00:00+08:00'))).toBe(true)
+  })
+
+  it('lets a genuinely running campaign outrank a schedule-less tier badge', () => {
+    // A tier badge has no hours, so `promoActiveAt` is trivially true for it.
+    // Treating that as "running" let a high-priority tier shadow a LOWER
+    // priority campaign whose window really is open — the opposite of what the
+    // "a running promotion wins" rule promises. Step 1 is restricted to
+    // entries that publish hours; the tier competes in step 2.
+    const promos = parseWorkBuddyPromos([
+      {
+        ...hy3Promotion,
+        id: 'night-campaign',
+        priority: 100,
+        badge: { label: '夜间折扣', display: 'activeOnly' },
+        schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '23:00', end: '7:50' }] },
+      },
+    ], [{ ...gptProTier, id: 'high-tier', priority: 200 }])
+    expect(selectPromoBadge(promos, NIGHT_2330)?.id).toBe('night-campaign')
+    // Outside the campaign's hours the schedule-less tier is the only answer.
+    expect(selectPromoBadge(promos, MORNING_0800)?.id).toBe('high-tier')
+  })
+
+  it('breaks a priority tie toward the promotion regardless of input order', () => {
+    const price = { ...hy3Promotion, id: 'price', priority: 200, badge: { label: 'P' } }
+    const access = { ...gptProTier, id: 'access', priority: 200 }
+    expect(selectPromoBadge(parseWorkBuddyPromos([price], [access]), MORNING_0800)?.id).toBe('price')
+    // Reversing the order must not change the answer: the tie-break has to be
+    // in the comparator, not an accident of which array was read first.
+    expect(selectPromoBadge(parseWorkBuddyPromos([price], [access]).reverse(), MORNING_0800)?.id).toBe('price')
+  })
 })

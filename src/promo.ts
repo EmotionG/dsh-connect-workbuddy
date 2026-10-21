@@ -131,6 +131,19 @@ export interface WorkBuddyPromoSchedule {
   validUntil?: number
   /** The daily windows, when the upstream publishes them. */
   daily?: readonly WorkBuddyPromoWindow[]
+  /**
+   * The upstream PUBLISHED `daily`, but not one entry of it could be evaluated.
+   *
+   * This is deliberately NOT the same as "no `daily`": an entry with no
+   * `daily` is a 24-hour campaign (the discount runs whenever the promotion
+   * does), while an entry whose every window failed to parse says nothing at
+   * all about when it runs. Reading the second as "always" would turn a live
+   * night-only campaign into a badge shown around the clock — the one
+   * direction that overstates what the upstream said. A promotion carrying
+   * this flag therefore never counts as running; the parse failure hides the
+   * badge instead of doubling it.
+   */
+  dailyUnusable?: true
 }
 
 /** The upstream's explanatory copy for the badge. */
@@ -177,10 +190,15 @@ function text(value: unknown): string | undefined {
 /**
  * `'HH:mm'` → minutes since midnight, or undefined for anything else.
  *
- * Hours above 23 are refused: the upstream writes wall-clock times, and
- * `24:00` would mean "midnight of the next day", which is a different
- * statement than the one the upstream would be making. A malformed window is
- * dropped rather than guessed at — a wrong window would hide a live promotion.
+ * `24:00` is accepted and means exactly 1440 — the END of a day. The upstream
+ * writes "all day" as `0:00`–`23:59` today, which leaves a one-minute hole
+ * between 23:59 and midnight where a standing campaign reads as not running.
+ * Accepting `24:00` lets such a window be expressed (and lets a future upstream
+ * fix it) without that hole; as a START it is rejected, because a day that
+ * begins at 24:00 is the next day and that is a different statement.
+ *
+ * Any other malformed value is left to the caller to drop — a wrong window
+ * would hide a live promotion, and guessing is not this parser's job.
  */
 function minutesOfClock(value: string): number | undefined {
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
@@ -188,7 +206,9 @@ function minutesOfClock(value: string): number | undefined {
   const hours = Number(match[1])
   const minutes = Number(match[2])
   if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return undefined
-  if (hours > 23 || minutes > 59) return undefined
+  if (minutes > 59) return undefined
+  if (hours > 24) return undefined
+  if (hours === 24) return minutes === 0 ? 24 * 60 : undefined
   return hours * 60 + minutes
 }
 
@@ -259,8 +279,10 @@ function parseDaily(value: unknown): WorkBuddyPromoWindow[] | undefined {
     const start = text(raw['start'])
     const end = text(raw['end'])
     if (start === undefined || end === undefined) continue
-    // A window whose endpoints are not clock times cannot be evaluated; it is
-    // dropped rather than treated as "always" — see `minutesOfClock`.
+    // A window whose endpoints are not clock times cannot be evaluated, so it
+    // is dropped rather than guessed at. Dropping the LAST one, however, must
+    // not quietly turn "night only" into "always" — `parseSchedule` records
+    // that the list was published-but-unusable (see `dailyUnusable`).
     if (minutesOfClock(start) === undefined || minutesOfClock(end) === undefined) continue
     windows.push({ start, end })
   }
@@ -275,12 +297,21 @@ function parseSchedule(value: unknown): WorkBuddyPromoSchedule | undefined {
   const validFrom = parseInstant(raw['validFrom'])
   const validUntil = parseInstant(raw['validUntil'])
   const daily = parseDaily(raw['daily'])
-  if (timezone === undefined && validFrom === undefined && validUntil === undefined && daily === undefined) return undefined
+  // The upstream DID publish `daily` (it is an array with at least one entry)
+  // and yet nothing survived parsing. That is a parse failure, not "no hours":
+  // report it so the promotion is treated as never-running rather than as a
+  // 24-hour campaign. An EMPTY array is the upstream saying nothing, which is
+  // indistinguishable from an absent one and stays "always".
+  const dailyUnusable = daily === undefined
+    && Array.isArray(raw['daily'])
+    && raw['daily'].length > 0
+  if (timezone === undefined && validFrom === undefined && validUntil === undefined && daily === undefined && !dailyUnusable) return undefined
   return {
     ...timezone === undefined ? {} : { timezone },
     ...validFrom === undefined ? {} : { validFrom },
     ...validUntil === undefined ? {} : { validUntil },
     ...daily === undefined ? {} : { daily },
+    ...dailyUnusable ? { dailyUnusable: true as const } : {},
   }
 }
 
@@ -399,8 +430,11 @@ function withinDailyWindows(windows: readonly WorkBuddyPromoWindow[], nowMinutes
     const start = minutesOfClock(window.start)
     const end = minutesOfClock(window.end)
     if (start === undefined || end === undefined) return false
-    // Equal endpoints: a 24-hour window. The upstream never writes one, and
-    // reading it as "never" would hide a promotion that is actually running.
+    // Equal endpoints are a 24-HOUR window (`[X:00, X:00+24h)`), not an empty
+    // one: the end is exclusive and the start inclusive, so a window that
+    // begins and ends at the same clock time covers the whole day. This is the
+    // one place where "start inclusive, end exclusive" cannot be read as an
+    // empty interval; docs/PROMO_BADGE.md states the same rule.
     if (start === end) return true
     if (end > start) return nowMinutes >= start && nowMinutes < end
     // Crossing midnight: `23:00`–`7:50` is the observed CN night window.
@@ -429,10 +463,17 @@ export function promoWithinAbsoluteWindow(promo: WorkBuddyPromo, nowMs: number):
  * The daily window is the discount's own hours — it is what makes a
  * promotion a "night discount" — and a promotion without one is running
  * whenever its absolute window holds.
+ *
+ * A schedule whose `daily` was published but could not be evaluated
+ * ({@link WorkBuddyPromoSchedule.dailyUnusable}) is NOT running: the upstream
+ * did say the campaign has hours, we just cannot read them, and assuming
+ * "always" is the one guess that overstates the offer.
  */
 export function promoWithinDailyWindow(promo: WorkBuddyPromo, nowMs: number): boolean {
   const schedule = promo.schedule
-  if (schedule?.daily === undefined || schedule.daily.length === 0) return true
+  if (schedule === undefined) return true
+  if (schedule.dailyUnusable === true) return false
+  if (schedule.daily === undefined || schedule.daily.length === 0) return true
   return withinDailyWindows(schedule.daily, zonedMinutes(nowMs, schedule.timezone))
 }
 
@@ -445,28 +486,65 @@ export function promoActiveAt(promo: WorkBuddyPromo, nowMs: number): boolean {
 }
 
 /**
+ * Whether the promotion carries ANY temporal statement of its own.
+ *
+ * A tier badge ("Pro Only") has no `schedule` at all: it describes the model
+ * unconditionally, so `promoActiveAt` is trivially true for it. That is
+ * correct on its own, but it made such a badge eligible for step 1, where it
+ * could shadow a lower-priority campaign whose window really is open.
+ * "Running" should mean "this entry says it runs now", and an entry with no
+ * schedule never does — it only ever "stands". Entries WITH a schedule (a
+ * lifetime, hours, or both) are the ones that can be running.
+ */
+function hasSchedule(promo: WorkBuddyPromo): boolean {
+  return promo.schedule !== undefined
+}
+
+/**
  * The badge to draw for a model right now, or undefined when there is none.
  *
  * The order of the two answers is the whole point:
  *
- * 1. A promotion that is RUNNING wins — highest `priority` first.
+ * 1. A promotion RUNNING NOW wins — highest `priority` first. "Running" means
+ *    its absolute window AND its daily hours both hold.
  * 2. Otherwise a STANDING badge (one the upstream did not mark `activeOnly`)
  *    describes the model for as long as the promotion itself lasts. It is
  *    offered only inside the promotion's absolute window, so an expired
  *    promotion stops advertising itself even though its badge was standing.
  *
- * Only ONE badge is drawn per model. The upstream's own `priority` field is
- * an ordering over the entries that name a model, and a model row is one
- * line wide: two badges would push the model name and the image/think
- * checkboxes out of the row.
+ * TWO RULES KEEP STEP 2 FROM STATING SOMETHING THE UPSTREAM DID NOT:
+ *
+ * a. An entry that publishes daily hours may stand outside them (that is what
+ *    "the hours govern the discount, not the badge" means), but an entry whose
+ *    hours could not be parsed cannot stand at all — see `dailyUnusable`.
+ * b. A standing entry with NO schedule at all must not outrank a promotion
+ *    that is genuinely running. `promoActiveAt` returns true for a
+ *    schedule-less tier, which is correct on its own, but it made a
+ *    high-priority tier shadow a lower-priority campaign whose window really
+ *    is open. Step 1 is therefore restricted to entries that carry a
+ *    `schedule`; the schedule-less badges compete only in step 2, where they
+ *    belong.
+ *
+ * The upstream's own `priority` orders entries. Ties are broken toward the
+ * promotion: a price badge ("Free now") is more actionable than an access-tier
+ * badge ("Pro Only"), and the upstream numbers them equally.
+ *
+ * Only ONE badge is drawn per model: a model row is one line wide, and two
+ * badges would push the model name and the image/think checkboxes out of it.
  */
 export function selectPromoBadge(
   promos: readonly WorkBuddyPromo[] | undefined,
   nowMs: number,
 ): WorkBuddyPromo | undefined {
   if (promos === undefined || promos.length === 0) return undefined
-  const sorted = [...promos].sort((a, b) => b.priority - a.priority)
-  const running = sorted.find(promo => promoActiveAt(promo, nowMs))
+  const sorted = [...promos].sort((a, b) =>
+    b.priority - a.priority
+    || (a.source === b.source ? 0 : a.source === 'promotion' ? -1 : 1))
+  const running = sorted.find(promo => hasSchedule(promo) && promoActiveAt(promo, nowMs))
   if (running !== undefined) return running
-  return sorted.find(promo => promo.badge.display !== 'activeOnly' && promoWithinAbsoluteWindow(promo, nowMs))
+  return sorted.find(promo =>
+    promo.badge.display !== 'activeOnly'
+    && promoWithinAbsoluteWindow(promo, nowMs)
+    // Hours that could not be parsed never justify a standing badge.
+    && promo.schedule?.dailyUnusable !== true)
 }
