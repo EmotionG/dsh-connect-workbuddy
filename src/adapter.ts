@@ -582,16 +582,83 @@ function transcript<T>(context: Context): T {
   return context as unknown as T
 }
 
-function withLegacyContext(api: ProviderStreams, generation: PiAiGeneration): ProviderStreams {
+/**
+ * Rewrite every historical assistant message to the identity this adapter stamps.
+ *
+ * ISSUE #102. pi-ai replays a thinking block as `thinking` only when the message
+ * that produced it names the same `provider` / `api` / `model` as the request in
+ * flight (`utils/transform-messages.js`, the `isSameModel` branch); everything
+ * else is flattened to `{type:'text', text: thinking}`.
+ *
+ * The durable transcript the HOST hands back does not carry the identity. The
+ * agent loop writes `source.provider = request.provider`, and `request.provider`
+ * is the ROUTE id (`workbuddy` / `workbuddy-global`), while this adapter stamps
+ * `provider: WORKBUDDY_MODEL_IDENTITY` on the model. So:
+ *
+ *   - CN sessions survive by COINCIDENCE: its route id happens to equal the
+ *     identity (`workbuddy` === `workbuddy`).
+ *   - GLOBAL sessions never match (`workbuddy-global` !== `workbuddy`), so every
+ *     historical thinking block is downgraded on EVERY turn — not only when the
+ *     user switches regions, which is what #59's write-up assumed.
+ *
+ * The model then sees a context in which all of its own past reasoning was
+ * plain assistant text, and writes its new reasoning into `text` to match. That
+ * is the reported symptom: reasoning collapses to a character or two while the
+ * answer channel fills with working notes.
+ *
+ * WHY REWRITING IS SAFE. Every message here was produced by THIS plugin, in THIS
+ * region — the transcript never contains another provider's assistant turns
+ * (`dsh-llm` splits history by provider before the API sees it). The identity is
+ * already the field this adapter stamps on the models it serves, and it resolves
+ * as a registry key in both regions (issue #75). Nothing about routing, billing
+ * or the destination changes: `baseUrl` comes from the model, not from the
+ * message.
+ *
+ * Only `provider` is rewritten. `api` is left alone on purpose: a legacy
+ * (`dsh-foreign`) message carries an api this plugin never sends, and claiming
+ * `openai-completions` for it would assert a wire shape that message was never
+ * built for. The `provider` mismatch is what decides the downgrade, and fixing
+ * it is enough — `isSameModel` still requires the model id and api to match, so
+ * a genuinely different model keeps degrading (covered by a test).
+ *
+ * Returns the same object when nothing changed, so the common case (an
+ * already-normalized transcript) allocates nothing.
+ */
+export function alignAssistantIdentities(context: Context, identity: string = WORKBUDDY_MODEL_IDENTITY): Context {
+  const messages = context.messages
+  if (!Array.isArray(messages) || messages.length === 0) return context
+  let changed = false
+  const next = messages.map(message => {
+    if (typeof message !== 'object' || message === null) return message
+    const record = message as unknown as Record<string, unknown>
+    if (record['role'] !== 'assistant') return message
+    if (record['provider'] === identity) return message
+    changed = true
+    return { ...record, provider: identity } as unknown as typeof message
+  })
+  return changed ? { ...context, messages: next } : context
+}
+
+function withLegacyContext(
+  api: ProviderStreams,
+  generation: PiAiGeneration,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+): ProviderStreams {
+  /** One place so both branches and both entry points agree on the order. */
+  const prepare = (context: Context): Context =>
+    alignAssistantIdentities(
+      generation === 'modern' ? foldModernContext(context) : adaptLegacyPiAiContext(context),
+      identity,
+    )
   if (generation === 'modern') {
     return {
       ...api,
       stream: (model, context, options) =>
-        api.stream(model, transcript<Parameters<typeof api.stream>[1]>(foldModernContext(context)), options),
+        api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context)), options),
       streamSimple: (model, context, options) =>
         api.streamSimple(
           model,
-          transcript<Parameters<typeof api.streamSimple>[1]>(foldModernContext(context)),
+          transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context)),
           options,
         ),
     }
@@ -599,11 +666,11 @@ function withLegacyContext(api: ProviderStreams, generation: PiAiGeneration): Pr
   return {
     ...api,
     stream: (model, context, options) =>
-      api.stream(model, transcript<Parameters<typeof api.stream>[1]>(adaptLegacyPiAiContext(context)), options),
+      api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context)), options),
     streamSimple: (model, context, options) =>
       api.streamSimple(
         model,
-        transcript<Parameters<typeof api.streamSimple>[1]>(adaptLegacyPiAiContext(context)),
+        transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context)),
         options,
       ),
   }
@@ -825,7 +892,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
       },
     },
     models: buildModels(),
-    api: withContextRescue(withLegacyContext(openAICompletionsApi(), generation), options.resolveContextRescue),
+    api: withContextRescue(withLegacyContext(openAICompletionsApi(), generation, modelIdentity), options.resolveContextRescue),
   })
 
   // `getModels` is delegated to a live read (the reuse-catalog pattern from

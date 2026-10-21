@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.1.0 (2026-10-22)
+
+> 版本号是 **minor**：修了两个行为缺陷（不是接口变更），但其中第一个会改变每一轮请求实际发出去的内容，所以不用 patch。
+
+### Fixes
+
+- **global 区的历史思考不再被降级成正文（issue #102）** —— 这是本仓库最严重的一个 bug，而且它被一条假绿的测试盖了四个版本。pi-ai 只在「记这条消息的 provider / api / model 三者都等于当前请求」时才把历史 thinking 重放成 thinking，否则整块摊平成 `text`。DSH 的 agent loop 写消息时用的是**路由名**（`source.provider = request.provider` → `workbuddy-global`），而插件给模型盖的章是**共享 identity**（`workbuddy`），两者永远不等。后果：global 会话**每一轮**都把模型自己的历史推理翻成正文，模型看到「我以前的思考全是正文」，于是把新推理也写进正文——这就是报告里「reasoning 只有 1 个字、text 里全是工作笔记」的形状。
+  - 国内区之所以正常，只是因为它**恰好**路由名 == 章名（`workbuddy` === `workbuddy`）。
+  - 修法：新增 `alignAssistantIdentities()`，在 transcript 交给 pi-ai 之前把历史 assistant 消息的 `provider` 改写成 identity。**只改 `provider`，不动 `api`**——`dsh-foreign` 消息的 api 是插件从不会发的形状，声称 `openai-completions` 等于断言一个它从未按之构建的线上格式；而 `isSameModel` 仍然要求 model id 匹配，所以真正的换模型照样降级（有测试钉住）。
+  - **测试先改红再改绿**：`tests/issue59-cross-region-thinking.spec.ts` 里那条「双向」用例原本是 `for (...) { void recorded; void replayed; ... }`——两个循环变量被直接丢弃，两次迭代断言的是同一件事，从未测过跨区域。现在按**真实形状**喂（`source.provider` = 路由名 + 请求侧 = identity），修复前必红。
+  - 新增 5 条边界用例：user / toolResult 不动（原对象返回，请求路径上不分配）、已对齐时不分配、只改 provider、不同 model id 仍降级、畸形条目不抛。
+
+- **`11115` 让宿主认不出「上下文溢出」，丢掉了自愈能力（issue #101）** —— 上游这个码有两种报文：形态 A 带 `prompt is too long: N tokens > M maximum`，形态 B 只有一句中文「本次输入加上历史对话超过了模型上限」。而宿主是靠**英文正则**（25 条 pattern，第一条就是 `prompt (?:is )?too long`）判断要不要跑压缩救援的——中文一句都不命中。于是形态 B 既不压缩也不重试，直接把 400 甩给用户，连它自己那句「请精简内容」的建议宿主都无法执行。
+  - 修法：错误文案前面加一句 `prompt is too long (upstream code 11115)`，上游原文紧跟在后面。机器拿到信号，人仍然看到网关自己的建议。
+  - **不编造 token 数字**：形态 B 根本没给数字，写一个「N tokens > M」正是这个仓库一直在避免的那种「自信的错误诊断」。
+  - `isContextTooLongBody()` 用带边界的正则，`111150` / `1111` 不会被误判成溢出——误判会让宿主跑一轮毫无用处的压缩。
+  - 分类不变：仍是 `client`，仍然不换号（溢出是请求的问题，换账号只会每个账号烧一次）。
+
+### Tests
+
+- `tests/issue101-context-overflow.spec.ts`（8 条，新增）：两种形态都识别、相邻码不误伤、marker 命中宿主 pattern 且不被误认为限流、不编造数字、分类不变；外加一条**端到端**用例真的把一次 11115 请求驱过 shim，读宿主会看到的那句文案，确认 marker 在、网关原文在、requestId 在。
+- `tests/issue59-cross-region-thinking.spec.ts`（12 条，改写 1 条 + 新增 5 条）。
+- 全量 `npx vitest run` = **108 文件 / 1773 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
+
 ## 5.0.1 (2026-10-22)
 
 > 版本号是 **patch**：改卡面上的一个字符串（标题）、去掉模型列表的一条 CSS 规则与两行路由项，以及几处描述它们的文档。没有接口或配置结构的变更——但如果你的配置里存着 `auto` / `default-model`，升级后它不再出现在列表里。

@@ -97,21 +97,43 @@ describe('issue #59: cross-region thinking replay', () => {
     expect(first?.content[0]?.thinking).toBe('why I did that')
   })
 
-  it('KEEPS the thinking block in BOTH directions, because the identity is symmetric', async () => {
-    const { WORKBUDDY_MODEL_IDENTITY } = await import('../src/adapter.ts')
-    for (const [recorded, replayed] of [
-      // CN history, replayed from the global route (the reported direction)…
-      ['cn', 'global'],
-      // …and the reverse, which the reporter's round trip hits too.
-      ['global', 'cn'],
-    ]) {
-      void recorded
-      void replayed
+  it('KEEPS the thinking block across BOTH regional routes, in the shape the HOST produces', async () => {
+    // ISSUE #102 — THE CASE THIS FILE MISSED FOR FOUR RELEASES.
+    //
+    // The previous version of this case looped `[['cn','global'], ['global','cn']]`
+    // and then `void recorded; void replayed` — discarding both loop variables
+    // and asserting identity ↔ identity on every iteration. It tested one thing
+    // twice and never the thing it was named for, which is why #59 and #75
+    // shipped green while global sessions still lost every historical thinking
+    // block.
+    //
+    // The durable message the HOST replays does NOT carry the identity: the
+    // agent loop writes `source.provider = request.provider`, i.e. the ROUTE id
+    // (`workbuddy-global`), while the stamp the plugin put on the response is
+    // the shared identity (`workbuddy`). pi-ai compares `assistantMsg.provider`
+    // against `model.provider`, so route-vs-identity is a permanent mismatch and
+    // every thinking block is downgraded to text on EVERY turn of a global
+    // session — not only when the user switches regions.
+    //
+    // So the fixture now uses the real shape: a message recorded through a route,
+    // replayed under the identity the adapter stamps.
+    const { WORKBUDDY_MODEL_IDENTITY, WORKBUDDY_PROVIDERS, alignAssistantIdentities } =
+      await import('../src/adapter.ts')
+    for (const region of ['cn', 'global'] as const) {
+      const route = WORKBUDDY_PROVIDERS[region]
+      // The pipeline step under test: the adapter aligns the transcript BEFORE
+      // pi-ai sees it, which is what turns a route-stamped history into a
+      // replayable one.
+      const aligned = alignAssistantIdentities(
+        { messages: [assistantWithThinking(route, 'hy3', `thought from ${region}`)] } as never,
+        WORKBUDDY_MODEL_IDENTITY,
+      )
       const transformed = transformMessages(
-        [assistantWithThinking(WORKBUDDY_MODEL_IDENTITY, 'hy3', 'x')] as never,
+        aligned.messages as never,
+        // What the request in flight stamps: the shared identity.
         requestModel(WORKBUDDY_MODEL_IDENTITY) as never,
       )
-      expect(blockTypes(transformed)).toEqual(['thinking', 'text'])
+      expect(blockTypes(transformed), `history recorded via ${route}`).toEqual(['thinking', 'text'])
     }
   })
 
@@ -249,5 +271,82 @@ describe('issue #59: the shared identity is not a shared destination', () => {
 
     // The CN route IS the identity, so CN must not publish the identity twice.
     expect([...cn.config.profiles().keys()]).toEqual([WORKBUDDY_PROVIDER])
+  })
+})
+
+/**
+ * Issue #102, the assertions that keep the fix from over-reaching.
+ *
+ * The alignment above is a blunt instrument — it rewrites `provider` on EVERY
+ * historical assistant message. These cases state exactly how blunt it is
+ * allowed to be.
+ */
+describe('issue #102: alignAssistantIdentities boundaries', () => {
+  it('leaves user and toolResult messages completely alone', async () => {
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    // Only an ASSISTANT message carries the provider that pi-ai compares. A
+    // user message has none, and a toolResult's `toolName` is matched by name,
+    // not by provider — rewriting those would be noise at best.
+    const messages = [
+      { role: 'user', content: 'hi', timestamp: 0 },
+      { role: 'toolResult', toolCallId: 'x', toolName: 't', content: [], isError: false, timestamp: 0 },
+    ]
+    const context = { messages } as never
+    const out = alignAssistantIdentities(context, WORKBUDDY_MODEL_IDENTITY)
+    // Same object back: with no assistant message to rewrite, the aligner must
+    // not allocate on the request path.
+    expect(out).toBe(context)
+    expect(out.messages).toEqual(messages as never)
+  })
+
+  it('returns the SAME context object when every assistant message already matches', async () => {
+    // The common case, now that the aligner runs on every request: an
+    // already-aligned transcript must not allocate a new array per turn.
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    const context = { messages: [assistantWithThinking(WORKBUDDY_MODEL_IDENTITY, 'hy3', 'x')] } as never
+    expect(alignAssistantIdentities(context, WORKBUDDY_MODEL_IDENTITY)).toBe(context)
+  })
+
+  it('rewrites ONLY provider — api and model are untouched', async () => {
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    // `api` is deliberately left alone: a `dsh-foreign` message carries an api
+    // this plugin never sends, and claiming `openai-completions` for it would
+    // assert a wire shape that message was never built for. The provider
+    // mismatch is what decides the downgrade; fixing that is enough.
+    const original = assistantWithThinking('workbuddy-global', 'hy3', 'x') as Record<string, unknown>
+    const out = alignAssistantIdentities({ messages: [original] } as never, WORKBUDDY_MODEL_IDENTITY)
+    const rewritten = (out.messages as unknown as Record<string, unknown>[])[0]
+    expect(rewritten?.['provider']).toBe(WORKBUDDY_MODEL_IDENTITY)
+    expect(rewritten?.['api']).toBe('openai-completions')
+    expect(rewritten?.['model']).toBe('hy3')
+    // And nothing else moved: the same chunk count, the same text.
+    expect(blockTypes(out.messages)).toEqual(['thinking', 'text'])
+  })
+
+  it('still lets a DIFFERENT model id degrade, so the fix cannot hide a real switch', async () => {
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    // #102's fix must not become "#59 reverted the other way": a transcript
+    // whose model id genuinely differs is a different model, and its thinking
+    // signature is not valid there.
+    const aligned = alignAssistantIdentities(
+      { messages: [assistantWithThinking('workbuddy-global', 'hy3', 'x')] } as never,
+      WORKBUDDY_MODEL_IDENTITY,
+    )
+    const transformed = transformMessages(
+      aligned.messages as never,
+      requestModel(WORKBUDDY_MODEL_IDENTITY, 'other-model') as never,
+    )
+    expect(blockTypes(transformed)).toEqual(['text', 'text'])
+  })
+
+  it('tolerates a malformed entry instead of throwing mid-request', async () => {
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    // This runs on the request path; a throw here would cost the whole turn.
+    const out = alignAssistantIdentities(
+      { messages: [null, 'nonsense', assistantWithThinking('workbuddy-global', 'hy3', 'x')] } as never,
+      WORKBUDDY_MODEL_IDENTITY,
+    )
+    expect((out.messages as unknown[]).length).toBe(3)
+    expect(blockTypes([(out.messages as unknown[])[2]])).toEqual(['thinking', 'text'])
   })
 })

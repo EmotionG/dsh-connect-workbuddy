@@ -583,6 +583,62 @@ const MODEL_BUSY_CODE = '"code":14003'
 const CHANNEL_REJECT_CODE = '"code":11128'
 
 /**
+ * Business code for "the request exceeded the model's context window" (issue #101).
+ *
+ * The gateway answers `11115` in TWO shapes, and only one of them is
+ * self-describing:
+ *
+ *   A. `prompt is too long: 100001 tokens > 100000 maximum` — carries numbers;
+ *   B. the localized sentence only (「本次输入加上历史对话超过了模型上限…」), no numbers.
+ *
+ * Shape B is the one that hurt. The HOST decides whether to run its
+ * context-overflow rescue by matching the error text against a list of ENGLISH
+ * patterns (`prompt (?:is )?too long`, `exceeds the context window`,
+ * `context[_ ]length[_ ]exceeded`, …25 of them), and a Chinese sentence matches
+ * none of them. So on shape B the host neither compacts nor retries: the user
+ * gets a bare 400 whose own advice ("请精简内容") the host cannot act on.
+ *
+ * {@link contextOverflowMarker} is the fix: the plugin adds an English clause
+ * the host recognises, and keeps the upstream's own sentence beside it.
+ */
+/**
+ * The business code, in either of the two spellings the plugin ever holds.
+ *
+ * Two forms are in circulation and BOTH reach this predicate:
+ *   - the raw upstream body: `{"code":11115,...}`;
+ *   - the reply this plugin already composed, which renders it as
+ *     `（code 11115，requestId …）` — the form the retry path re-reads.
+ *
+ * The trailing `(?!\d)` matters: `111150` and `1111` both contain the digits
+ * after a naive substring test, and misreading a DIFFERENT refusal as an
+ * overflow would send the host into a compaction pass that cannot help.
+ */
+const CONTEXT_TOO_LONG_CODE = /"code"\s*:\s*11115(?!\d)|code\s+11115(?!\d)/u
+
+/**
+ * Whether this body is the context-length refusal, in EITHER of its shapes.
+ *
+ * Shape B carries no number and no English phrase, so the business code is the
+ * only reliable handle — the same reasoning as {@link isChannelRejectBody}'s
+ * code-plus-wording pair, except that here the wording is what VARIES.
+ */
+export function isContextTooLongBody(body: string): boolean {
+  return CONTEXT_TOO_LONG_CODE.test(body)
+}
+
+/**
+ * An English clause the HOST's overflow detector recognises, for issue #101.
+ *
+ * `prompt is too long` is the first entry of the host's pattern list and the
+ * phrasing Anthropic-compatible gateways already use, so it is the cheapest way
+ * to say "this is an overflow" to a detector that only reads English. The
+ * numbers are omitted deliberately: the upstream never gave them in shape B, and
+ * inventing them would be the exact confident-wrong-diagnosis this plugin spends
+ * its comments avoiding.
+ */
+export const CONTEXT_OVERFLOW_MARKER = 'prompt is too long (upstream code 11115)'
+
+/**
  * Wording that identifies the CHANNEL half of `11128` (the other halves being
  * `conversation id missing` and `first message is not system prompt`).
  *

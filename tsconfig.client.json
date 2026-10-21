@@ -26,6 +26,7 @@
     "tests/context-tiers.spec.tsx",
     "tests/card-credits-switch.spec.tsx",
     "tests/image-tool-optin.spec.ts",
+    "tests/issue101-context-overflow.spec.ts",
     "tests/composer-credits-gate.spec.ts",
     "tests/composer-credits-render.spec.tsx",
     "tests/issue46-namespace-binding.spec.tsx",

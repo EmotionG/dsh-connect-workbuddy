@@ -35,6 +35,8 @@ import {
   modelIdOfBody,
   forceNeutralHead,
   isConversationIdGateBody,
+  isContextTooLongBody,
+  CONTEXT_OVERFLOW_MARKER,
   isFirstMessageGateBody,
   openingEvidenceOfBody,
   perturbChannelFingerprints,
@@ -1957,9 +1959,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // "possibly not an official client" sentence for all three gates — quoting
       // it next to a header/first-message diagnosis is what made these reports
       // cycle through account and region swaps.
+      // ISSUE #101: the host recognises a context overflow by matching the error
+      // text against ~25 ENGLISH patterns, and the gateway's own sentence for
+      // `11115` is Chinese with no numbers — so it matched nothing, the host's
+      // compaction rescue never ran, and the user got a bare 400 whose advice
+      // ("请精简内容") the host could not act on. The English clause goes FIRST so
+      // a detector reading the head of the message sees it, and the upstream's
+      // own sentence stays right after it so the human still gets the real advice.
+      const overflow = isContextTooLongBody(result.message)
+        ? `${CONTEXT_OVERFLOW_MARKER}。`
+        : ''
       const body = siblingGate !== undefined
         ? siblingGate
-        : advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`
+        : `${overflow}${advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`}`
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],
