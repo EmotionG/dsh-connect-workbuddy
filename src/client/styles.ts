@@ -151,7 +151,7 @@ export const WORKBUDDY_CARD_CSS = `
    CONTRAST colour, so a ticked box painted itself as a heavy black pill — the
    loudest object in a section made of plain 13px text. */
 .dsm-workbuddy-pref input{flex:none;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
-.dsm-workbuddy-pref-check{inline-size:15px;block-size:15px;margin:3px 0 0}
+.dsm-workbuddy-pref-check,.dsm-workbuddy-image-tool-check{inline-size:15px;block-size:15px;margin:3px 0 0}
 .dsm-workbuddy-pref input:disabled{cursor:default}
 .dsm-workbuddy-pref:has(input:disabled){opacity:.6;cursor:default}
 /* The NAME and what it does are TWO lines, not one wrapped blob: first what the

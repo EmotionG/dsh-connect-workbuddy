@@ -450,6 +450,21 @@ export function regionCreditsShownOf(value: unknown, region: WorkBuddyWebRegion)
 }
 
 /**
+ * Whether the model may call the image-generation tool in one region.
+ *
+ * OPT-IN, unlike every other switch in this file: absent reads as `false`. The
+ * asymmetry is deliberate. The credit line and the provider switch are things
+ * whose absence should behave like a fresh install (on), because a hidden line
+ * or a withdrawn provider is recoverable by clicking. This one authorizes the
+ * MODEL to spend credits on its own — about 5.71 per image, with no per-call
+ * approval available in the host — so an upgrade or an unreadable setting must
+ * leave it OFF rather than silently grant it.
+ */
+export function regionImageToolEnabledOf(value: unknown, region: WorkBuddyWebRegion): boolean {
+  return regionSlotOf(value, region)['imageToolEnabled'] === true
+}
+
+/**
  * The two seats the credit readout can occupy (issue #62).
  *
  * `composer` is the composer tool row (`conversation.input.left`); `stats` is
@@ -498,6 +513,23 @@ export function nextRegionCreditsShown(
   return nextRegionSlots(regionsMapOf(value), region, {
     ...regionSlotOf(value, region),
     showCreditsInMainUi: shown,
+  })
+}
+
+/**
+ * Build the next `regions` settings value for the image-tool opt-in.
+ *
+ * Same merge rule: ONLY the target region's flag changes, so the directory,
+ * the model selection and the sibling region survive the write.
+ */
+export function nextRegionImageToolEnabled(
+  value: unknown,
+  region: WorkBuddyWebRegion,
+  enabled: boolean,
+): Record<string, unknown> {
+  return nextRegionSlots(regionsMapOf(value), region, {
+    ...regionSlotOf(value, region),
+    imageToolEnabled: enabled,
   })
 }
 
@@ -760,6 +792,15 @@ export type WorkBuddyWebUsage =
      * "关闭不了" report.
      */
     showCreditsInMainUi?: boolean
+    /**
+     * Whether the model may call the image-generation tool here (opt-in).
+     *
+     * Travels on the Host's answer for the same reason as the fields around it,
+     * and matters more: a checkbox rendering a stale value would let the user
+     * believe the spending capability was ON when it is off, or leave it on
+     * after a switch-off that never landed.
+     */
+    imageToolEnabled?: boolean
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     message?: string
@@ -797,6 +838,15 @@ export type WorkBuddyWebUsage =
      * settings mirror.
      */
     showCreditsInMainUi?: boolean
+    /**
+     * Whether the model may call the image-generation tool here (opt-in).
+     *
+     * Travels on the Host's answer for the same reason as the fields around it,
+     * and matters more: a checkbox rendering a stale value would let the user
+     * believe the spending capability was ON when it is off, or leave it on
+     * after a switch-off that never landed.
+     */
+    imageToolEnabled?: boolean
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     source?: 'desktop' | 'dsh'

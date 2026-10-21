@@ -387,6 +387,11 @@ export const en = {
   'row.poolRowRemoved': '{accountName}: hidden from the list. 「Detect accounts again」 re-adds it; the desktop app stays signed in.',
   'row.poolRowRemoving': 'Removing the account…',
   'row.poolRowRemoveDesktopOnly': '{accountName}: hidden from the list — this account comes from the desktop app\'s own sign-in, which is left untouched. 「Detect accounts again」 re-adds it.',
+  // The image tool is the ONE capability where the model spends on its own
+  // (about 5.71 credits a picture, no per-call approval in the host). Opt-in
+  // for that reason, so the copy says what it costs instead of only naming it.
+  'row.imageToolLabel': 'Let the model draw images',
+  'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image, with no per-call confirmation. Off means the tool is not registered at all.',
   'row.showCreditsCn': 'Show credits in the composer toolbar',
   'row.showCreditsGlobal': 'Show credits in the composer toolbar',
   'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
@@ -800,6 +805,11 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolRowRemoved': '{accountName}：已从列表中隐藏。点「重新检测账号」会重新加入，桌面 App 的登录不受影响。',
   'row.poolRowRemoving': '正在删除账号…',
   'row.poolRowRemoveDesktopOnly': '{accountName}：已从列表中隐藏——这个账号来自桌面 App 自己的登录，该登录未被改动。点「重新检测账号」会重新加入。',
+  // 生图工具是本插件里唯一「由模型自己决定花钱」的能力（约 5.71 积分/张，
+  // 宿主没有逐次确认的机制），所以默认关闭，文案也必须把单价说出来，
+  // 而不是只给它一个名字。
+  'row.imageToolLabel': '允许模型自主生图',
+  'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——约 5.71 积分/张，没有逐次确认。关闭时该工具根本不会注册。',
   'row.showCreditsCn': '在输入框工具栏显示积分读数',
   'row.showCreditsGlobal': '在输入框工具栏显示积分读数',
   'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',

@@ -31,8 +31,10 @@ import {
   nextRegionCreditPosition,
   nextRegionCreditsShown,
   nextRegionEnabled,
+  nextRegionImageToolEnabled,
   regionCreditsShownOf,
   regionEnabledOf,
+  regionImageToolEnabledOf,
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
@@ -52,7 +54,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { isFileContentionWriteError, writeAccountSlot, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionModels } from './account-selection.ts'
+import { isFileContentionWriteError, writeAccountSlot, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -800,6 +802,20 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   }
 
   /**
+   * Whether the model may call the image tool in this region.
+   *
+   * Read off the Host's answer first, like {@link creditsShownOn} and for the
+   * same measured reason — the browser mirror is stale for this namespace on the
+   * affected 0.1.7 deployments, and here a stale `true` would be worse than a
+   * dead checkbox: it would claim the spending capability is on.
+   */
+  const imageToolOn = (item: WorkBuddyWebRegion): boolean => {
+    const usage = statusByRegion[item] as { imageToolEnabled?: unknown } | undefined
+    if (typeof usage?.imageToolEnabled === 'boolean') return usage.imageToolEnabled
+    return regionImageToolEnabledOf(settingsScope?.getSnapshot().value, item)
+  }
+
+  /**
    * Switch one region's provider off or on. The write carries the region's
    * whole slot through untouched — only `enabled` changes — so the user's
    * directory, model picks, image opt-ins and budgets survive a round trip.
@@ -916,6 +932,29 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       // browser mirror is stale for this namespace), so without this re-read the
       // box keeps showing its previous state and the toggle looks dead even
       // though it landed — the "关闭不了" report.
+      await refreshUsage(item)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setTogglingCredits(undefined)
+    }
+  }
+
+  const toggleImageTool = async (item: WorkBuddyWebRegion, enabled: boolean): Promise<void> => {
+    if (settingsScope === undefined) return
+    setTogglingCredits(item)
+    try {
+      const regions = nextRegionImageToolEnabled(settingsScope.getSnapshot().value, item, enabled) as Record<string, unknown>
+      const slot = regions[item]
+      await writeRegionImageToolEnabled(
+        settingsScope,
+        item,
+        enabled,
+        typeof slot === 'object' && slot !== null ? slot as Record<string, unknown> : {},
+      )
+      // Re-read the Host so the box renders the committed value, for the same
+      // measured reason as `toggleCredits`: this namespace's browser mirror is
+      // written by the Host endpoint and does not come back through `scope.set`.
       await refreshUsage(item)
     } catch (error: unknown) {
       if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
@@ -1424,8 +1463,44 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * survives a Host that reports no pool state instead of vanishing with the
    * section that happened to carry it.
    */
+  /**
+   * The image tool opt-in, rendered above the credit preferences.
+   *
+   * It sits first because it is the only preference here that authorizes SPEND
+   * rather than display: the credit line is a readout, this one lets the model
+   * buy an image (about 5.71 credits) without asking again. CN-only, because the
+   * upstream publishes a `text-to-image` model on the CN gateway and none at all
+   * internationally — showing the box on the global tab would offer a control
+   * that can never do anything.
+   */
+  const imageToolPreference = activeRegion === 'cn'
+    ? (
+      <label className="dsm-workbuddy-pref" title={t('row.imageToolHint')}>
+        <input
+          type="checkbox"
+          /* Its OWN class, not the shared `.dsm-workbuddy-pref-check`: that class
+             is the contract the credit-switch suite selects on ("exactly one
+             switch"), and a second element carrying it makes every
+             single-checkbox selector resolve to the wrong box. Same styling,
+             carried by the mirrored rule in `styles.ts`. */
+          className="dsm-workbuddy-image-tool-check"
+          checked={activeRegionOn ? imageToolOn(activeRegion) : false}
+          disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+          onChange={(event: { target: { checked: boolean } }) => {
+            void toggleImageTool(activeRegion, event.target.checked)
+          }}
+        />
+        <span className="dsm-workbuddy-pref-copy">
+          <span className="dsm-workbuddy-pref-label">{t('row.imageToolLabel')}</span>
+          <span className="dsm-workbuddy-pref-hint">{t('row.imageToolHint')}</span>
+        </span>
+      </label>
+    )
+    : null
+
   const creditPreferences = (
     <div className="dsm-workbuddy-prefs">
+      {imageToolPreference}
       <label
         className="dsm-workbuddy-pref"
         title={activeRegion === 'cn' ? t('row.showCreditsCnHint') : t('row.showCreditsGlobalHint')}

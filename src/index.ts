@@ -315,6 +315,15 @@ export interface WorkBuddyRegionState {
    */
   showCreditsInMainUi?: boolean
   /**
+   * Whether the model may call the image-generation tool here (opt-IN).
+   *
+   * The only switch in this interface where an ABSENT value means OFF. Every
+   * other flag here governs something the user can undo by clicking again;
+   * this one authorizes the model to spend real credits on its own, so an
+   * upgrade — or a config whose value could not be read — must leave it off.
+   */
+  imageToolEnabled?: boolean
+  /**
    * WHERE this region's credit readout sits (issue #62).
    *
    * Two seats, because the first one is not always available:
@@ -522,6 +531,28 @@ const regionStateConfig = z.object({
   lastCatalog: z.array(modelConfig).default([]),
   enabledModelIds: z.array(z.string()).default([]),
   imageModelIds: z.array(z.string()).default([]),
+  /**
+   * Whether the model may call the image-generation tool (opt-IN, default off).
+   *
+   * Per-REGION like the credit switches, and only meaningful on `cn`: the image
+   * catalog has a `text-to-image` model on the CN gateway and none at all on the
+   * international one (measured, see `docs/IMAGE_GEN.md`).
+   *
+   * Every other spending path in this plugin requires a human action: a chat
+   * request is one the user sent, and the per-model "test" button is one the
+   * user clicked. `workbuddy_draw_image` is the first capability where the
+   * MODEL decides to spend — it calls the tool on its own, at about 5.71 credits
+   * an image, and there is no per-call approval seam in the host to ask the user
+   * first (`needsApproval` / `toolApproval` do not exist; verified against the
+   * shipped `app.asar`).
+   *
+   * So it is opt-in, the same way the account pool's credit-based rotation is
+   * opt-in (3.0.0's reasoning): a feature that can move money on its own must be
+   * one the user switched on, not one that arrives with an upgrade. Off also
+   * means the tool is not REGISTERED at all, so the model never sees it and
+   * cannot attempt a call that would be refused.
+   */
+  imageToolEnabled: z.boolean().default(false).description('Let the model call workbuddy_draw_image on its own (opt-in; each image costs ~5.71 credits and there is no per-call approval). Off by default, and off means the tool is not registered at all.'),
   /**
    * Per-model override of whether thinking `off` is offered, keyed by model id
    * (issue #34). An ABSENT key means "use the built-in rule" — the upstream's
@@ -1141,7 +1172,11 @@ export function apply(ctx: Context, config: Config): void {
   let imageTools: ToolsServiceLike | undefined
   let disposeImageTool: (() => void) | undefined
   const syncImageTool = (value: Config): void => {
-    const wanted = regionEnabled(value, 'cn')
+    // TWO gates, both required: the CN region must be on (there is no image
+    // model anywhere else), and the user must have opted in to the model
+    // spending credits on its own. `imageToolEnabled` is opt-IN, so an upgrade
+    // never hands anyone a spending capability they did not ask for.
+    const wanted = regionEnabled(value, 'cn') && regionStateOf(value, 'cn').imageToolEnabled === true
     if (wanted && disposeImageTool === undefined && imageTools !== undefined) {
       disposeImageTool = registerWorkBuddyImageTool(imageTools, {
         // 生图必须用国内区凭据：国际区账号没有生图模型，且生图路由只在
@@ -1221,6 +1256,12 @@ export function apply(ctx: Context, config: Config): void {
      * which made the switch look unable to turn the line off ("关闭不了").
      */
     showCreditsInMainUi: region => regionStateOf(current(), region).showCreditsInMainUi !== false,
+    /**
+     * Whether the model may call the image tool here. Read from the committed
+     * value like the flag above, and deliberately `=== true`: an absent setting
+     * is NOT consent to let the model spend.
+     */
+    imageToolEnabled: region => regionStateOf(current(), region).imageToolEnabled === true,
     /**
      * WHERE the readout sits, resolved here rather than read from the browser
      * settings mirror, for the same measured reason as the flag above: on the

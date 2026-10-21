@@ -362,6 +362,18 @@ export async function writeRegionEnabled(
  * @param slot - the region's COMPLETE next slot (caller owns the merge).
  * @throws {WorkBuddySettingsWriteError} when neither writer persists the value.
  */
+export async function writeRegionImageToolEnabled(
+  scope: WorkBuddyAccountScope,
+  region: WorkBuddyWebRegion,
+  enabled: boolean,
+  slot: Record<string, unknown>,
+): Promise<void> {
+  await writeField(scope, 'regions', region, slot, readBack => {
+    const stored = readBack as Record<string, unknown> | null | undefined
+    return stored !== null && stored !== undefined && stored['imageToolEnabled'] === enabled
+  })
+}
+
 export async function writeRegionCreditsShown(
   scope: WorkBuddyAccountScope,
   region: WorkBuddyWebRegion,

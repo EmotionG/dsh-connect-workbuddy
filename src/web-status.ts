@@ -137,6 +137,14 @@ export interface WorkBuddyStatusRouteOptions {
    */
   creditPosition?(region: WorkBuddyRegion): WorkBuddyCreditPosition
   /**
+   * Whether the model may call the image-generation tool in this region.
+   *
+   * Optional, and absent reads as OFF — the opposite of the fields above. This
+   * one authorizes the MODEL to spend credits on its own, so an older Host that
+   * cannot answer must not be read as consent.
+   */
+  imageToolEnabled?(region: WorkBuddyRegion): boolean
+  /**
    * Send one real-volume request to each named model of a region and report what
    * came back.
    *
@@ -814,6 +822,9 @@ export async function workBuddyWebStatus(
   // ("关闭不了"). Absent means ON, matching the schema's `default(true)`.
   const showCreditsInMainUi = deps.showCreditsInMainUi?.(region) ?? true
   const creditPosition = deps.creditPosition?.(region) ?? 'composer'
+  // `?? false`, unlike the two above: the image tool lets the MODEL spend,
+  // so an older Host that cannot answer must not be read as consent.
+  const imageToolEnabled = deps.imageToolEnabled?.(region) ?? false
   const authStatus = await store.status()
   // Whether a saved per-region choice is in effect, on every branch: the card
   // needs it to show that clearing really did return the region to the app's
@@ -824,7 +835,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled }
   }
   let credential
   try {
@@ -856,6 +867,7 @@ export async function workBuddyWebStatus(
       enabled,
       showCreditsInMainUi,
       creditPosition,
+      imageToolEnabled,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
       // sign-ins DO exist (the orphaned-saved-id case), the card already has
@@ -880,6 +892,7 @@ export async function workBuddyWebStatus(
     enabled,
     showCreditsInMainUi,
     creditPosition,
+    imageToolEnabled,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:
     // `displayModels` is the saved/live directory and knows nothing about a

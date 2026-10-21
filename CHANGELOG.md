@@ -1,8 +1,17 @@
 # Changelog
 
-## 4.16.0 (2026-10-21)
+## 5.0.0 (2026-10-21)
 
-> 版本号是 **minor**：新增一个 agent 工具与两处用户可见的界面变化（模型行的数据来源、设置卡片的分栏），不改任何既有接口或配置项。**发往上游的对话请求一个字节都没变**：新工具只在国内区注册且只读目录；忙碌程度是另一条独立的只读探针；分栏纯前端。国际区除界面外不受影响。
+> 版本号是 **major**：接口与配置项没有破坏性变更（顶层配置字段一个不少，也没有导出被删），但这一版把「花不花钱」的决定权**第一次交给了模型**。在此之前，本插件每一次花钱都跟一个人工动作绑在一起：一条聊天请求是你发的，模型行的「测试」按钮是你点的。5.0.0 新增的 `workbuddy_draw_image` 是模型自己决定调的——约 5.71 积分一张，而宿主没有「调用前先确认」的机制（`needsApproval` / `toolApproval` 在 `app.asar` 里都不存在）。
+>
+> 按这个仓库自己的判准，这属于**语义级**变更：3.0.0 升 major 是因为账号池让「哪个账号被计费」可以变（同样是零 API 破坏），4.0.0 升 major 是因为一个用户可见的位置消失（同样是零 API 破坏）。一个能自己花钱的能力，比这两者都更需要一个新的大版本号来说清楚。
+>
+> 正因为如此，它以**默认关闭**的形态出现：`regions.<region>.imageToolEnabled` 默认 `false`，关着的时候这个工具**根本不注册**——模型看不到它，也就不会去调用一个注定失败的入口。升级本身不会赋予任何人花钱的能力。
+
+### ⚠️ Breaking Change（语义，非接口）
+
+- **生图工具默认关闭**。旧版本升级上来的人不会自动拥有 `workbuddy_draw_image`；要发一句话让模型画图，先在卡片「账号」栏勾上「允许模型自主生图」。这是刻意的：这项能力能让模型在你没有逐次确认的情况下花掉积分，所以它必须是你打开的，而不是升级附赠的。
+- **没勾选时工具不存在**，不是「存在但拒绝」。一个注册了却永远拒绝的工具会出现在模型的工具列表里，诱使它发起注定失败的调用；不注册则完全不可见。
 
 ### Features
 
@@ -25,7 +34,9 @@
   - **`files` 必须带裸目录 `locale`**，否则发布出去的 tarball 里没有它自己那份文案。
   - 现在中文界面显示「WorkBuddy 模型接入」＋中文简介，英文界面显示「WorkBuddy Model Access」＋英文简介。`package.json` 的 `description` **保持中文**：它同时是 npm 包页面的简介、GitHub 的仓库简介，和「万一 locale 读不到」的最后兜底——英文文案住在 `locale/en.json` 里，那才是能覆盖兜底的那一份。
 
-- **新增生图工具 `workbuddy_draw_image`（国内区）** —— 把 WorkBuddy 官方 CLI 的文生图能力暴露成一个 DSH agent 工具，模型可以按用户的描述直接画一张图。
+- **新增生图工具 `workbuddy_draw_image`（国内区，默认关闭，需显式授权）** —— 把 WorkBuddy 官方 CLI 的文生图能力暴露成一个 DSH agent 工具，模型可以按用户的描述直接画一张图。
+  - **为什么它是 opt-in，而其他功能不是**：这是本插件唯一「由模型决定花钱」的能力。聊天请求是你发的，「测试」按钮是你点的，而工具调用是模型自己发起的——约 5.71 积分一张，宿主又没有逐次确认的机制。所以开关归你：`regions.cn.imageToolEnabled`，默认 `false`，关着时工具不注册。这与 3.0.0 给账号池的处理是同一个道理（能改变账单落点的功能必须显式打开）。
+  - **读侧刻意与同槽其他开关相反**：`regionImageToolEnabledOf` 用 `=== true` 而不是 `!== false`。卡片上的积分读数与供应商开关都是 opt-out（缺省即开，因为藏一行或撤一个 provider 都可以再点回来），而这一项是**授权消费**，缺省必须是关——升级、配置读取失败、手写了个 `"yes"` 都不能被当成同意。
   - **为什么是工具而不是又一个按钮**：生图是「一句话 → 一张图」的能力，用户的自然表达是「帮我画一只在窗台上晒太阳的猫」，不是「打开某个面板、填三个字段、点提交」。做成 agent 工具，模型自己就能决定什么时候画、画什么。
   - **端点与协议照抄官方 CLI 的 ImageService**：`POST {chatBase}/v2/images/generations`，请求体只有 `model` / `prompt` / `size`（`hunyuan-*` 额外带 `n: 1`，`gemini-*` 什么都不加，其它模型带 `response_format: 'b64_json'`）。国内区 `chatBase` 为 `https://copilot.tencent.com`。响应是 `{code, msg, requestId, data:{created, data:[{url}], usage:{credit}}}`。
   - **产物是 24 小时有效的 COS 签名 URL**：插件把 URL 原样返回，并在 `hint` 里写明时效与「要长期保留请及时下载」；上游若返回内联 base64（非 hunyuan 分支），插件落盘到系统临时目录下的 `workbuddy-image-gen/`（`os.tmpdir()`，三个平台各自的位置）再返回 `file://` URL 与本地路径，不让 2 MB 的 base64 灌进对话。
@@ -49,12 +60,13 @@
 
 ### Tests
 
+- **`tests/image-tool-optin.spec.ts`（8 条，新增）**：这一版唯一新增的**授权**契约。读侧把「没说开」与「说了开」分开：`{}`、`{regions:{}}`、`{regions:{cn:{}}}`、显式 `false`，以及手写配置里的 `"yes"` / `1` 全部读成 **关**；只有真正布尔 `true` 读成开；两个区域互不串（CN 开了不意味着国际版也开）。写侧 `nextRegionImageToolEnabled` 只动目标槽的那一个字段，同槽的 `enabled` / `enabledModelIds` 与兄弟区域都保住。另有两组直接钉住升级路径：空配置不是同意、`enabled: true` 也不是同意——**供应商开着和允许模型花钱是两道独立的闸**，把它们混为一谈就等于给所有存量用户发了一个花钱能力。最后一条钉住渲染位置与类名（只在 CN tab、用独立的 `.dsm-workbuddy-image-tool-check`，不与积分开关共用 `.dsm-workbuddy-pref-check`——那是「恰好一个开关」那条测试的选择器契约）。
 - **`tests/image-gen.spec.ts`（35 条）**，夹具是 2026-10-21 国内区 `/v3/config` 的真实片段：模型筛选与去重、`pickImageModel` 的点名/回退/空目录、`buildImageBody` 三分支、`parseImageResponse`（url / b64 / `code !== 0` / 空结果）、`describeImageFailure`（401/403/404/429/500-JSON/非 JSON）、工具的 schema 形状与**返回值键严格落在 `output.schema` 里**、`INVALID_ARGS` 不冷却、`NOT_LOGGED_IN`、`NO_IMAGE_MODEL`、上游失败进冷却、目录 TTL 只读一次、base64 落盘、`render` 的 markdown；以及本轮新增的**两条**：读目录失败不进冷却（同一实例紧接着调用可成功）、读目录失败不被缓存（两次调用都真的到达读取器）。
 - **`tests/busy.spec.ts`（14 条）**：枚举外一律 `unknown`、分批去重（62 → 50+12）、空闲有词但不进名字、等级只盖在匹配的条目上、不修改传入的目录条目；`tests/promo-card` 之外另有 `tests/card-panels.spec.tsx`（6 条，jsdom）钉住分栏：`hidden` 而非卸载、非活动栏仍挂载、诊断栏显示账号名而不显示 id、签出态不画分栏、恰好一个 tab 被标记选中。
 - **`tests/queue.spec.ts`（14 条）**：三个业务码的识别、位置/队列长度/`retry_after` 的读取、嵌套与 `_meta` 信封、14003/402/500 不被误判为队列、永不打印上游的 `queue.*` i18n key、文案；以及本轮新增的**三条**：三种业务码在 200/400/429/500 四种状态下一律 `model_queue`、无关失败不被吞、**两种曾导致换号的承载状态（500 与 429）逐个钉住**。
 - **`tests/upstream.spec.ts`（+2 条）**：`fetchMediaModels` 在 `/v3` 失败时降级到 `/v2` 并上报降级原因；国际区不降级。
 - **`tests/locale-meta.spec.ts`（9 条）**：`locale/en.json` 是锚点、每个 locale 文件名必须是语言 id、`exports` 的通配与 `files` 的裸目录都在、中英两份各自是自己的语言、市场草稿与卡面逐字一致；以及「`package.json` 的 `description` 保持中文」——它记着 `8f3a96e` 把这行从英文改成中文是为了对齐 README 首屏，将来想改回英文必须显式说明。
-- 全量 `npx vitest run` = **105 文件 / 1743 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
+- 全量 `npx vitest run` = **107 文件 / 1751 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
 - **真实联调**（已花 5.71 积分）：同一凭据出图成功，HTTP 200、12.9 秒、`credit: 5.71`、产物 2 065 707 字节 PNG、1024×1024、画面与提示词一致。取证与协议细节见 [docs/IMAGE_GEN.md](docs/IMAGE_GEN.md)。
 
 ### Notes
