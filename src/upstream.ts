@@ -30,6 +30,17 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
+import {
+  IMAGE_GENERATIONS_PATH,
+  IMAGE_TAG_TEXT_TO_IMAGE,
+  WorkBuddyImageError,
+  buildImageBody,
+  describeImageFailure,
+  parseImageResponse,
+  selectMediaModels,
+  type WorkBuddyImageOutcome,
+  type WorkBuddyMediaModel,
+} from './image-gen.ts'
 import { offRefused } from './off-thinking.ts'
 import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
 import type { WorkBuddyPromo } from './promo.ts'
@@ -432,6 +443,16 @@ const ERROR_BODY_LIMIT = 4096
  * budget covers the response only, never the one-line body that follows.
  */
 const PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * 生图请求的超时。
+ *
+ * 实测一张 1024x1024 的图在官方网关要 17–39 秒（`hunyuan-image-alpha`，
+ * 2026-10-21，两个国内入口各测一次），比任何 JSON 接口都慢一个数量级，
+ * 因此不能复用 {@link JSON_TIMEOUT_MS}。三分钟足够覆盖一次正常的排队+推理，
+ * 又不至于让一个卡死的连接占住工具槽位太久。
+ */
+const IMAGE_TIMEOUT_MS = 180_000
 
 /**
  * Insufficient-credit markers.
@@ -1004,6 +1025,34 @@ function billingHeaders(credential: WorkBuddyCredential): Record<string, string>
   }
   if (credential.domain !== '') headers['X-Domain'] = credential.domain
   return headers
+}
+
+/**
+ * 生图请求头。
+ *
+ * 实测口径（2026-10-21，国内区）：`Authorization: Bearer` + `X-Product: SaaS` +
+ * 用户/企业/域三连 + 会话身份三连 + `PRODUCT_UA`，在 `copilot.tencent.com` 与
+ * `www.workbuddy.cn` 两个入口都返回 200。刻意**不带** `Origin` / `Referer`：
+ * 探针当时没带，带了只是多一个可能被网关拒掉的变量，没有收益。
+ *
+ * 复用 {@link conversationHeaders}：官方 CLI 的 ImageService 也是每次现生成
+ * 一组会话 UUID，且两个区走同一条代码路径（见该函数的注释）。
+ */
+function imageHeaders(credential: WorkBuddyCredential): Record<string, string> {
+  return {
+    'Authorization': `Bearer ${credential.accessToken}`,
+    'Accept': 'application/json, text/plain, */*',
+    'Content-Type': 'application/json',
+    'User-Agent': PRODUCT_UA,
+    'X-Product': 'SaaS',
+    'X-Requested-With': 'XMLHttpRequest',
+    ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
+    ...credential.enterpriseId === undefined || credential.enterpriseId === ''
+      ? { 'X-No-Enterprise-Id': '1' }
+      : { 'X-Enterprise-Id': credential.enterpriseId },
+    ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
+    ...conversationHeaders(),
+  }
 }
 
 /**
@@ -2301,6 +2350,73 @@ export class WorkBuddyUpstreamClient {
       )
       return await readCatalog(MODELS_CATALOG_PATH)
     }
+  }
+
+  /**
+   * 读该账号所属区的产品配置，挑出带 `text-to-image` 标签的媒体模型。
+   *
+   * 走的是和 {@link fetchModels} 同一条 `/v3/config`（国内区与国际区都答），
+   * 区别只在这里保留 `data.models` 的媒体条目、而不是投影成 CLI 聊天目录。
+   * 国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带 `text-to-image`；
+   * 国际区一条都没有 —— 所以本方法对国际区返回空数组，而不是编一个模型出来。
+   *
+   * 不额外引入请求：目录本来就要读，生图只是复用同一次读取的结果。
+   */
+  async fetchMediaModels(
+    credential: WorkBuddyCredential,
+    signal?: AbortSignal,
+  ): Promise<readonly WorkBuddyMediaModel[]> {
+    const response = await fetch(`${chatBase(credential)}${GLOBAL_CONFIG_PATH}`, {
+      headers: {
+        'Authorization': `Bearer ${credential.accessToken}`,
+        'Accept': 'application/json',
+        'Origin': originReferer(credential),
+        'Referer': `${originReferer(credential)}/`,
+        'User-Agent': PRODUCT_UA,
+      },
+      signal: signal ?? AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const data = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    return selectMediaModels(data['models'], IMAGE_TAG_TEXT_TO_IMAGE)
+  }
+
+  /**
+   * 发一次文生图请求。
+   *
+   * 端点、请求体、响应解析全部照抄官方 CLI 的 ImageService（见 `image-gen.ts`
+   * 的模块注释）。实测单张 5.71 credits，产物是 24 小时有效的 COS 签名 URL。
+   *
+   * 失败分两层：HTTP 非 2xx 交给 {@link describeImageFailure} 翻成带 code 的
+   * 错误（401/403 提示重新登录、404 提示该区没有生图路由、429 提示限流）；
+   * HTTP 200 但信封 `code !== 0` 由 {@link parseImageResponse} 处理。
+   */
+  async generateImage(
+    credential: WorkBuddyCredential,
+    request: { readonly model: string; readonly prompt: string; readonly size?: string },
+    signal?: AbortSignal,
+  ): Promise<WorkBuddyImageOutcome> {
+    const response = await fetch(`${chatBase(credential)}${IMAGE_GENERATIONS_PATH}`, {
+      method: 'POST',
+      headers: imageHeaders(credential),
+      body: JSON.stringify(buildImageBody(request)),
+      signal: signal ?? AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    if (!response.ok) throw describeImageFailure(response.status, text)
+    let payload: unknown
+    try {
+      payload = JSON.parse(text) as unknown
+    } catch {
+      throw new WorkBuddyImageError(
+        `workbuddy image: 上游返回的不是 JSON（HTTP ${response.status}）: ${text.slice(0, 200)}`,
+        'UPSTREAM',
+      )
+    }
+    return parseImageResponse(payload)
   }
 
   /** Query today's check-in status without changing account state. */
