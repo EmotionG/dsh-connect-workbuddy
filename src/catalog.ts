@@ -24,9 +24,14 @@ export type WorkBuddyModelInfo = WorkBuddyUpstreamModel
  * Static CLI models captured from the CN endpoint (2026-08-30). The upstream
  * refresh replaces this list at startup; it exists so the provider registers
  * with a usable catalog even while the first fetch is in flight or offline.
+ *
+ * The upstream's `auto` ROUTER is deliberately absent, matching what
+ * `selectCliModels` now does to the live roster: it resolves to a different
+ * model per request, so it is not a row this plugin can describe. Keeping it
+ * here would have reintroduced it on the offline/第一帧 path only, which is the
+ * hardest kind of inconsistency to notice.
  */
 export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
-  { id: 'auto', name: 'Auto', contextWindow: 168_000, maxTokens: 32_000 },
   { id: 'hy3', name: 'Hy3', contextWindow: 192_000, maxTokens: 64_000 },
   { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200_000, maxTokens: 64_000 },
   { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxTokens: 48_000 },
@@ -120,13 +125,27 @@ export function applyContextBudgets(
   }))
 }
 
+/**
+ * Derive the runtime catalog from the last-refreshed directory plus the user's
+ * selection.
+ *
+ * An empty selection means "never configured" and serves the whole directory.
+ * But a NON-empty selection that intersects the directory in nothing must NOT
+ * serve nothing: that is the issue #32 failure mode (the picker empties out),
+ * and it now has a realistic trigger — a user whose only ticked model was the
+ * upstream's `auto` router, which this version stops offering. Such a selection
+ * degrades to the whole directory rather than to silence: the user asked for
+ * "some models to be on", and the alternative is a region with no models at
+ * all. An empty directory still yields an empty result; the guard is only about
+ * a selection that no longer matches anything.
+ */
 export function deriveCatalog(
   catalog: readonly WorkBuddyModelInfo[],
   enabled: ReadonlySet<string>,
   budgets: Readonly<Record<string, WorkBuddyContextBudget | undefined>> = {},
 ): WorkBuddyModelInfo[] {
   const selected = enabled.size === 0 ? catalog : catalog.filter(model => enabled.has(model.id))
-  return applyContextBudgets(selected, budgets)
+  return applyContextBudgets(selected.length === 0 && enabled.size > 0 ? catalog : selected, budgets)
 }
 
 /**

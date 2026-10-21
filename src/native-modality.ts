@@ -49,8 +49,25 @@ export const NATIVE_MODALITY_BY_MODEL_ID: Readonly<Record<string, 'text' | 'mult
   'minimax-m3': 'multimodal',
 }
 
-/** The `auto` entry is a router that picks a model, not a model itself. */
-const ROUTER_MODEL_ID = 'auto'
+/**
+ * Ids the upstream lists in the model roster that are ROUTERS, not models.
+ *
+ * `auto` (CN) is the one observed today: the gateway resolves it to whichever
+ * model it considers the best fit (measured: CN `auto` → `hy4-preview`), so its
+ * price, context window and behaviour are decided at request time by something
+ * else. Offering it as a row advertises a model whose terms the plugin cannot
+ * state, and it duplicates a real row already in the same roster.
+ *
+ * Kept as an explicit table rather than a heuristic: a router is an upstream
+ * concept with no declared flag, and guessing from the name would eventually
+ * hide a real model. Add an id here only after the same kind of evidence.
+ */
+export const ROUTER_MODEL_IDS: ReadonlySet<string> = new Set(['auto'])
+
+/** Whether this id is an upstream router rather than a model. */
+export function isRouterModelId(modelId: string): boolean {
+  return ROUTER_MODEL_IDS.has(modelId)
+}
 
 /**
  * Native modality of one model id. Exact match only: a new model never
@@ -58,7 +75,7 @@ const ROUTER_MODEL_ID = 'auto'
  * platform's image flag.
  */
 export function nativeModalityOf(modelId: string): WorkBuddyNativeModality {
-  if (modelId === ROUTER_MODEL_ID) return 'router'
+  if (isRouterModelId(modelId)) return 'router'
   return NATIVE_MODALITY_BY_MODEL_ID[modelId] ?? 'unknown'
 }
 

@@ -29,6 +29,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
+import { isRouterModelId } from './native-modality.ts'
 import { offRefused } from './off-thinking.ts'
 import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
 import type { WorkBuddyPromo } from './promo.ts'
@@ -1557,6 +1558,18 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
  * is exposed rather than nothing: the roster is an upstream detail that may
  * change, and an empty answer would silently disarm the provider.
  *
+ * ROUTERS ARE NOT MODELS. The upstream lists `auto` (CN) and its global
+ * equivalents alongside real models, but those entries are ROUTING decisions,
+ * not models: the gateway resolves them to whichever model it thinks fits, so
+ * a row for one would offer a name whose price, context window and behaviour
+ * are all decided at request time by something else. Selected this way it also
+ * duplicates a real row — upstream resolves CN `auto` to `hy4-preview`, which
+ * is already in the same roster. They are dropped here, at the single place
+ * the roster is built, so the card, the picker, the probe and the discovery
+ * route all agree. A user who already had one enabled keeps it through
+ * `keepIds` below: this removes the OFFER, never a running model (issue #32's
+ * failure mode).
+ *
  * `keepIds` is the user's own selection riding along with the refresh. The
  * upstream roster may drop a model the user is actually running — the app
  * channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 while the SAME
@@ -1587,14 +1600,20 @@ export function selectCliModels(
   }
   const ids = cliIds !== undefined && cliIds.length > 0 ? cliIds : [...byId.keys()]
   const models = ids
+    .filter(id => !isRouterModelId(id))
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
-  if (models.length === 0) throw new Error('workbuddy model catalog resolved to an empty list')
   const kept = keepIds
     .filter(id => !ids.includes(id))
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
-  return [...models, ...kept]
+  // Guard the ANSWER, not the upstream's share of it. A roster that is nothing
+  // but routers still leaves the region usable through the kept ids, and
+  // throwing before they were merged would turn "the upstream renamed its
+  // router" into "the region has no models at all".
+  const resolved = [...models, ...kept]
+  if (resolved.length === 0) throw new Error('workbuddy model catalog resolved to an empty list')
+  return resolved
 }
 
 /**

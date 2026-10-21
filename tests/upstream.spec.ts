@@ -399,13 +399,38 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
   })
 
   it('keeps a model the user runs that the upstream roster dropped', async () => {
-    // The app channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 (the
-    // roster now lists `auto` instead), while the SAME document still publishes
-    // `minimax-m2.7` at `x0.26` and the chat endpoint still answers for it
-    // (measured HTTP 200). The runtime catalog filters the roster by the user's
-    // selection, so a refresh that simply followed the upstream roster would
-    // silently withdraw a model the user is running — issue #32's failure mode.
-    // The user's selection therefore rides along with the roster read.
+    // The app channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 while
+    // the SAME document still publishes it at `x0.26` and the chat endpoint
+    // still answers for it (measured HTTP 200). The runtime catalog filters the
+    // roster by the user's selection, so a refresh that simply followed the
+    // upstream roster would silently withdraw a model the user is running —
+    // issue #32's failure mode. The user's selection therefore rides along with
+    // the roster read.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [
+            { id: 'hy3', name: 'Hy3', maxInputTokens: 192_000, maxOutputTokens: 64_000, credits: 'x0.00' },
+            { id: 'minimax-m2.7', name: 'MiniMax-M2.7', maxInputTokens: 200_000, maxOutputTokens: 48_000, credits: 'x0.26' },
+          ],
+          agents: [{ name: 'cli', models: ['hy3'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient()
+      .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
+    expect(models.map(model => model.id)).toEqual(['hy3', 'minimax-m2.7'])
+    expect(models[1]?.creditMultiplier).toBe(0.26)
+  })
+
+  it('keeps the running model even when the roster now lists only a router', async () => {
+    // The roster can shrink to just `auto`. Dropping the router must not empty
+    // the catalog out from under a user who is running a real model, so the
+    // kept id is what the region is left with.
     vi.stubGlobal('fetch', async () => ({
       ok: true,
       status: 200,
@@ -423,8 +448,7 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
     }) as unknown as Response)
     const models = await new WorkBuddyUpstreamClient()
       .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
-    expect(models.map(model => model.id)).toEqual(['auto', 'minimax-m2.7'])
-    expect(models[1]?.creditMultiplier).toBe(0.26)
+    expect(models.map(model => model.id)).toEqual(['minimax-m2.7'])
   })
 
   it('does not resurrect a kept model the document no longer publishes', async () => {
@@ -437,14 +461,40 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
         code: 0,
         msg: 'OK',
         data: {
-          models: [{ id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000 }],
-          agents: [{ name: 'cli', models: ['auto'] }],
+          models: [{ id: 'hy3', name: 'Hy3', maxInputTokens: 192_000, maxOutputTokens: 64_000 }],
+          agents: [{ name: 'cli', models: ['hy3'] }],
         },
       }),
     }) as unknown as Response)
     const models = await new WorkBuddyUpstreamClient()
       .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
-    expect(models.map(model => model.id)).toEqual(['auto'])
+    expect(models.map(model => model.id)).toEqual(['hy3'])
+  })
+
+  it('never offers the upstream router as a model', async () => {
+    // `auto` resolves to a different model per request, so a row for it would
+    // advertise terms (price, window, behaviour) that the plugin cannot state —
+    // and it duplicates a real row already in the same roster (CN `auto` →
+    // `hy4-preview`). It is dropped where the roster is built, so the card, the
+    // picker, the probe and the discovery route all agree.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [
+            { id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000, isDefault: true },
+            { id: 'hy4-preview', name: 'Hy4 preview', maxInputTokens: 960_000, maxOutputTokens: 64_000, credits: 'x0.29' },
+          ],
+          agents: [{ name: 'cli', models: ['auto', 'hy4-preview'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient().fetchModels(credential('www.codebuddy.cn'))
+    expect(models.map(model => model.id)).toEqual(['hy4-preview'])
+    expect(models.some(model => model.id === 'auto')).toBe(false)
   })
 
   it('falls back to the legacy CN catalog when the app config fails', async () => {

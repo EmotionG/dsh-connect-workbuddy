@@ -63,6 +63,15 @@ describe('deriveCatalog', () => {
     expect(derived.map(model => model.id)).toEqual(['glm-5.3'])
   })
 
+  it('falls back to the whole directory when the selection matches nothing', () => {
+    // A realistic trigger: a user whose only ticked model was the upstream's
+    // `auto` router, which this version stops offering. Emptying the picker is
+    // the issue #32 failure mode; a selection that no longer matches anything
+    // must degrade to the whole directory instead of to silence.
+    const derived = deriveCatalog(MODELS, new Set(['auto']))
+    expect(derived.map(model => model.id)).toEqual(MODELS.map(model => model.id))
+  })
+
   it('does not hand out the stored array itself', () => {
     const derived = deriveCatalog(MODELS, new Set(['glm-5.3']))
     derived[0]!.id = 'mutated'
@@ -152,10 +161,15 @@ describe('fallbackModelsFor', () => {
     expect([...global].some(id => id.startsWith('gpt-') || id.startsWith('gemini-'))).toBe(true)
     expect([...cn].some(id => id.startsWith('gpt-') || id.startsWith('gemini-'))).toBe(false)
     expect([...cn].some(id => id.startsWith('minimax-'))).toBe(true)
-    // The international roster uses `default-model`, the CN one `auto`.
+    // The international roster uses `default-model`, the CN one its real ids.
     expect(global.has('default-model')).toBe(true)
-    expect(cn.has('auto')).toBe(true)
     expect(cn.has('default-model')).toBe(false)
+    // Neither region's fallback carries the upstream's `auto` ROUTER: it
+    // resolves to a different model per request, so it is not a row this plugin
+    // can describe. `selectCliModels` drops it from the live roster for the same
+    // reason — keeping it here would reintroduce it on the offline path only.
+    expect(cn.has('auto')).toBe(false)
+    expect(global.has('auto')).toBe(false)
     // The CN open-weight deepseek ids stay CN-only; the one deepseek id the
     // international desktop channel offers is its own.
     expect(cn.has('deepseek-v4-pro')).toBe(true)
