@@ -12,6 +12,8 @@
  * @module dsh-connect-workbuddy/status-paths
  */
 
+import type { WorkBuddyPromo } from './promo.ts'
+
 /** Plugin-owned usage endpoint consumed by its browser half. */
 export const WORKBUDDY_USAGE_PATH = '/plugins/dsh-connect-workbuddy/usage'
 /**
@@ -626,6 +628,18 @@ export interface WorkBuddyWebModel {
     refusesOff?: boolean
   }
   description?: string
+  /**
+   * The upstream's promotion / tier badges that name this model, UNRESOLVED.
+   *
+   * Every candidate that names the model rides along, in priority order, so
+   * the card can pick the one that holds at the moment it draws — a badge is a
+   * function of the clock, and a badge frozen at fetch time would keep
+   * claiming a night discount after the night is over. See `src/promo.ts`.
+   *
+   * Persisted inside `lastCatalog` (it rides along in the saved entries) and
+   * read back from there, which is why it must stay JSON-shaped.
+   */
+  promos?: readonly WorkBuddyPromo[]
 }
 
 /**

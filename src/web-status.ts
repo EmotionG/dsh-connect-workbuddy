@@ -597,6 +597,10 @@ function toWebModel(
         ...model.reasoning.refusesOff === true ? { refusesOff: true } : {},
       },
     },
+    // The upstream's own promotion / tier badges for this model, UNRESOLVED:
+    // the card picks the one that holds at the moment it draws, because a
+    // badge is a function of the clock (see `src/promo.ts`).
+    ...model.promos === undefined ? {} : { promos: model.promos },
   }
 }
 

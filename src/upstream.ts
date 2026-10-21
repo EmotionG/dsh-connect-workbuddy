@@ -30,6 +30,8 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { offRefused } from './off-thinking.ts'
+import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
+import type { WorkBuddyPromo } from './promo.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -142,6 +144,20 @@ export interface WorkBuddyUpstreamModel {
   descriptionZh?: string
   descriptionEn?: string
   supportsToolCall?: boolean
+  /**
+   * The upstream's own promotion / tier badges that name THIS model.
+   *
+   * Not a field of the model entry: the upstream publishes the badges in
+   * sibling arrays keyed by `modelIds` (`data.modelPromotions` /
+   * `data.modelTiers`), inside the SAME `/v3/config` document that carries
+   * the roster — so reading them costs no extra request.
+   *
+   * They ride along UNRESOLVED, and that is deliberate: a badge is a function
+   * of the clock (the upstream's windows are wall-clock hours in a named
+   * zone), so the entry that holds NOW is decided where the badge is drawn,
+   * not where the document was read. See `src/promo.ts`.
+   */
+  promos?: readonly WorkBuddyPromo[]
 }
 
 /** One billing package as the upstream returns it, dates already parsed. */
@@ -322,57 +338,83 @@ const GLOBAL_BASE = 'https://www.workbuddy.ai'
  * Legacy model-catalog path, kept only as the CN region's FALLBACK.
  *
  * This is the document the WorkBuddy *plugin* used to read, and it is NOT the
- * document the WorkBuddy *app* reads. The gateway answers it with the CLI
- * channel's roster, whose second slot is the paid `hy4-preview`
- * (`credits: 'x0.29 credits'`), while the app's own config lists the free
- * `hy4-preview-f` (`credits: 'x0.00 credits'`) in that slot under the SAME
- * display name "Hy4 preview". Reading this path is therefore what makes the
- * plugin's card disagree with the app about a model's price — both are
- * correctly displaying a real record, just different ones.
+ * document the WorkBuddy *app* reads: the gateway answers it with the CLI
+ * channel's roster, which carries neither the app's `auto` slot nor any
+ * promotion feed. The free Hy4 tier that used to live here as a separate
+ * `hy4-preview-f` record is gone as a record — measured 2026-10-21, both
+ * channels list the paid `hy4-preview` (`x0.29`) — and the free tier is now
+ * expressed as a promotion badge (`夜间免费`) in the app-channel document only.
+ * So this path is strictly poorer than {@link GLOBAL_CONFIG_PATH}; it stays
+ * only so that a gateway which stops serving the modern document degrades
+ * instead of emptying the region.
  */
 const MODELS_CATALOG_PATH = '/v2/enterprises/personal/models'
 
 /**
- * Remote product-config path; the CN region's PRIMARY catalog source and the
- * global region's only one.
+ * Remote product-config path — the document the WorkBuddy app itself reads for
+ * its model list, its prices AND its promotion badges.
  *
  * It is field-compatible with {@link MODELS_CATALOG_PATH} for every key
- * {@link parseUpstreamModel} reads, so one parser still serves both. On CN this
- * path is what the app itself consumes, so the plugin's roster and the app's
- * agree — that parity is the whole point of preferring it.
+ * {@link parseUpstreamModel} reads, so one parser still serves both, and it
+ * additionally carries `modelPromotions` / `modelTiers` — the promotion feed
+ * no other path publishes (see {@link withPromos}).
  *
- * The CLI user agent deliberately stays {@link CLIENT_UA} here. `/v3/config`
- * serves a DIFFERENT roster per client channel: the desktop token yields a
- * roster without the free `hy4-preview-f`, and the CLI token yields one with
- * it. Measured 2026-10-04 — CN + `/v3/config`: CLI token = 17 models incl.
- * `hy4-preview-f`(x0.00); desktop token = 29 models, no `hy4-preview-f` and no
- * cheap free tier. That is why the global branch below pairs this path with
- * {@link DESKTOP_UA} and the CN branch must NOT.
+ * Which document this path answers depends on the CHANNEL the request claims
+ * to be (see {@link PRODUCT_UA}); it does not depend on the host: `www.workbuddy.cn`,
+ * `copilot.tencent.com`, `wb.tencentbuddy.com` and `www.codebuddy.cn` answer
+ * byte-identically under the same header.
  */
 const GLOBAL_CONFIG_PATH = '/v3/config'
 
-const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
 /**
- * User agent of the WorkBuddy desktop app.
+ * The chat channel's user agent — the identity the plugin's adapter speaks as.
  *
- * The config service serves a DIFFERENT product configuration per client
- * channel, selected by this product token — the version suffix is ignored
- * (`WorkBuddy/5.5.2`, `WorkBuddy/1.0.0` and a bare `WorkBuddy` answer
- * identically). On the INTERNATIONAL gateway the split decides which models
- * exist at all:
- *
- *   - CLI channel (`CLI/… CodeBuddy/…`) → 35 models that OMIT
- *     `deepseek-v4.1-flash` and `gpt-6-astra`, even though both are perfectly
- *     chat-usable (verified: `deepseek-v4.1-flash` streams HTTP 200 and is
- *     billed `x0.00`);
- *   - desktop channel → the account's real 20-model chat roster including both.
- *
- * The plugin emulates the CLI channel for CHAT but reads the desktop channel's
- * configuration to learn the account's actual model list. The CN gateway needs
- * no such switch: its desktop config carries no `cli` agent roster at all, so
- * CN keeps reading the shared `/v2/enterprises/personal/models` path.
+ * Chat is a different contract from configuration: the conversation-identity
+ * triple (conversation id, session id, device id) is bound to this channel, and
+ * the upstream bills and rate-limits it as the CLI agent. The plugin chats as
+ * the CLI agent on purpose, so this stays {@link CLIENT_UA} everywhere the
+ * request is a CHAT.
  */
-const DESKTOP_UA = 'WorkBuddy/5.5.2'
+const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
+
+/**
+ * The product-config channel's user agent: the WorkBuddy APP's own product
+ * identity, byte-for-byte the header the app sends.
+ *
+ * The app builds it in `buildVlmGatewayHeaders` (WorkBuddy 5.8.3) as
+ *
+ *     `User-Agent: WorkBuddy/<app> WorkBuddy/<app> CLI/<cli>`
+ *
+ * — the app version twice, the CLI version once — and sends it to
+ * `/v3/config`; the app's own log reads
+ * `fetch cloud product from url:https://www.workbuddy.cn/v3/config success`
+ * with `{"user-agent":"WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0", …}`.
+ *
+ * It matters, because `/v3/config` answers a DIFFERENT product configuration
+ * per client channel. Measured 2026-10-21, same token, same URL, only this
+ * header differing (CN gateway):
+ *
+ *   | User-Agent                                    | `/v3/config` answer                    |
+ *   | ---                                           | ---                                    |
+ *   | `CLI/2.63.2 CodeBuddy/2.63.2` (CLI channel)   | 5 keys, 35 models, NO promotion feed    |
+ *   | `WorkBuddy/5.8.3` (app channel, no CLI part)  | 18 keys, 37 models, no promotion feed   |
+ *   | `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0` | 22 keys, 62 models, 8 promos + 1 tier   |
+ *
+ * The CLI channel's answer is a strict SUBSET of the app channel's: it
+ * publishes neither `modelPromotions` nor `modelTiers`. That is precisely why
+ * the CN card showed no promotion badge while the WorkBuddy app showed one on
+ * the very same account — the plugin was reading a document the upstream
+ * publishes WITHOUT the feed, not a feed that does not exist.
+ *
+ * The version suffixes are inert — `WorkBuddy/1.0.0 CLI/2.63.2
+ * CodeBuddy/2.63.2` answers identically — so what selects the document is the
+ * CHANNEL the header claims, not the version in it.
+ *
+ * Global answers the same document under either app-shaped header (17 keys,
+ * 28 models, 5 promotions + 1 tier, identical roster), so both regions read
+ * `/v3/config` as {@link PRODUCT_UA}.
+ */
+const PRODUCT_UA = 'WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
 
@@ -1514,8 +1556,20 @@ export function parseUpstreamModel(value: unknown): WorkBuddyUpstreamModel | und
  * selector serves them. Without a usable `cli` roster the whole parsed catalog
  * is exposed rather than nothing: the roster is an upstream detail that may
  * change, and an empty answer would silently disarm the provider.
+ *
+ * `keepIds` is the user's own selection riding along with the refresh. The
+ * upstream roster may drop a model the user is actually running — the app
+ * channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 while the SAME
+ * document still publishes it (`x0.26`) and the chat endpoint still answers for
+ * it (measured HTTP 200). A roster read is therefore the upstream's roster PLUS
+ * the kept ids this document still lists: a refresh may add or withdraw
+ * upstream models, but it never silently withdraws a model the user is on.
  */
-export function selectCliModels(rawModels: unknown, agents: unknown): WorkBuddyUpstreamModel[] {
+export function selectCliModels(
+  rawModels: unknown,
+  agents: unknown,
+  keepIds: readonly string[] = [],
+): WorkBuddyUpstreamModel[] {
   const byId = new Map<string, WorkBuddyUpstreamModel>()
   for (const model of Array.isArray(rawModels) ? rawModels : []) {
     const parsed = parseUpstreamModel(model)
@@ -1536,7 +1590,36 @@ export function selectCliModels(rawModels: unknown, agents: unknown): WorkBuddyU
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
   if (models.length === 0) throw new Error('workbuddy model catalog resolved to an empty list')
-  return models
+  const kept = keepIds
+    .filter(id => !ids.includes(id))
+    .map(id => byId.get(id))
+    .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
+  return [...models, ...kept]
+}
+
+/**
+ * The roster plus the promotion badges the SAME document carries.
+ *
+ * `data.modelPromotions` and `data.modelTiers` sit beside `data.models` in
+ * the upstream's `/v3/config` document, so the badges cost no extra request:
+ * they are read out of the response the roster was read from. Which models
+ * they name is resolved here; WHICH badge holds at a given moment is not
+ * (see `src/promo.ts` — a badge is a function of the clock).
+ *
+ * BOTH regions publish the feed, and they publish it in the app channel's
+ * document: measured 2026-10-21 on the same accounts the app reads, CN
+ * `/v3/config` carries 8 promotions + 1 tier badge (Chinese labels such as
+ * `夜间折扣` / `限时免费` / `订阅优先`, with `schedule.daily` night windows),
+ * and the global gateway carries 5 promotions + 1 tier badge. The feed is
+ * absent only from the CLI channel's answer, which the plugin never reads a
+ * product configuration as (see {@link PRODUCT_UA}).
+ */
+function withPromos(
+  models: readonly WorkBuddyUpstreamModel[],
+  data: Record<string, unknown>,
+): readonly WorkBuddyUpstreamModel[] {
+  const promos = parseWorkBuddyPromos(data['modelPromotions'], data['modelTiers'])
+  return promos.length === 0 ? models : attachPromos(models, promos)
 }
 
 /**
@@ -1676,13 +1759,14 @@ export class WorkBuddyUpstreamClient {
   /**
    * Read the model directory for the credential's region.
    *
-   * Both regions prefer `/v3/config`, the document the WorkBuddy app itself
-   * consumes, so the plugin's roster and the app's agree. They differ in the
-   * user agent that requests it, and that difference is load-bearing: `/v3`
-   * serves a different roster per client channel. Global asks as the desktop
-   * channel (see {@link DESKTOP_UA}); CN asks as the CLI channel
-   * ({@link CLIENT_UA}), which is the only CN channel whose `/v3` answer
-   * contains the free `hy4-preview-f` (see {@link GLOBAL_CONFIG_PATH}).
+   * Both regions read `/v3/config`, the document the WorkBuddy app itself
+   * consumes, and both read it as the APP's product identity
+   * ({@link PRODUCT_UA}) — the header the app sends, not the CLI channel's.
+   * That is load-bearing, not cosmetic: the CLI channel's answer is a strict
+   * subset of the app channel's and publishes neither `modelPromotions` nor
+   * `modelTiers`, so reading `/v3/config` as the CLI channel is what left the
+   * CN card without a single promotion badge while the app showed one on the
+   * same account (see {@link PRODUCT_UA}).
    *
    * CN falls back to the legacy {@link MODELS_CATALOG_PATH} when `/v3` fails,
    * returns a non-zero envelope, or resolves to no usable model, so a gateway
@@ -1693,8 +1777,18 @@ export class WorkBuddyUpstreamClient {
    *
    * No user-side toggle is involved: the region comes from the credential's
    * `domain`.
+   *
+   * `keepModelIds` is the user's own selection, passed through to
+   * {@link selectCliModels}: a model the upstream roster dropped but the SAME
+   * document still publishes stays in the roster, so reading the directory
+   * never withdraws a model the user is running (issue #32's failure mode,
+   * one step upstream of it).
    */
-  async fetchModels(credential: WorkBuddyCredential, signal?: AbortSignal): Promise<readonly WorkBuddyUpstreamModel[]> {
+  async fetchModels(
+    credential: WorkBuddyCredential,
+    signal?: AbortSignal,
+    keepModelIds: readonly string[] = [],
+  ): Promise<readonly WorkBuddyUpstreamModel[]> {
     const timeout = signal ?? AbortSignal.timeout(JSON_TIMEOUT_MS)
     const global = regionOf(credential.domain) === 'global'
     if (global) {
@@ -1707,7 +1801,7 @@ export class WorkBuddyUpstreamClient {
           'X-Product': 'SaaS',
           'X-Requested-With': 'XMLHttpRequest',
           'Connection': 'close',
-          'User-Agent': DESKTOP_UA,
+          'User-Agent': PRODUCT_UA,
         },
         signal: timeout,
       })
@@ -1716,7 +1810,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return selectCliModels(data['models'], data['agents'])
+      return withPromos(selectCliModels(data['models'], data['agents'], keepModelIds), data)
     }
     const readCatalog = async (path: string): Promise<readonly WorkBuddyUpstreamModel[]> => {
       const response = await fetch(`${chatBase(credential)}${path}`, {
@@ -1725,7 +1819,7 @@ export class WorkBuddyUpstreamClient {
           'Accept': 'application/json',
           'Origin': originReferer(credential),
           'Referer': `${originReferer(credential)}/`,
-          'User-Agent': CLIENT_UA,
+          'User-Agent': PRODUCT_UA,
         },
         signal: timeout,
       })
@@ -1734,7 +1828,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return selectCliModels(data['models'], data['agents'])
+      return withPromos(selectCliModels(data['models'], data['agents'], keepModelIds), data)
     }
     try {
       return await readCatalog(GLOBAL_CONFIG_PATH)

@@ -983,7 +983,15 @@ export function apply(ctx: Context, config: Config): void {
     signal?: AbortSignal,
   ): Promise<readonly WorkBuddyModelInfo[]> => {
     const credential = await stacks[region].store.resolve()
-    return client.fetchModels(credential, signal)
+    // The user's own selection rides along with the refresh. The upstream
+    // roster may drop a model the user is running (the app channel's `cli`
+    // roster dropped `minimax-m2.7` on 2026-10-21), and the runtime catalog
+    // filters the roster by that selection — so without the kept ids a
+    // refresh would silently withdraw the model the user is on, which is the
+    // exact failure issue #32 was filed for. The document still publishes it
+    // and the chat endpoint still answers for it, so it stays in the roster.
+    const keep = regionStateOf(current(), region).enabledModelIds ?? []
+    return client.fetchModels(credential, signal, keep)
   }
 
   /** Push the current config into every region's store selection and catalog. */
@@ -2294,7 +2302,11 @@ export function apply(ctx: Context, config: Config): void {
           try {
             const credential = await stacks[region].store.resolve()
             if (stopped) return
-            const models = await client.fetchModels(credential)
+            const models = await client.fetchModels(
+              credential,
+              undefined,
+              regionStateOf(current(), region).enabledModelIds ?? [],
+            )
             if (stopped) return
             const state = regionStateOf(current(), region)
             stacks[region].catalog.set(withEffectiveOff(

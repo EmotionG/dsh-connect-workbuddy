@@ -277,12 +277,12 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
   }
 
   it('auto-routes CN and global accounts by credential domain', async () => {
-    // BOTH regions now read /v3/config, the document the WorkBuddy app itself
-    // consumes, so the card's roster and prices agree with the app's. CN asks as
-    // the CLI channel; global asks as the desktop channel (its personal-models
-    // path returns HTTP 500, and /v3 under the CLI token omits chat-usable
-    // models there). The user agent is therefore part of the contract, not an
-    // incidental header — see the UA assertions in the cases below.
+    // BOTH regions read /v3/config, the document the WorkBuddy app itself
+    // consumes, so the card's roster and prices agree with the app's. Both read
+    // it as the APP's product identity (its personal-models path returns HTTP
+    // 500 on the global gateway, and /v3 under the CLI identity omits
+    // chat-usable models there). The user agent is therefore part of the
+    // contract, not an incidental header — see the UA assertions below.
     expect(await fetchModelsUrl('www.codebuddy.cn'))
       .toBe('https://copilot.tencent.com/v3/config')
     expect(await fetchModelsUrl('www.workbuddy.cn'))
@@ -300,7 +300,7 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
       .toBe('https://www.codebuddy.ai/v3/config')
   })
 
-  it('sends the desktop user agent on the global config request', async () => {
+  it('sends the app product identity on the global config request', async () => {
     const seen: Record<string, string> = {}
     vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
       Object.assign(seen, init.headers)
@@ -319,14 +319,14 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
     })
     const models = await new WorkBuddyUpstreamClient().fetchModels(credential('www.workbuddy.ai'))
     // The CLI user agent returns a 35-model roster without this model; only the
-    // desktop channel's document carries the account's real chat list.
-    expect(seen['User-Agent']).toBe('WorkBuddy/5.5.2')
+    // app channel's document carries the account's real chat list.
+    expect(seen['User-Agent']).toBe('WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0')
     expect(seen['X-Product']).toBe('SaaS')
     expect(models.map(model => model.id)).toEqual(['deepseek-v4.1-flash'])
     expect(models[0]?.creditMultiplier).toBe(0)
   })
 
-  it('keeps the CLI user agent on the CN gateway', async () => {
+  it('sends the app product identity on the CN config request', async () => {
     const seen: Record<string, string> = {}
     vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
       Object.assign(seen, init.headers)
@@ -344,9 +344,107 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
       } as unknown as Response
     })
     await new WorkBuddyUpstreamClient().fetchModels(credential('www.codebuddy.cn'))
-    // The CN desktop config carries no `cli` roster at all, so its gateway must
-    // keep receiving the CLI agent the plugin actually chats as.
-    expect(seen['User-Agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
+    // `/v3/config` answers a DIFFERENT product configuration per client
+    // channel, and the CLI channel's answer publishes neither
+    // `modelPromotions` nor `modelTiers` — which is why the CN card used to
+    // show no promotion badge at all while the WorkBuddy app showed one on the
+    // same account. The product configuration must therefore be read as the
+    // APP does (`WorkBuddy/<app> WorkBuddy/<app> CLI/<cli>`), while CHAT keeps
+    // speaking as the CLI agent.
+    expect(seen['User-Agent']).toBe('WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0')
+  })
+
+  it('attaches the CN promotion feed to the models it names', async () => {
+    // The real CN entry, copied from the app channel's `/v3/config` on
+    // 2026-10-21: a night discount with a wall-clock window that crosses
+    // midnight, in the upstream's own Chinese wording.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [{ id: 'glm-5.2', name: 'GLM-5.2', maxInputTokens: 1_000_000, maxOutputTokens: 64_000, credits: 'x0.79' }],
+          agents: [{ name: 'cli', models: ['glm-5.2'] }],
+          modelPromotions: [{
+            id: 'glm-52-night-discount-202607',
+            kind: 'discount',
+            enabled: true,
+            priority: 100,
+            modelIds: ['glm-5.2'],
+            badge: { label: '夜间折扣', color: '#009273' },
+            discount: { discountedCredits: '0.50x', displayMode: 'strikethrough', factor: 0.5 },
+            hover: { textZh: '每晚 23:00—次日 8:00 积分限时立减，错峰用更省' },
+            schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '23:00', end: '7:50' }] },
+          }],
+          modelTiers: [{
+            id: 'tier-standard-2026q3',
+            badge: { label: '订阅优先', color: '#009273' },
+            modelIds: ['glm-5.2'],
+            priority: 20,
+            tier: 'standard',
+          }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient().fetchModels(credential('www.codebuddy.cn'))
+    // The badge travels with the model, so the card can draw it without a
+    // second upstream request.
+    expect(models[0]?.promos?.map(promo => promo.id)).toEqual([
+      'glm-52-night-discount-202607',
+      'tier-standard-2026q3',
+    ])
+    expect(models[0]?.promos?.[0]?.badge.label).toBe('夜间折扣')
+  })
+
+  it('keeps a model the user runs that the upstream roster dropped', async () => {
+    // The app channel's `cli` roster dropped `minimax-m2.7` on 2026-10-21 (the
+    // roster now lists `auto` instead), while the SAME document still publishes
+    // `minimax-m2.7` at `x0.26` and the chat endpoint still answers for it
+    // (measured HTTP 200). The runtime catalog filters the roster by the user's
+    // selection, so a refresh that simply followed the upstream roster would
+    // silently withdraw a model the user is running — issue #32's failure mode.
+    // The user's selection therefore rides along with the roster read.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [
+            { id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000 },
+            { id: 'minimax-m2.7', name: 'MiniMax-M2.7', maxInputTokens: 200_000, maxOutputTokens: 48_000, credits: 'x0.26' },
+          ],
+          agents: [{ name: 'cli', models: ['auto'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient()
+      .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
+    expect(models.map(model => model.id)).toEqual(['auto', 'minimax-m2.7'])
+    expect(models[1]?.creditMultiplier).toBe(0.26)
+  })
+
+  it('does not resurrect a kept model the document no longer publishes', async () => {
+    // The keep rule is bounded by the document: an id the upstream dropped
+    // entirely is not re-added from thin air.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        code: 0,
+        msg: 'OK',
+        data: {
+          models: [{ id: 'auto', name: 'Auto', maxInputTokens: 256_000, maxOutputTokens: 32_000 }],
+          agents: [{ name: 'cli', models: ['auto'] }],
+        },
+      }),
+    }) as unknown as Response)
+    const models = await new WorkBuddyUpstreamClient()
+      .fetchModels(credential('www.codebuddy.cn'), undefined, ['minimax-m2.7'])
+    expect(models.map(model => model.id)).toEqual(['auto'])
   })
 
   it('falls back to the legacy CN catalog when the app config fails', async () => {
@@ -397,8 +495,8 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
           code: 0,
           msg: 'OK',
           data: {
-            models: [{ id: 'hy4-preview-f', name: 'Hy4 preview', maxInputTokens: 960_000, maxOutputTokens: 64_000, credits: 'x0.00 credits' }],
-            agents: [{ name: 'cli', models: ['hy4-preview-f'] }],
+            models: [{ id: 'hy4-preview', name: 'Hy4 preview', maxInputTokens: 960_000, maxOutputTokens: 64_000, credits: 'x0.29' }],
+            agents: [{ name: 'cli', models: ['hy4-preview'] }],
           },
         }),
       } as unknown as Response
@@ -406,9 +504,9 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
     const models = await new WorkBuddyUpstreamClient(message => fallbacks.push(message))
       .fetchModels(credential('www.codebuddy.cn'))
     expect(urls).toEqual(['https://copilot.tencent.com/v3/config'])
-    // The free app-parity model is what the app lists in slot 2, so the plugin
-    // must report x0.00 for it — this is the user-visible half of the fix.
-    expect(models.map(model => [model.id, model.creditMultiplier])).toEqual([['hy4-preview-f', 0]])
+    // The app's own record: the paid `hy4-preview` at x0.29 (the free Hy4 tier
+    // is no longer a separate record — it is the 夜间免费 promotion badge).
+    expect(models.map(model => [model.id, model.creditMultiplier])).toEqual([['hy4-preview', 0.29]])
     expect(fallbacks).toEqual([])
   })
 
