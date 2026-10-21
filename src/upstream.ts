@@ -30,6 +30,7 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
+import { parseQueueAnswer } from './queue.ts'
 import {
   IMAGE_GENERATIONS_PATH,
   IMAGE_TAG_TEXT_TO_IMAGE,
@@ -106,6 +107,26 @@ export type UpstreamErrorKind =
    * that was never the problem.
    */
   | 'channel_reject'
+  /**
+   * The upstream put this request in a queue instead of running it: business
+   * codes `6020` (waiting, with a position), `6021` (queue full), `6022` (this
+   * user already holds the maximum). See `src/queue.ts`.
+   *
+   * Its own kind because it is the ONE failure where the credential was fine,
+   * the request was fine, and the server already accepted the work — telling the
+   * user "请求失败" or rotating accounts is wrong on both counts. A queued
+   * request follows the MODEL and the shared queue, not the account, so another
+   * account is handed the same position: NOT failover-worthy (see
+   * `isFailoverWorthy` in the shim).
+   *
+   * Classified BEFORE the plain status branches: the queue condition arrives as
+   * a business code and the HTTP status it rides on is incidental (observed on
+   * 200-shaped envelopes and on 429/500). Without this member it fell through to
+   * `server`/`soft_rate`, both of which DO fail over — so hitting a queue walked
+   * the whole account pool, burning a real request per account, before saying
+   * "you are #8777 in line".
+   */
+  | 'model_queue'
   | 'not_found'
   | 'server'
   | 'client'
@@ -758,6 +779,14 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   // credit" alongside a throttling code) still reads as the actionable,
   // wallet-shaped failure: the user must top up, not retry.
   if (isModelBusyBody(body)) return 'model_busy'
+  // BEFORE the plain status branches, for the same reason as `model_busy`: a
+  // queue condition is a BUSINESS CODE and the HTTP status it rides on is
+  // incidental. Measured on the OpenAI-compatible channel it arrives with 200,
+  // 429 and 500-shaped envelopes alike; classifying by status first made a
+  // queue look like `server`/`soft_rate`, and both of those fail over — so one
+  // queued request walked the entire account pool (a real request per account)
+  // before the queue was even recognised.
+  if (parseQueueAnswer(body) !== undefined) return 'model_queue'
   if (status === 429) return 'soft_rate'
   if (status === 404) return 'not_found'
   if (status >= 500) return 'server'
@@ -2425,28 +2454,49 @@ export class WorkBuddyUpstreamClient {
    * 国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带 `text-to-image`；
    * 国际区一条都没有 —— 所以本方法对国际区返回空数组，而不是编一个模型出来。
    *
-   * 不额外引入请求：目录本来就要读，生图只是复用同一次读取的结果。
+   * 这是一次 EXTRA 读取，不是「复用目录那一次」：`fetchModels` 的结果被投影成
+   * 聊天目录就丢掉了媒体标签，所以这里必须再读一遍同一份文档。它是只读 GET、
+   * 不花积分，且工具侧有 5 分钟缓存，但「零新增请求」的说法不成立，别那么写。
+   * 国内区与 {@link fetchModels} 一样走 `/v3` → `/v2` 降级：上游一旦不答
+   * `/v3`，聊天目录会降级而这里不能变成一个原始异常。
    */
   async fetchMediaModels(
     credential: WorkBuddyCredential,
     signal?: AbortSignal,
   ): Promise<readonly WorkBuddyMediaModel[]> {
-    const response = await fetch(`${chatBase(credential)}${GLOBAL_CONFIG_PATH}`, {
-      headers: {
-        'Authorization': `Bearer ${credential.accessToken}`,
-        'Accept': 'application/json',
-        'Origin': originReferer(credential),
-        'Referer': `${originReferer(credential)}/`,
-        'User-Agent': PRODUCT_UA,
-      },
-      signal: signal ?? AbortSignal.timeout(JSON_TIMEOUT_MS),
-    })
-    const envelope = await readEnvelope(response)
-    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
-    const data = typeof envelope.data === 'object' && envelope.data !== null
-      ? envelope.data as Record<string, unknown>
-      : {}
-    return selectMediaModels(data['models'], IMAGE_TAG_TEXT_TO_IMAGE)
+    const readMedia = async (path: string): Promise<readonly WorkBuddyMediaModel[]> => {
+      const response = await fetch(`${chatBase(credential)}${path}`, {
+        headers: {
+          'Authorization': `Bearer ${credential.accessToken}`,
+          'Accept': 'application/json',
+          'Origin': originReferer(credential),
+          'Referer': `${originReferer(credential)}/`,
+          'User-Agent': PRODUCT_UA,
+        },
+        signal: signal ?? AbortSignal.timeout(JSON_TIMEOUT_MS),
+      })
+      const envelope = await readEnvelope(response)
+      if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+      const data = typeof envelope.data === 'object' && envelope.data !== null
+        ? envelope.data as Record<string, unknown>
+        : {}
+      return selectMediaModels(data['models'], IMAGE_TAG_TEXT_TO_IMAGE)
+    }
+    try {
+      return await readMedia(GLOBAL_CONFIG_PATH)
+    } catch (error: unknown) {
+      // The legacy CN directory is a strict subset with no media tags in practice,
+      // so it usually answers an EMPTY list — which is the honest answer ("this
+      // gateway publishes no image model") rather than an exception the tool
+      // would report as a broken feature. A transport failure on both paths still
+      // propagates.
+      if (regionOf(credential.domain) === 'global') throw error
+      this.onFallback?.(
+        `CN media catalog ${GLOBAL_CONFIG_PATH} failed; falling back to ${MODELS_CATALOG_PATH}: `
+        + (error instanceof Error ? error.message : String(error)),
+      )
+      return await readMedia(MODELS_CATALOG_PATH)
+    }
   }
 
   /**

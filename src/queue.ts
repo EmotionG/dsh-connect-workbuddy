@@ -25,6 +25,13 @@
  * and the whole wait is bounded at 12 minutes (`mi=12e5`), after which the app
  * gives up rather than polling behind a stalled queue forever.
  *
+ * NONE OF THAT CADENCE IS IMPLEMENTED HERE, and it is recorded as upstream
+ * FACT rather than as constants this module uses: the loop it belongs to does
+ * not exist yet (see "WHAT THIS MODULE DOES NOT DO YET" below). An earlier
+ * revision exported `queuePollIntervalMs` and `WORKBUDDY_QUEUE_MAX_WAIT_MS` for
+ * it; both were removed rather than left as API that only its own test called —
+ * this project's rule is that unmeasured, unreachable code is not a feature.
+ *
  * WHAT THE GATEWAY ACTUALLY ANSWERS, measured 2026-10-21 (CN credential, the
  * chat host): `POST /v2/chat/queue/status {model}` with an `X-Conversation-Request-ID`
  * answers HTTP 200
@@ -55,17 +62,14 @@ export const WORKBUDDY_QUEUE_FULL = 6021
 export const WORKBUDDY_QUEUE_USER_LIMIT = 6022
 
 /** Everything the app treats as a queue condition (`isQueueError`). */
-export const WORKBUDDY_QUEUE_CODES: readonly number[] = [
+const WORKBUDDY_QUEUE_CODES: readonly number[] = [
   WORKBUDDY_QUEUE_WAITING,
   WORKBUDDY_QUEUE_FULL,
   WORKBUDDY_QUEUE_USER_LIMIT,
 ]
 
-/** The app's `mi`: a quarter of an hour is too long, twelve minutes is the cap. */
-export const WORKBUDDY_QUEUE_MAX_WAIT_MS = 12 * 60 * 1000
-
 /** The app's default when the upstream sends no `retry_after` (`?? 5`). */
-export const WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC = 5
+const WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC = 5
 
 /** True when a business code is one of the app's three queue codes. */
 export function isQueueCode(value: unknown): boolean {
@@ -82,19 +86,6 @@ export interface WorkBuddyQueueReport {
   size?: number
   /** The upstream's own `retry_after` in seconds, else the app's default of 5. */
   retryAfterSec: number
-}
-
-/**
- * The app's polling cadence, position-tiered — see the table in this module's
- * header. An unknown position polls at the slowest tier, exactly as the app
- * does (`getPollingInterval(queuePosition ?? 50)`).
- */
-export function queuePollIntervalMs(position: number | undefined): number {
-  const at = position === undefined || !Number.isFinite(position) ? Number.POSITIVE_INFINITY : position
-  if (at <= 5) return 2_000
-  if (at <= 20) return 5_000
-  if (at <= 50) return 10_000
-  return 15_000
 }
 
 /** Read one queue condition out of a `data`-shaped object, or `undefined`. */

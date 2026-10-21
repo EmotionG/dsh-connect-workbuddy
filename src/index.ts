@@ -1043,6 +1043,11 @@ export function apply(ctx: Context, config: Config): void {
     }
     invalidateCatalog()
     syncRegionRegistration(value)
+    // The image tool is gated on this same region switch, and the switch is a
+    // volatile field: the loader only broadcasts it, it does not re-apply. So
+    // the tool is registered/unregistered HERE, on the same call that moves the
+    // routes, or it would follow a stale answer.
+    syncImageTool(value)
     void refreshRegionUsability()
   }
 
@@ -1118,7 +1123,7 @@ export function apply(ctx: Context, config: Config): void {
       })))
   }
 
-  // 生图工具：只在启用国内区时注册。
+  // 生图工具：跟随国内区开关，而不是在 apply 期判一次。
   //
   // 为什么只挂国内区：`text-to-image` 模型只出现在国内区的产品配置里
   // （`hunyuan-image-alpha`），国际区目录里一条都没有（实测 2026-10-21），
@@ -1127,11 +1132,18 @@ export function apply(ctx: Context, config: Config): void {
   // `tools` 是宿主自己的服务（`class Tools extends Service`，服务名 `tools`），
   // 用 `ctx.inject` 等它出现再注册，而不是 apply 期间 `ctx.get()` 采样一次：
   // 采样会静默丢掉工具（同 webServer 的注释）。
-  if (regionEnabled(current(), 'cn')) {
-    ctx.inject(['tools'], (toolsCtx) => {
-      const tools = (toolsCtx as unknown as { tools?: ToolsServiceLike }).tools
-      if (tools === undefined) return
-      const dispose = registerWorkBuddyImageTool(tools, {
+  //
+  // 开关是**注册与否**的门，必须读活值：`regions` 是 volatile 字段，用户拨动
+  // 国内区开关走的是 volatile-only 更新（loader 只发 `loader/volatile-update`，
+  // 不重新 apply），所以 `if (regionEnabled(...))` 只在 apply 期求值一次的话，
+  // 启动时关着的用户之后打开永远看不到这个工具，而启动时开着的用户关掉之后
+  // 工具还挂着、只在调用时报「未登录」——把「区域已关闭」说成「没登录」。
+  let imageTools: ToolsServiceLike | undefined
+  let disposeImageTool: (() => void) | undefined
+  const syncImageTool = (value: Config): void => {
+    const wanted = regionEnabled(value, 'cn')
+    if (wanted && disposeImageTool === undefined && imageTools !== undefined) {
+      disposeImageTool = registerWorkBuddyImageTool(imageTools, {
         // 生图必须用国内区凭据：国际区账号没有生图模型，且生图路由只在
         // copilot.tencent.com 上。`resolve()` 在未登录时会抛，这里折成
         // undefined，让工具给出「请先登录」而不是一个原始异常。
@@ -1147,9 +1159,23 @@ export function apply(ctx: Context, config: Config): void {
         generateImage: (credential, request, signal) => client.generateImage(credential, request, signal),
         logger: ctx.logger,
       })
-      if (dispose !== undefined) toolsCtx.effect(() => dispose)
-    })
+      return
+    }
+    if (!wanted && disposeImageTool !== undefined) {
+      disposeImageTool()
+      disposeImageTool = undefined
+    }
   }
+  ctx.inject(['tools'], (toolsCtx) => {
+    imageTools = (toolsCtx as unknown as { tools?: ToolsServiceLike }).tools
+    if (imageTools === undefined) return
+    syncImageTool(current())
+    toolsCtx.effect(() => () => {
+      disposeImageTool?.()
+      disposeImageTool = undefined
+      imageTools = undefined
+    })
+  })
 
   // Same-origin routes backing the Plugin-configuration card. `webServer`
   // can mount after this row, so wait reactively for it instead of sampling

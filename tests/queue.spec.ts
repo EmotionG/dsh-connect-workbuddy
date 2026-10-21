@@ -11,14 +11,12 @@
  * pins exactly that.
  */
 import { describe, expect, it } from 'vitest'
+import { classifyUpstreamError } from '../src/upstream.ts'
 import {
   isQueueCode,
   parseQueueAnswer,
   queueNoticeText,
-  queuePollIntervalMs,
-  WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC,
   WORKBUDDY_QUEUE_FULL,
-  WORKBUDDY_QUEUE_MAX_WAIT_MS,
   WORKBUDDY_QUEUE_USER_LIMIT,
   WORKBUDDY_QUEUE_WAITING,
 } from '../src/queue.ts'
@@ -61,7 +59,9 @@ describe('parseQueueAnswer', () => {
 
   it('falls back to the app’s 5-second default when no retry_after came', () => {
     const body = JSON.stringify({ code: 6020, data: { queue_position: 3 } })
-    expect(parseQueueAnswer(body)?.retryAfterSec).toBe(WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC)
+    // The app's `?? 5`. Pinned as a literal rather than through an export: the
+    // constant is module-internal now, and the VALUE is the contract.
+    expect(parseQueueAnswer(body)?.retryAfterSec).toBe(5)
   })
 
   it('reads a code nested one level down', () => {
@@ -96,26 +96,11 @@ describe('parseQueueAnswer', () => {
   })
 })
 
-describe('queuePollIntervalMs', () => {
-  it('uses the app’s position tiers', () => {
-    expect(queuePollIntervalMs(1)).toBe(2_000)
-    expect(queuePollIntervalMs(5)).toBe(2_000)
-    expect(queuePollIntervalMs(6)).toBe(5_000)
-    expect(queuePollIntervalMs(20)).toBe(5_000)
-    expect(queuePollIntervalMs(21)).toBe(10_000)
-    expect(queuePollIntervalMs(50)).toBe(10_000)
-    expect(queuePollIntervalMs(8777)).toBe(15_000)
-  })
-
-  it('polls at the slowest tier when the position is unknown', () => {
-    expect(queuePollIntervalMs(undefined)).toBe(15_000)
-    expect(queuePollIntervalMs(Number.NaN)).toBe(15_000)
-  })
-
-  it('bounds the wait at the app’s 12 minutes', () => {
-    expect(WORKBUDDY_QUEUE_MAX_WAIT_MS).toBe(12 * 60 * 1000)
-  })
-})
+// The app's position-tiered poll cadence (2/5/10/15 s, 12-minute cap) is
+// recorded as upstream FACT in `src/queue.ts`, not implemented: the resend loop
+// it belongs to does not exist yet, and shipping its constants as tested-but-
+// unexported API is the thing this project keeps refusing to do. When the loop
+// is built — against a real queue sample — those tier tests come back with it.
 
 describe('queueNoticeText', () => {
   it('names the position AND the queue size for a waiting request', () => {
@@ -139,5 +124,37 @@ describe('queueNoticeText', () => {
   it('never prints an untranslated upstream message key', () => {
     const text = queueNoticeText({ code: WORKBUDDY_QUEUE_WAITING, position: 2, retryAfterSec: 5 })
     expect(text).not.toContain('queue.')
+  })
+})
+
+describe('a queue is its OWN failure class', () => {
+  // These pin the two things that made a queued request walk the whole account
+  // pool before the user was told their position: the code was unclassified (so
+  // it fell through to a status-shaped kind) and those kinds fail over.
+  it('classifies 6020/6021/6022 as model_queue, whatever status carries them', () => {
+    // The status is incidental — measured on the OpenAI-compatible channel the
+    // same condition arrives under 200-, 429- and 500-shaped envelopes.
+    for (const status of [200, 400, 429, 500]) {
+      for (const code of [WORKBUDDY_QUEUE_WAITING, WORKBUDDY_QUEUE_FULL, WORKBUDDY_QUEUE_USER_LIMIT]) {
+        const body = JSON.stringify({ code, msg: 'waiting', data: { queue_position: 8777, queue_size: 9021 } })
+        expect(classifyUpstreamError(status, body)).toBe('model_queue')
+      }
+    }
+  })
+
+  it('does not turn an unrelated failure into a queue', () => {
+    // A throttle, a credit refusal and a plain server error keep their own kinds:
+    // the queue branch must be narrow enough not to swallow them.
+    expect(classifyUpstreamError(429, '{"code":14003,"msg":"model busy"}')).toBe('model_busy')
+    expect(classifyUpstreamError(402, '{"msg":"Credits exhausted."}')).toBe('hard_credit')
+    expect(classifyUpstreamError(500, '{"msg":"internal"}')).toBe('server')
+    expect(classifyUpstreamError(400, '{"code":6023,"msg":"unknown"}')).toBe('client')
+  })
+
+  it('reads a queue answer out of a 500 envelope, which is what used to fail over', () => {
+    // The regression this whole change is about: a queue rode on a 500, so it
+    // was classified `server` — a failover-worthy kind — and the pool was walked.
+    expect(classifyUpstreamError(500, waitingEnvelope)).toBe('model_queue')
+    expect(classifyUpstreamError(429, waitingEnvelope)).toBe('model_queue')
   })
 })

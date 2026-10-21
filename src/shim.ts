@@ -286,6 +286,10 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   // malformed from its point of view. See KIND_HOST_CODE for why the host must
   // not read this as a retryable transport failure.
   channel_reject: 400,
+  // A queue is a 429 in the sense the host understands: "not now, try again".
+  // The host's bounded in-place retry is exactly right for `6020` (the queue is
+  // moving), and for `6021`/`6022` the sentence says what to do instead.
+  model_queue: 429,
   not_found: 502,
   server: 502,
   client: 400,
@@ -1482,7 +1486,16 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     // attempt burns real quota and records a false statistic against a credential
     // that was never at fault (issues #87–#90 were reported as account problems
     // for exactly this reason).
+    //
+    // `model_queue` joins them for a different reason: the queue is a fact about
+    // the MODEL and the platform-wide line in front of it, not about this
+    // credential. The next account is put in the SAME queue with the SAME
+    // position, so rotating spends one real request per account to learn nothing.
+    // Before it was its own kind a queue fell through to `server`/`soft_rate`
+    // (the status it rides on), both of which fail over — so one queued request
+    // walked the whole pool before the user was told their position.
     return kind !== 'client' && kind !== 'model_busy' && kind !== 'channel_reject'
+      && kind !== 'model_queue'
   }
 
   async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1755,13 +1768,17 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // `6021` (queue full), `6022` (this user already holds the maximum). The
       // app answers that with a banner and a poll, never with "请求失败"; so does
       // this path, using the app's own vocabulary ("排队中 / 第 N 位") rather than
-      // the raw envelope. Recognised from the BODY because the condition rides as
-      // a business code, not an HTTP status — see `src/queue.ts`.
+      // the raw envelope. See `src/queue.ts`.
+      //
+      // The KIND is what selects this branch, not a second body parse: a queue is
+      // now classified as its own kind in `classifyUpstreamError`, which is also
+      // what keeps it OUT of the failover loop (see `isFailoverWorthy`). Reading
+      // the body again here is only to get the position and the size.
       //
       // 429 keeps the host's bounded in-place retry available: for `6020` a
       // retry is exactly the right next move (the queue is moving), and for
       // `6021`/`6022` the sentence says what to do instead of queueing.
-      const queue = parseQueueAnswer(result.message)
+      const queue = result.kind === 'model_queue' ? parseQueueAnswer(result.message) : undefined
       if (queue !== undefined) {
         writeOpenAIError(res, 429, 'model_queue', `${queueNoticeText(queue)}（上游 code ${queue.code}）${note}`)
         return

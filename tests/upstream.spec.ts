@@ -533,6 +533,52 @@ describe('WorkBuddyUpstreamClient.fetchModels', () => {
     expect(fallbacks[0]).toContain('socket hang up')
   })
 
+  it('degrades the MEDIA catalog the same way, instead of failing the tool', async () => {
+    // `fetchMediaModels` reads the same `/v3/config` document for its
+    // `text-to-image` tags. Chat already degrades to the legacy `/v2` document
+    // when `/v3` stops answering; the image tool must do the same, or a /v3
+    // outage turns into "生图工具坏了" while chat keeps working.
+    const urls: string[] = []
+    const fallbacks: string[] = []
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      if (url.endsWith('/v3/config')) throw new Error('socket hang up')
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          code: 0,
+          msg: 'OK',
+          data: {
+            models: [{ id: 'hy4-preview', name: 'Hy4 preview', maxInputTokens: 1_000_000, maxOutputTokens: 64_000 }],
+            agents: [{ name: 'cli', models: ['hy4-preview'] }],
+          },
+        }),
+      } as unknown as Response
+    })
+    const media = await new WorkBuddyUpstreamClient(message => fallbacks.push(message))
+      .fetchMediaModels(credential('www.codebuddy.cn'))
+    expect(urls).toEqual([
+      'https://copilot.tencent.com/v3/config',
+      'https://copilot.tencent.com/v2/enterprises/personal/models',
+    ])
+    // The legacy document carries no media tags in practice: the honest answer
+    // is "no image model here", not an exception.
+    expect(media).toEqual([])
+    expect(fallbacks).toHaveLength(1)
+    expect(fallbacks[0]).toContain('/v3/config')
+  })
+
+  it('does not degrade the media catalog on the international region', async () => {
+    // The global branch has no legacy fallback at all — it must not be handed a
+    // CN-shaped document.
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('socket hang up')
+    })
+    await expect(new WorkBuddyUpstreamClient().fetchMediaModels(credential('www.workbuddy.ai')))
+      .rejects.toThrow(/socket hang up/)
+  })
+
   it('does not touch the legacy CN catalog when the app config answers', async () => {
     const urls: string[] = []
     const fallbacks: string[] = []

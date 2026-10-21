@@ -98,6 +98,10 @@ function asNonEmptyString(value: unknown): string | undefined {
  * 这些失败说明请求真的打到了上游、可能已经扣了积分，才值得进冷却。
  * 参数写错 / 未登录 / 目录里没有模型都还没花钱。
  */
+/**
+ * 这些失败码都发生在「请求已经发出去」之后——上游可能已经扣了积分或排了队，
+ * 连续重试只会把它们再花一遍，所以进冷却。
+ */
 const BILLABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
   'AUTH',
   'RATE_LIMIT',
@@ -106,9 +110,21 @@ const BILLABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
   'EMPTY_RESULT',
 ])
 
-function isBillableFailure(error: unknown): boolean {
+/**
+ * 是否该进冷却——由「这一次到底有没有把生图请求发出去」决定，而不是由异常
+ * 的类型反推。
+ *
+ * 早先的写法是「不是 WorkBuddyImageError 就算花过钱」，方向正好错了两头：
+ * 读目录（`fetchMediaModels` 的那次只读 GET）失败抛的是 upstream.ts 的
+ * `envelopeError`/网络错误，一分钱没花却把工具冷却 30 秒；而参数写错这类真正
+ * 免费的失败又因为带着 `INVALID_ARGS` 才被放行——判据和事实不在一根轴上。
+ *
+ * 现在由调用点显式置位：请求发出去了才置 `sent`，冷却只看它。
+ */
+function isBillableFailure(error: unknown, sent: boolean): boolean {
+  if (!sent) return false
   if (error instanceof WorkBuddyImageError) return BILLABLE_FAILURE_CODES.has(error.code)
-  // 非本模块定义的异常（网络断开、JSON 解析等）同样算一次真实尝试。
+  // 请求已发出之后的意外异常（读响应体时连接断了等）同样算一次真实尝试。
   return true
 }
 
@@ -241,9 +257,13 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
         ? AbortSignal.timeout(IMAGE_TOOL_TIMEOUT_MS)
         : AbortSignal.any([exec.signal, AbortSignal.timeout(IMAGE_TOOL_TIMEOUT_MS)])
 
+      // 这一次到底有没有把生图请求发出去。冷却的唯一判据——见
+      // `isBillableFailure` 的注释：读目录的失败一分钱没花，不该冷却。
+      let sent = false
       try {
         const models = await listModels(credential, signal)
         const model = pickImageModel(models, requestedModel)
+        sent = true
         const outcome = await deps.generateImage(
           credential,
           { model: model.id, prompt, size },
@@ -273,9 +293,9 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
         if (outcome.credit !== undefined) value['credit'] = outcome.credit
         return value
       } catch (error: unknown) {
-        // 只有「真的发过请求」的失败才进冷却。参数写错、没登录、目录里没有模型
-        // 这些都还没花钱，冷却它们只会让用户以为工具坏了。
-        if (isBillableFailure(error)) cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+        // 只有「真的发过请求」的失败才进冷却。参数写错、没登录、目录里没有模型、
+        // 读目录时网络抖了一下——这些都还没花钱，冷却它们只会让用户以为工具坏了。
+        if (isBillableFailure(error, sent)) cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
         throw error
       }
     },

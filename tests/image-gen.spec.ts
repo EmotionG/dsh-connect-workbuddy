@@ -312,6 +312,36 @@ describe('createImageTool', () => {
     await expect(tool.execute({ prompt: '猫' }, {})).rejects.toMatchObject({ code: 'COOLDOWN' })
   })
 
+  it('读目录时网络抖了一下 → 一分钱没花，不进冷却', async () => {
+    // The cooldown must follow "did a generation request actually leave", not
+    // "what type was the exception". Reading the catalog is a read-only GET that
+    // spends nothing and throws a plain error (not a WorkBuddyImageError) — the
+    // old rule cooled the tool for 30s on a free failure.
+    let fail = true
+    const tool = createImageTool(deps({
+      listMediaModels: async () => {
+        if (fail) throw new Error('socket hang up')
+        return [mediaModel()]
+      },
+    }))
+    await expect(tool.execute({ prompt: '猫' }, {})).rejects.toThrow(/socket hang up/)
+    // Immediately retry: a free failure must not be cooling anything.
+    fail = false
+    const value = await tool.execute({ prompt: '猫' }, {})
+    expect(value['url']).toBe('https://cos.example/a.png')
+  })
+
+  it('目录读取失败不缓存，下一次仍然真的去读', async () => {
+    const listMediaModels = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    const tool = createImageTool(deps({ listMediaModels }))
+    await expect(tool.execute({ prompt: '猫' }, {})).rejects.toThrow(/boom/)
+    await expect(tool.execute({ prompt: '猫' }, {})).rejects.toThrow(/boom/)
+    // A failed read is not cached, so both attempts really reached the reader.
+    expect(listMediaModels).toHaveBeenCalledTimes(2)
+  })
+
   it('媒体目录在 TTL 内只读一次', async () => {
     const listMediaModels = vi.fn(async () => [mediaModel()])
     const tool = createImageTool(deps({ listMediaModels }))

@@ -9,9 +9,9 @@
 - **新增生图工具 `workbuddy_draw_image`（国内区）** —— 把 WorkBuddy 官方 CLI 的文生图能力暴露成一个 DSH agent 工具，模型可以按用户的描述直接画一张图。
   - **为什么是工具而不是又一个按钮**：生图是「一句话 → 一张图」的能力，用户的自然表达是「帮我画一只在窗台上晒太阳的猫」，不是「打开某个面板、填三个字段、点提交」。做成 agent 工具，模型自己就能决定什么时候画、画什么。
   - **端点与协议照抄官方 CLI 的 ImageService**：`POST {chatBase}/v2/images/generations`，请求体只有 `model` / `prompt` / `size`（`hunyuan-*` 额外带 `n: 1`，`gemini-*` 什么都不加，其它模型带 `response_format: 'b64_json'`）。国内区 `chatBase` 为 `https://copilot.tencent.com`。响应是 `{code, msg, requestId, data:{created, data:[{url}], usage:{credit}}}`。
-  - **产物是 24 小时有效的 COS 签名 URL**：插件把 URL 原样返回，并在 `hint` 里写明时效与「要长期保留请及时下载」；上游若返回内联 base64（非 hunyuan 分支），插件落盘到 `%TEMP%\workbuddy-image-gen\` 再返回 `file://` URL 与本地路径，不让 2 MB 的 base64 灌进对话。
-  - **模型来自已有的目录读取，零新增请求**：读 `/v3/config` 时保留 `data.models` 的媒体条目、按 `tags` 过滤 `text-to-image`，而不是投影成 CLI 聊天目录。国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带这个标签；**国际区一条都没有**——所以工具只在国内区注册（国际区注册出来只会是每次调用都报「没有生图模型」的按钮）。
-  - **按「花钱的工具」对待**：缺省即独占执行（不声明 `isConcurrencySafe`），单次超时 180 秒（实测一张 12.9–38.7 秒），失败后 **30 秒冷却**——但冷却只对**真的发过请求**的失败生效（`AUTH` / `RATE_LIMIT` / `NO_ROUTE` / `UPSTREAM` / `EMPTY_RESULT`），参数写错、未登录、目录里没有模型这三类一分钱没花，不进冷却。工具描述里直接写明单价（实测约 5.71 积分/张），让模型自己知道不要为了试错连续调用。
+  - **产物是 24 小时有效的 COS 签名 URL**：插件把 URL 原样返回，并在 `hint` 里写明时效与「要长期保留请及时下载」；上游若返回内联 base64（非 hunyuan 分支），插件落盘到系统临时目录下的 `workbuddy-image-gen/`（`os.tmpdir()`，三个平台各自的位置）再返回 `file://` URL 与本地路径，不让 2 MB 的 base64 灌进对话。
+  - **模型目录会多读一次同一份文档**：生图要 `data.models` 里的媒体标签，而聊天目录投影时会把它们丢掉，所以工具**另发一次只读 GET** `/v3/config`（国内区同样走 `/v3` → `/v2` 降级），结果缓存 5 分钟。国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带 `text-to-image`；**国际区一条都没有**——所以工具只在国内区注册（国际区注册出来只会是每次调用都报「没有生图模型」的按钮）。这只读、不花积分，但**确实是一次额外请求**，不记成「零新增请求」。
+  - **按「花钱的工具」对待**：缺省即独占执行（不声明 `isConcurrencySafe`），单次超时 180 秒（实测一张 12.9–38.7 秒），失败后 **30 秒冷却**——冷却只看**这一次有没有真的把请求发出去**，由调用点显式置位而不是从异常类型反推：`AUTH` / `RATE_LIMIT` / `NO_ROUTE` / `UPSTREAM` / `EMPTY_RESULT` 这些发生在请求已发出之后的失败才冷却；参数写错、未登录、目录里没有模型，以及**读目录时的一次网络抖动**，一分钱没花，都不进冷却。工具描述里直接写明单价（实测约 5.71 积分/张），让模型自己知道不要为了试错连续调用。
   - **点名的模型不在目录里就直接报错**并列出可用模型，而不是把不存在的 id 发上去换一个上游 404——那样报错只会是 `route config not found`，读者无从知道是名字写错了。
   - **没有引入新依赖**：工具定义是手写的 raw JSON Schema `ToolDefinition`，不 import `@deepseek-ai/dsh-tools`（宿主 `Tools.register` 只校验 `output.render` 是函数与 `output.schema` 是受支持的 JSON Schema，`defineTool` 多出来的只是包装）。这样 `lib/bin.js` 的静态可达图里不会多出裸 peer 说明符，`tests/host-peers.spec.ts` 的断言原样成立。
   - **凭据不出宿主进程**：token 只用于这一次 `fetch`，不进对话上下文、不进页面。
