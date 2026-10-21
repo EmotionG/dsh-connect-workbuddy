@@ -76,9 +76,6 @@ import { WorkBuddyUpstreamClient, knownRegionOf, regionOf } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { attachBusyLevels } from './busy.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
-import { mountCliBridge } from './cli-bridge/mount.ts'
-import type { CliBridgeSettings } from './cli-bridge/mount.ts'
-import type { BridgeCommandsService, BridgeToolsService } from './cli-bridge/services.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
 
 export {
@@ -467,15 +464,6 @@ export interface Config {
   imageModelIds?: string[]
   /** @deprecated See {@link Config.lastCatalog}. */
   contextBudgets?: Record<string, WorkBuddyContextBudget>
-  /**
-   * The optional CLI route: run real tasks through the locally signed-in
-   * CodeBuddy CLI instead of through the disguised provider route.
-   *
-   * Off by default and completely independent of the provider stacks — turning
-   * it on adds a tool and a slash command, it never changes which models the
-   * provider serves. See `src/cli-bridge/mount.ts` for why the route exists.
-   */
-  cliBridge?: CliBridgeSettings
 }
 
 const modelConfig = z.object({
@@ -604,31 +592,6 @@ function unwrapVolatile<T>(value: T): T {
  * exposing it as part of its public API.
  */
 
-/**
- * The optional CLI route's settings.
- *
- * Every field mirrors `CLI_BRIDGE_DEFAULTS` in `./cli-bridge/mount.ts`; the
- * defaults are restated here because schemastery writes them into the profile
- * file, and a key absent from a hand-written profile must behave the same as a
- * key schemastery filled in. `enabled` is the only switch: with it `false` the
- * route registers nothing at all.
- */
-const cliBridgeConfig = z.object({
-  enabled: z.boolean().default(false).description('开启 CLI 路线：通过本机已登录的 CodeBuddy CLI 跑真实任务，额外提供 codebuddy_ask 工具和 /codebuddy 指令。关闭时插件行为与之前完全一致。'),
-  binary: z.string().default('').description('CodeBuddy CLI 的可执行文件名或路径；留空表示自动探测 codebuddy / cbc。'),
-  model: z.string().default('').description('传给 CLI 的 --model；留空用 CLI 自己的默认模型。'),
-  permissionMode: z.string().default('acceptEdits').description('CLI 的 --permission-mode：default / acceptEdits / bypassPermissions / plan / dontAsk / auto。'),
-  effort: z.string().default('').description('CLI 的 --effort：minimal / low / medium / high / xhigh / max；留空用 CLI 默认。'),
-  maxTurns: z.number().step(1).min(1).default(10).description('单次任务的 CLI 轮数上限。'),
-  timeoutSecs: z.number().step(1).min(1).default(900).description('单次任务的墙钟超时（秒）。'),
-  regionOrder: z.string().default('cn,global').description('凭据区域的优先顺序，逗号分隔。国内账号的令牌对 copilot.tencent.com 有效，国际版无效，所以区域优先于新鲜度。'),
-  workingDir: z.string().default('').description('工具入口的默认工作目录；/codebuddy 指令会优先用会话自己的工作区。'),
-  appendSystemPrompt: z.string().default('').description('追加到 CLI 系统提示末尾的一段话；留空不追加。'),
-  allowUnattended: z.boolean().default(false).description('允许在没有工作目录时退回一个临时目录。默认关闭：CLI 有读写权限，不该在没人指定的目录里跑。'),
-  maxReplyChars: z.number().step(1).min(1).default(60000).description('交回给会话模型的最大字符数，超出部分截断并注明。'),
-  injectResult: z.boolean().default(true).description('/codebuddy 跑完后是否把结论回注给会话模型。'),
-})
-
 export const Config: z<Config> = z.object({
   authFile: asVolatile(z.string().description('WorkBuddy desktop auth file (defaults to the app\'s own location)')),
   accountId: z.string().description('Deprecated: pre-split account selector, attributed to its own region'),
@@ -638,7 +601,6 @@ export const Config: z<Config> = z.object({
   enabledModelIds: z.array(z.string()).default([]).description('Deprecated: pre-region-split CN selection'),
   imageModelIds: z.array(z.string()).default([]).description('Deprecated: pre-region-split CN image opt-in'),
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Deprecated: pre-region-split CN context budgets'),
-  cliBridge: cliBridgeConfig.default({} as any) as z<CliBridgeSettings>,
 }) as unknown as z<Config>
 
 /**
@@ -2229,28 +2191,6 @@ export function apply(ctx: Context, config: Config): void {
   })()
 
   let stopped = false
-
-  /**
-   * The optional CLI route (see `./cli-bridge/mount.ts`).
-   *
-   * Mounted here rather than at the top of `apply` because the credential walk
-   * reads the region stores, which only exist after the loop above. Both host
-   * services are looked up OPTIONALLY — a Host that publishes neither still
-   * mounts the provider exactly as before, and `mountCliBridge` itself is a
-   * no-op unless the user turned the route on.
-   */
-  const bridgeService = <Service>(service: string): Service | undefined => {
-    const get = (ctx as unknown as { get?: (name: string) => unknown }).get
-    return typeof get === 'function' ? get.call(ctx, service) as Service | undefined : undefined
-  }
-  const disposeCliBridge = mountCliBridge({
-    settings: unwrapVolatile(config.cliBridge),
-    regions: REGION_KEYS.map(region => ({ region, store: stacks[region].store })),
-    log: message => ctx.logger.warn(`dsh-connect-workbuddy: ${message}`),
-    tools: bridgeService<BridgeToolsService>('tools'),
-    commands: bridgeService<BridgeCommandsService>('commands'),
-  })
-  ctx.effect(() => disposeCliBridge)
 
   ctx.effect(() => () => {
     stopped = true
