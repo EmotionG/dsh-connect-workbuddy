@@ -49,6 +49,7 @@ import { createContextRescue } from './context-rescue.ts'
 import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context-rescue.ts'
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
+import { registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
 import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
 import type { UpstreamErrorKind } from './upstream.ts'
@@ -1115,6 +1116,39 @@ export function apply(ctx: Context, config: Config): void {
         settingsPath: [],
         declared: false,
       })))
+  }
+
+  // 生图工具：只在启用国内区时注册。
+  //
+  // 为什么只挂国内区：`text-to-image` 模型只出现在国内区的产品配置里
+  // （`hunyuan-image-alpha`），国际区目录里一条都没有（实测 2026-10-21），
+  // 挂上去也只会每次调用都报「没有生图模型」——那是噪音，不是能力。
+  //
+  // `tools` 是宿主自己的服务（`class Tools extends Service`，服务名 `tools`），
+  // 用 `ctx.inject` 等它出现再注册，而不是 apply 期间 `ctx.get()` 采样一次：
+  // 采样会静默丢掉工具（同 webServer 的注释）。
+  if (regionEnabled(current(), 'cn')) {
+    ctx.inject(['tools'], (toolsCtx) => {
+      const tools = (toolsCtx as unknown as { tools?: ToolsServiceLike }).tools
+      if (tools === undefined) return
+      const dispose = registerWorkBuddyImageTool(tools, {
+        // 生图必须用国内区凭据：国际区账号没有生图模型，且生图路由只在
+        // copilot.tencent.com 上。`resolve()` 在未登录时会抛，这里折成
+        // undefined，让工具给出「请先登录」而不是一个原始异常。
+        resolveCredential: async () => {
+          if (!regionEnabled(current(), 'cn')) return undefined
+          try {
+            return await stacks.cn.store.resolve()
+          } catch {
+            return undefined
+          }
+        },
+        listMediaModels: (credential, signal) => client.fetchMediaModels(credential, signal),
+        generateImage: (credential, request, signal) => client.generateImage(credential, request, signal),
+        logger: ctx.logger,
+      })
+      if (dispose !== undefined) toolsCtx.effect(() => dispose)
+    })
   }
 
   // Same-origin routes backing the Plugin-configuration card. `webServer`

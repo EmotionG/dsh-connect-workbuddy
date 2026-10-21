@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.16.0 (2026-10-21)
+
+> 版本号是 **minor**：新增一个 agent 工具，不改任何既有接口、配置项或聊天请求体。发往上游的对话请求**一个字节都没变**；新工具只在国内区注册，国际区不受影响。
+
+### Features
+
+- **新增生图工具 `workbuddy_draw_image`（国内区）** —— 把 WorkBuddy 官方 CLI 的文生图能力暴露成一个 DSH agent 工具，模型可以按用户的描述直接画一张图。
+  - **为什么是工具而不是又一个按钮**：生图是「一句话 → 一张图」的能力，用户的自然表达是「帮我画一只在窗台上晒太阳的猫」，不是「打开某个面板、填三个字段、点提交」。做成 agent 工具，模型自己就能决定什么时候画、画什么。
+  - **端点与协议照抄官方 CLI 的 ImageService**：`POST {chatBase}/v2/images/generations`，请求体只有 `model` / `prompt` / `size`（`hunyuan-*` 额外带 `n: 1`，`gemini-*` 什么都不加，其它模型带 `response_format: 'b64_json'`）。国内区 `chatBase` 为 `https://copilot.tencent.com`。响应是 `{code, msg, requestId, data:{created, data:[{url}], usage:{credit}}}`。
+  - **产物是 24 小时有效的 COS 签名 URL**：插件把 URL 原样返回，并在 `hint` 里写明时效与「要长期保留请及时下载」；上游若返回内联 base64（非 hunyuan 分支），插件落盘到 `%TEMP%\workbuddy-image-gen\` 再返回 `file://` URL 与本地路径，不让 2 MB 的 base64 灌进对话。
+  - **模型来自已有的目录读取，零新增请求**：读 `/v3/config` 时保留 `data.models` 的媒体条目、按 `tags` 过滤 `text-to-image`，而不是投影成 CLI 聊天目录。国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带这个标签；**国际区一条都没有**——所以工具只在国内区注册（国际区注册出来只会是每次调用都报「没有生图模型」的按钮）。
+  - **按「花钱的工具」对待**：缺省即独占执行（不声明 `isConcurrencySafe`），单次超时 180 秒（实测一张 12.9–38.7 秒），失败后 **30 秒冷却**——但冷却只对**真的发过请求**的失败生效（`AUTH` / `RATE_LIMIT` / `NO_ROUTE` / `UPSTREAM` / `EMPTY_RESULT`），参数写错、未登录、目录里没有模型这三类一分钱没花，不进冷却。工具描述里直接写明单价（实测约 5.71 积分/张），让模型自己知道不要为了试错连续调用。
+  - **点名的模型不在目录里就直接报错**并列出可用模型，而不是把不存在的 id 发上去换一个上游 404——那样报错只会是 `route config not found`，读者无从知道是名字写错了。
+  - **没有引入新依赖**：工具定义是手写的 raw JSON Schema `ToolDefinition`，不 import `@deepseek-ai/dsh-tools`（宿主 `Tools.register` 只校验 `output.render` 是函数与 `output.schema` 是受支持的 JSON Schema，`defineTool` 多出来的只是包装）。这样 `lib/bin.js` 的静态可达图里不会多出裸 peer 说明符，`tests/host-peers.spec.ts` 的断言原样成立。
+  - **凭据不出宿主进程**：token 只用于这一次 `fetch`，不进对话上下文、不进页面。
+
+### Tests
+
+- **`tests/image-gen.spec.ts` 新增 33 条用例**，夹具是 2026-10-21 国内区 `/v3/config` 的真实片段：模型筛选与去重、`pickImageModel` 的点名/回退/空目录、`buildImageBody` 三分支、`parseImageResponse`（url / b64 / `code !== 0` / 空结果）、`describeImageFailure`（401/403/404/429/500-JSON/非 JSON）、工具的 schema 形状与**返回值键严格落在 `output.schema` 里**、`INVALID_ARGS` 不冷却、`NOT_LOGGED_IN`、`NO_IMAGE_MODEL`、上游失败进冷却、目录 TTL 只读一次、base64 落盘、`render` 的 markdown。
+- 全量 `npx vitest run` = **102 文件 / 1698 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
+- **真实联调**（已花 5.71 积分）：同一凭据出图成功，HTTP 200、12.9 秒、`credit: 5.71`、产物 2 065 707 字节 PNG、1024×1024、画面与提示词一致。取证与协议细节见 [docs/IMAGE_GEN.md](docs/IMAGE_GEN.md)。
+
+### Notes
+
+- **图生图（`/v2/images/edits`）与视频（`/v2/videos/generations`）没有暴露成工具**：两条端点的存在与模型名（`hunyuan-image-alpha-edit`、`minimax-video-h3`、`kling-video-v3`）已由探针确认，但**没有跑通一次真实调用**，所以不给用户一个「看起来能用」的按钮。
+
 ## 4.15.1 (2026-10-21)
 
 > 版本号是 **patch**：没有接口与配置变更。发往上游的请求在**没有被网关拒绝时仍然逐字节不变**；改动的只有「被渠道校验拒绝之后」那一段——多一级重试。路由、模型、凭据、计费与换号规则未变。

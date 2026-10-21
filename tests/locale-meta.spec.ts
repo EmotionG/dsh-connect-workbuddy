@@ -195,6 +195,7 @@ describe('locale metadata', () => {
     // registry page turns English for a Chinese plugin.
     const { description } = manifest()
     expect(typeof description).toBe('string')
+    if (typeof description !== 'string') throw new Error('package.json has no description')
     expect(description.length).toBeGreaterThan(0)
     // Chinese, and specifically NOT the English dictionary sentence.
     expect(description).toMatch(/[\u4e00-\u9fff]/u)
