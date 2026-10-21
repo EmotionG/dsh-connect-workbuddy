@@ -1353,6 +1353,35 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   // store. A local attacker who can hit the port still cannot forge this.
   const SHARED_SECRET = randomBytes(32).toString('base64url')
 
+  /**
+   * Whether this process's prompts have been PROVEN to need the invisible
+   * perturbation before the gateway will accept them.
+   *
+   * WHY THIS EXISTS (measured 2026-10-22). The retry ladder below is
+   * discover-by-failing: a request goes out unmodified, is refused with `11128`,
+   * and the ladder re-sends a perturbed copy. That is correct the first time and
+   * wasteful every time after — the prompt SHAPE that carries a fingerprinted
+   * substring does not change between turns of a session, so the plugin was
+   * paying one refused request (~209ms measured) on EVERY request, forever.
+   *
+   * So once the perturbation is what made a request succeed, the next request
+   * starts from the perturbed form and skips the doomed first attempt. The
+   * saving is one round trip plus one refused request per turn.
+   *
+   * WHY A PROCESS-LOCAL FLAG AND NOT A CONFIG. The gateway's fingerprint list is
+   * a snapshot the upstream can change at any time, in either direction: a rule
+   * can be withdrawn as easily as added. A persisted flag would therefore
+   * outlive the condition that justified it and could keep perturbing prompts a
+   * gateway no longer objects to. In memory it is forgotten at restart, which is
+   * the natural expiry for "what this gateway refused recently".
+   *
+   * AND IT SELF-CORRECTS. If a perturbed body is EVER refused with the channel
+   * gate, the flag is cleared and the request falls back to the plain ladder —
+   * so a withdrawn rule, or a different model behind the same gateway, cannot
+   * leave the plugin stuck sending a shape that no longer helps.
+   */
+  let channelNeedsPerturbation = false
+
   /** Constant-time bearer check; absent or mismatched bearers are rejected. */
   function bearerOk(req: IncomingMessage): boolean {
     const header = req.headers.authorization
@@ -1563,7 +1592,30 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     // replaying it would duplicate output the model may already have acted on.
     // The first attempt always uses the store's own resolution, so a token
     // refresh still happens exactly once, before any retry.
-    let result = await client.chatStream(credential, prepared, controller.signal)
+    /**
+     * The body to send FIRST, which is the perturbed form once this process has
+     * proven the gateway demands it.
+     *
+     * `perturbChannelFingerprints` is consulted only when the flag is set, so a
+     * fresh process still pays the plain attempt — that is what discovers
+     * whether the gate is on at all (see `channelNeedsPerturbation`).
+     *
+     * The perturbed form is a purely additive transform: it inserts zero-width
+     * spaces and changes no word the model reads, so starting from it is not a
+     * behaviour change, only a saved round trip.
+     */
+    const preferred = channelNeedsPerturbation
+      ? perturbChannelFingerprints(prepared) ?? prepared
+      : prepared
+    let result = await client.chatStream(credential, preferred, controller.signal)
+    // A refused PERTURBED body means the rule changed under us: fall back to the
+    // plain ladder and let it rediscover what works. Without this the plugin
+    // could keep sending a shape that no longer helps, forever.
+    if (channelNeedsPerturbation && !result.ok && result.kind === 'channel_reject') {
+      channelNeedsPerturbation = false
+      logger?.warn('dsh-connect-workbuddy: a perturbed body was refused too; clearing the learned preference and retrying from the plain form')
+      result = await client.chatStream(credential, prepared, controller.signal)
+    }
 
     /**
      * The retry ladder that does not depend on knowing the fingerprint
@@ -1612,6 +1664,11 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           logger?.warn('dsh-connect-workbuddy: the channel gate refused the body again; retrying once with an invisible perturbation of the scanned text')
           result = await client.chatStream(credential, rescued, controller.signal)
           retriedWithPerturbation = true
+          // THE PERTURBATION IS WHAT WORKED, so remember it: the next request
+          // in this process starts perturbed and skips both doomed attempts.
+          // Only set on SUCCESS — a perturbation that is also refused teaches
+          // nothing about what the gateway wants.
+          if (result.ok) channelNeedsPerturbation = true
         }
       }
     }

@@ -28,6 +28,7 @@
     "tests/image-tool-optin.spec.ts",
     "tests/issue101-context-overflow.spec.ts",
     "tests/tps.spec.ts",
+    "tests/channel-perturbation-memory.spec.ts",
     "tests/composer-credits-gate.spec.ts",
     "tests/composer-credits-render.spec.tsx",
     "tests/issue46-namespace-binding.spec.tsx",
