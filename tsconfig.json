@@ -38,6 +38,7 @@
     "tests/composer-panel-freshness.spec.tsx",
     "tests/issue77-card-first-paint.spec.tsx",
     "tests/promo-card.spec.tsx",
-    "tests/promo-badge.spec.ts"
+    "tests/promo-badge.spec.ts",
+    "tests/card-panels.spec.tsx"
   ]
 }
