@@ -537,10 +537,18 @@ const CHANNEL_REJECT_MARKERS: readonly string[] = [
  * be read as the prompt rule: a confidently wrong diagnosis is worse here than
  * the generic `client` reply, because it sends the user to rewrite a system
  * prompt that is not at fault.
+ *
+ * Each is also exported as its own predicate ({@link isConversationIdGateBody},
+ * {@link isFirstMessageGateBody}) so the reply can NAME the gate instead of
+ * relaying the upstream's `displayTips` — which is the SAME misleading
+ * sentence for all three members of the `11128` family.
  */
+const CONVERSATION_ID_GATE_MARKER = 'conversation id missing'
+const FIRST_MESSAGE_GATE_MARKER = 'first message is not system prompt'
+
 const OTHER_CHANNEL_CODE_GATES: readonly string[] = [
-  'conversation id missing',
-  'first message is not system prompt',
+  CONVERSATION_ID_GATE_MARKER,
+  FIRST_MESSAGE_GATE_MARKER,
 ]
 
 /**
@@ -603,54 +611,60 @@ export function isChannelRejectBody(body: string): boolean {
 }
 
 /**
+ * Whether a failure body is the CONVERSATION-ID gate (`11128`).
+ *
+ * One of the two gates that share the channel gate's business code, and one
+ * of the two this plugin's diagnosis EXCLUDES: the prompt is not at fault
+ * here, the request headers are — which is why it must never be reported as
+ * "the gateway refused your system prompt".
+ *
+ * It is exported anyway, so a reply can NAME it. The upstream's `displayTips`
+ * for all three `11128` gates is the identical sentence ("这次调用没通过渠道
+ * 校验，可能不是官方客户端发出的"), so the tips cannot tell them apart — only
+ * `msg` can. Hence the wording is the criterion and the code is the
+ * corroboration, never the other way round.
+ *
+ * BOTH halves are required, and the code is matched in its quoted-key form
+ * (`"code":11128`): a request id is hexadecimal and can contain the digits
+ * `11128` by coincidence, and a bare substring search over an arbitrary
+ * failure body is how a red herring gets promoted into a diagnosis.
+ */
+export function isConversationIdGateBody(body: string): boolean {
+  const lower = body.toLowerCase()
+  return lower.includes(CHANNEL_REJECT_CODE) && lower.includes(CONVERSATION_ID_GATE_MARKER)
+}
+
+/**
+ * Whether a failure body is the FIRST-MESSAGE gate (`11128`).
+ *
+ * The global gateway's own rule: a chat request must OPEN with a system
+ * message, and a user-first body is refused with `11128` / "first message is
+ * not system prompt". The plugin's `ensureSystemHead()` satisfies it, so a
+ * body carrying this wording says the request never had a system head — not
+ * that a system prompt was fingerprinted.
+ *
+ * Excluded from the prompt diagnosis for the same reason as
+ * {@link isConversationIdGateBody}, and named by the same rule: the CODE plus
+ * the WORDING, case-insensitively, code in its quoted-key form.
+ */
+export function isFirstMessageGateBody(body: string): boolean {
+  const lower = body.toLowerCase()
+  return lower.includes(CHANNEL_REJECT_CODE) && lower.includes(FIRST_MESSAGE_GATE_MARKER)
+}
+
+/**
  * The OPENINGS of the `system` messages in a prepared request body.
  *
- * This is the evidence the channel gate actually reacts to, and echoing it is
- * what turns "the upstream refused" into "the upstream refused because of this
- * line" — the reader can then fix the prompt or report the new opening, instead
- * of cycling accounts that cannot change a byte of it.
- *
- * Each entry is the first non-empty line, clipped: a fingerprint lives at the
- * START of the content, so the rest of a 10 KB system prompt is noise that
- * would bury the one sentence worth reading. At most three entries are kept —
- * the gate scans every `system` message, but a body with more than three of them
- * is already worth showing compactly.
- *
- * Never throws: a malformed body is the upstream's to reject, and losing the
- * failure measurement is not an acceptable price for reading an excerpt.
+ * REMOVED in favour of {@link systemOpeningEvidenceOfBody}, which answers the
+ * same question ("what did the gate actually see?") for BOTH string and
+ * array-shaped content and can also say whether an opening is the plugin's own
+ * neutral head. Two functions that both claim to describe what the gate read
+ * are two truths that drift — and the array-shaped case is exactly where the
+ * old one was blind.
  */
-export function systemOpeningsOfBody(bodyJson: string): string[] {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(bodyJson)
-  } catch {
-    return []
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return []
-  const messages = (parsed as Record<string, unknown>)['messages']
-  if (!Array.isArray(messages)) return []
-  const openings: string[] = []
-  for (const value of messages) {
-    if (openings.length >= 3) break
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
-    const message = value as Record<string, unknown>
-    const role = message['role']
-    if (typeof role !== 'string' || role.trim().toLowerCase() !== 'system') continue
-    const content = message['content']
-    if (typeof content !== 'string') continue
-    const opening = firstLineOf(content).replace(/\s+/gu, ' ').trim()
-    if (opening !== '') openings.push(clip(opening, SYSTEM_OPENING_LIMIT))
-  }
-  return openings
-}
 
 /** Longest system-prompt opening echoed back to the user, in characters. */
 const SYSTEM_OPENING_LIMIT = 120
-
-function firstLineOf(content: string): string {
-  const newline = content.indexOf('\n')
-  return newline === -1 ? content : content.slice(0, newline)
-}
 
 function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
@@ -1051,6 +1065,13 @@ export const WORKBUDDY_FALLBACK_SYSTEM_PROMPT = 'You are a helpful assistant.'
  * snapshot, not a theory of what the gate "means"; a gateway adding a new
  * opening is not caught until a body carries one, and the prepend only wins
  * while the gate keeps matching at offset 0.
+ *
+ * THE LIST CANNOT BE COMPLETE, AND THAT IS WHY {@link forceNeutralHead}
+ * EXISTS. This is a snapshot of the upstream's own list, taken by measuring
+ * openings one at a time; the upstream can extend it at any time and the
+ * plugin cannot see it. So the plugin's own prepend is a best-effort filter,
+ * not a guarantee — and the self-healing retry is what covers the openings
+ * nobody has measured yet.
  */
 const UNAPPROVED_CHANNEL_OPENINGS: readonly string[] = [
   'you are an ai agent powered by deepseek harness',
@@ -1058,13 +1079,92 @@ const UNAPPROVED_CHANNEL_OPENINGS: readonly string[] = [
 ]
 
 /**
- * Move every `system` message off the content fingerprint above by prepending
- * the placeholder head.
+ * Whether this text OPENS with an opening the gateways refuse.
  *
- * A no-op for a body with no system message and for every system message whose
- * content starts with anything else, so a request that the gateways already
- * answer keeps its prompt byte-for-byte — only the messages the gate would
- * refuse grow, by one short line.
+ * The gate is a PREFIX match on the START of a `system` message, so this is
+ * the one predicate that decides it — used by the request path (which prepends
+ * the neutral head on a hit) and by the failure path (which names the
+ * offending line).
+ *
+ * THREE MEASURED RULES are folded in here, all from the live CN gateway on
+ * 2026-10-21 (account `ba217455…`, `deepseek-v4.1-flash`, every other request
+ * field held fixed):
+ *
+ *   1. Only the START counts — the same sentence mid-content answers 200.
+ *   2. LEADING WHITESPACE is trimmed before the comparison — " <banned>" and
+ *      "\n<banned>" both answer 200 today.
+ *   3. The comparison is CASE-INSENSITIVE — the lower-cased sentence fails too.
+ *
+ * (2) is a gift that can be withdrawn, so the comparison is made the way a
+ * trimming gate would make it even while the gateway is lenient: a rule that
+ * only holds while the gateway forgets to trim is a rule waiting to break.
+ *
+ * The list itself stays the measured snapshot. It is deliberately NOT
+ * extended by guesswork: an opening nobody measured is an opening nobody knows
+ * the gateway refuses, and inventing entries would neutralise prompts that
+ * answer 200 today.
+ */
+export function isUnapprovedChannelOpening(text: string): boolean {
+  const opening = text.replace(/^\s+/u, '').toLowerCase()
+  return UNAPPROVED_CHANNEL_OPENINGS.some(prefix => opening.startsWith(prefix))
+}
+
+/**
+ * Whether this text already begins with the plugin's own neutral head.
+ *
+ * The question the failure path has to answer per system message: "is the
+ * line the gateway refused OURS, or the HOST's?" — the plugin's head is the
+ * one line it has ever added to a prompt, so it is the only opening that
+ * cannot be a third-party-agent fingerprint.
+ */
+function startsWithNeutralHead(text: string): boolean {
+  const opening = text.replace(/^\s+/u, '').toLowerCase()
+  return opening.startsWith(WORKBUDDY_FALLBACK_SYSTEM_PROMPT.toLowerCase())
+}
+
+/**
+ * The roles whose message OPENINGS the gateway scans.
+ *
+ * MEASURED on the live CN gateway (2026-10-21, every other request field held
+ * fixed): `system` and `assistant` are scanned; `user` and `tool` are not (a
+ * body whose `user` or `tool` content opens with the banned identity answers
+ * 200). That second role is the one the plugin missed until 4.15.0, and it is
+ * why issue #98's sessions stayed broken: an `assistant` history message that
+ * opens with the fingerprint poisons EVERY later turn of that session, on
+ * every account and in every region.
+ *
+ * `developer` is not listed because `prepareChatBody` rewrites it to `system`
+ * before this module looks at the body — and because both gateways refuse
+ * `developer` outright, so neutralising its content would not save the request.
+ */
+function scansOpening(role: unknown): boolean {
+  if (typeof role !== 'string') return false
+  const name = role.trim().toLowerCase()
+  return name === 'system' || name === 'assistant'
+}
+
+/**
+ * Move every scanned message (`system` and `assistant`) off the content
+ * fingerprint above by prepending the placeholder head.
+ *
+ * A no-op for a body whose messages start with anything else, so a request the
+ * gateways already answer keeps its prompt byte-for-byte — only the messages
+ * the gate would refuse grow, by one short line.
+ *
+ * BOTH ROLES, because the gate reads both. Until 4.15.0 this only handled
+ * `system`, and the failure that left behind is issue #98: a conversation
+ * whose HISTORY contains an assistant message opening with the banned identity
+ * (the model echoing its own prompt, a restored session, a compaction
+ * artefact) was refused on every single turn, and no account or region could
+ * change a byte of it.
+ *
+ * ARRAY CONTENT IS HANDLED PART BY PART, and that is not a nicety. Measured on
+ * the live CN gateway (2026-10-21): when a scanned message's `content` is an
+ * array of parts, the gate reads EVERY TEXT PART of it — a banned opening in
+ * the FIRST part is refused, and a banned opening in the SECOND part is
+ * refused just the same. Prepending to the first part only would therefore
+ * fix the first half of the failure and leave the second half to the users who
+ * report it again.
  */
 function neutralizeChannelFingerprints(obj: Record<string, unknown>): void {
   const messages = obj['messages']
@@ -1072,17 +1172,356 @@ function neutralizeChannelFingerprints(obj: Record<string, unknown>): void {
   for (const value of messages) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const message = value as Record<string, unknown>
-    const role = message['role']
-    if (typeof role !== 'string' || role.trim().toLowerCase() !== 'system') continue
+    if (!scansOpening(message['role'])) continue
     const content = message['content']
-    if (typeof content !== 'string') continue
-    // Leading whitespace currently defeats the gate by itself (measured), but
-    // the gateway can start trimming without notice, so compare the way a
-    // trimming gate would and keep the raw content untouched.
-    const opening = content.replace(/^\s+/, '').toLowerCase()
-    if (!UNAPPROVED_CHANNEL_OPENINGS.some(prefix => opening.startsWith(prefix))) continue
-    message['content'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${content}`
+    if (typeof content === 'string') {
+      // Leading whitespace currently defeats the gate by itself (measured), but
+      // the gateway can start trimming without notice, so compare the way a
+      // trimming gate would and keep the raw content untouched.
+      if (!isUnapprovedChannelOpening(content)) continue
+      message['content'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${content}`
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const part of content) {
+      // A malformed part is left exactly as it is: this runs on a body that is
+      // about to go on the wire, and a throw here would cost the whole request.
+      if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+      const record = part as Record<string, unknown>
+      const type = record['type']
+      if (typeof type !== 'string' || type.trim().toLowerCase() !== 'text') continue
+      const text = record['text']
+      if (typeof text !== 'string' || !isUnapprovedChannelOpening(text)) continue
+      record['text'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${text}`
+    }
   }
+}
+
+/**
+ * A body in which EVERY scanned opening (`system` and `assistant`) is moved
+ * behind the neutral head.
+ *
+ * THE ONE-SHOT SELF-HEALING RETRY'S BODY BUILDER. The gateway's fingerprint
+ * list is a SNAPSHOT the upstream can extend at any time, and the plugin
+ * cannot see it: the two entries in {@link UNAPPROVED_CHANNEL_OPENINGS} are
+ * what was MEASURED on 2026-10-21, not a contract. So the day the gateway
+ * adds an entry, this plugin's own prepend stops matching and the banned
+ * opening goes out on the wire unchanged — exactly the dead end issue #98
+ * describes, and exactly what a longer guess-list cannot prevent (nobody can
+ * measure the next entry before it bites).
+ *
+ * The remedy is a second attempt that does not depend on knowing the
+ * fingerprint at all: this builds a body in which EVERY scanned message,
+ * whatever it opens with, gets the neutral head in front. The gateway matches
+ * the START of a scanned message, so a neutral first line moves the whole
+ * opening out of the matched region — whether the banned text is a known
+ * entry, a new one, or a fingerprint this plugin has never heard of.
+ *
+ * `assistant` messages are included for the measured reason
+ * {@link neutralizeChannelFingerprints} documents: a history message that opens
+ * with a refused identity is what keeps a whole session failing, so a retry
+ * that only moved the system prompt would spend a request to be refused for the
+ * same reason.
+ *
+ * WHEN IT IS USED: only AFTER the gateway refused the first attempt with the
+ * channel gate. A request the gateway already answers keeps its bytes
+ * unchanged, because this function is never called for it — the normal path
+ * is {@link prepareChatBody}, which only touches the openings it has MEASURED
+ * as fingerprinted.
+ *
+ * `undefined` means "this body cannot change": every scanned opening already
+ * starts with the neutral head, so a retry would send the same bytes and
+ * spend a request for the same refusal. The caller uses that to avoid
+ * spending the round trip.
+ *
+ * Empty contents are skipped: an empty string cannot open with anything, so it
+ * cannot be the culprit, and an assistant message that carries `tool_calls`
+ * with `content: ""` is a replay shape this function has no reason to touch.
+ *
+ * Never throws. A body it cannot read is the upstream's to reject, and a
+ * parse error must not turn a retry into a crash.
+ */
+export function forceNeutralHead(bodyJson: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const obj = parsed as Record<string, unknown>
+  const messages = obj['messages']
+  if (!Array.isArray(messages)) return undefined
+  let changed = false
+  for (const value of messages) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    const message = value as Record<string, unknown>
+    if (!scansOpening(message['role'])) continue
+    const content = message['content']
+    if (typeof content === 'string') {
+      if (content.trim() === '' || startsWithNeutralHead(content)) continue
+      message['content'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${content}`
+      changed = true
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const part of content) {
+      if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+      const record = part as Record<string, unknown>
+      const type = record['type']
+      if (typeof type !== 'string' || type.trim().toLowerCase() !== 'text') continue
+      const text = record['text']
+      if (typeof text !== 'string' || text.trim() === '' || startsWithNeutralHead(text)) continue
+      record['text'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${text}`
+      changed = true
+    }
+  }
+  if (!changed) return undefined
+  // Re-serialized from the PARSED object, so the key order of the original
+  // body is preserved — the retry is the same request, not a reshuffled one.
+  return JSON.stringify(obj)
+}
+
+/**
+ * The invisible character used to break a content fingerprint.
+ *
+ * U+200B ZERO WIDTH SPACE: it renders as nothing, it is not whitespace for the
+ * gateway's own matching, and a model reads straight through it. Measured on
+ * the live CN gateway: putting one inside the refused span turns 400 into 200,
+ * while the text the model reads is unchanged.
+ */
+const ZERO_WIDTH_SPACE = '\u200b'
+
+/**
+ * A body whose scanned message TEXT is perturbed just enough to break an exact
+ * content fingerprint.
+ *
+ * THE SECOND HALF OF ISSUE #98, found on 2026-10-21 after 4.15.0 shipped. The
+ * gateway does not only match the OPENING of a scanned message; it also matches
+ * one long substring INSIDE the system prompt. Measured byte-exactly on a real
+ * failed request (CN gateway, `deepseek-v4.1-flash`, the host's own body):
+ *
+ *   - the refusal is reproducible, and it is not the opening: the plugin had
+ *     already prepended the neutral head, and the request still answered 400;
+ *   - bisecting the host's 10,956-character system prompt by lines and then by
+ *     sentences found a 221-character span: the DSH Web-GUI paragraph's first
+ *     two sentences ("You are interacting with the user through the DeepSeek
+ *     Harness Web GUI … they mean this GUI.");
+ *   - that span ALONE reproduces the 400, and the SAME span with ANY change
+ *     inside it answers 200 — one character rewritten, one quoted word
+ *     replaced, even a zero-width space inserted. An outer prefix or suffix
+ *     does not help, so the match is an exact substring, not an opening rule;
+ *   - the paragraph's individual sentences each answer 200, which is why the
+ *     plugin's opening-based normalisation never saw this.
+ *
+ * SO THE RESCUE CANNOT BE "prepend a line" (that is {@link forceNeutralHead},
+ * and it is a no-op here). Nor can it be a list of refused spans: the list is
+ * the upstream's own data, it already grew once without notice, and it will
+ * grow again. What DOES generalise is the observation that an exact-substring
+ * match dies on any perturbation inside it — so this inserts a zero-width space
+ * at every sentence and clause boundary of the scanned messages, which is
+ * invisible to the reader, meaningless to the model, and inside the refused
+ * span with near-certainty for any prose fingerprint.
+ *
+ * WHEN IT IS USED: only as the last retry, after the gateway already refused
+ * the request AND the neutral head could not change anything. Requests the
+ * gateway answers keep their bytes untouched.
+ *
+ * Idempotent: a body that already carries U+200B in a scanned message is left
+ * alone, so a retry never stacks perturbations. Returns `undefined` when
+ * nothing would change, which is the caller's signal not to spend a request.
+ *
+ * Never throws: a malformed body is the upstream's to reject, and a parse error
+ * must not turn a rescue into a crash.
+ */
+export function perturbChannelFingerprints(bodyJson: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const obj = parsed as Record<string, unknown>
+  const messages = obj['messages']
+  if (!Array.isArray(messages)) return undefined
+  let changed = false
+  const perturb = (text: string): string | undefined => {
+    if (text.includes(ZERO_WIDTH_SPACE)) return undefined
+    // Sentence terminators followed by whitespace, the CJK ones without, and
+    // clause commas: between them they land inside almost any prose span that
+    // is long enough to be worth fingerprinting.
+    const next = text
+      .replace(/([.!?])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
+      .replace(/([。！？])/gu, `$1${ZERO_WIDTH_SPACE}`)
+      .replace(/([,;])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
+    return next === text ? undefined : next
+  }
+  for (const value of messages) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    const message = value as Record<string, unknown>
+    if (!scansOpening(message['role'])) continue
+    const content = message['content']
+    if (typeof content === 'string') {
+      const next = perturb(content)
+      if (next !== undefined) {
+        message['content'] = next
+        changed = true
+      }
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (const part of content) {
+      if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+      const record = part as Record<string, unknown>
+      const type = record['type']
+      if (typeof type !== 'string' || type.trim().toLowerCase() !== 'text') continue
+      const text = record['text']
+      if (typeof text !== 'string') continue
+      const next = perturb(text)
+      if (next !== undefined) {
+        record['text'] = next
+        changed = true
+      }
+    }
+  }
+  if (!changed) return undefined
+  return JSON.stringify(obj)
+}
+
+/**
+ * One opening of a message the gateway scans, as the HOST wrote it.
+ *
+ * The failure path needs to name the line the gateway reacted to, and "the line
+ * the host wrote" is not the same thing as "the line that went on the wire" —
+ * after {@link neutralizeChannelFingerprints} the wire carries the plugin's
+ * neutral head in front of every opening it recognises. Reporting the HOST's
+ * line and saying whether the plugin covers it is what stops the reader being
+ * sent to a line that is not at fault.
+ */
+export interface OpeningEvidence {
+  /** The opening line, whitespace-collapsed and clipped. */
+  readonly opening: string
+  /**
+   * Which message the opening belongs to — the role verbatim (`system` or
+   * `assistant`).
+   *
+   * Reported because the two are scanned by the same rule but mean opposite
+   * things to the reader: a `system` entry is the prompt they can edit, while
+   * an `assistant` entry is HISTORY, i.e. the session is poisoned and every
+   * later turn will fail the same way until that line changes.
+   */
+  readonly role: 'system' | 'assistant'
+  /**
+   * True when the plugin's own neutralisation already covers this opening —
+   * either it IS the plugin's neutral head, or it is a fingerprint the plugin
+   * rewrites before sending. False when the opening goes on the wire verbatim,
+   * i.e. the plugin does not know it.
+   *
+   * Both halves matter because the failure path reads the HOST's body (the
+   * request before the plugin rewrote it) as often as the prepared one: on the
+   * host's body a KNOWN fingerprint is still `true` (the plugin does cover it),
+   * and only an opening nobody has measured is `false` — which is precisely
+   * the actionable case issue #98 is about. On the prepared body the opening
+   * IS the neutral head, which the first half covers.
+   */
+  readonly neutralized: boolean
+  /** Index of the message in `messages` (0-based, wire order). */
+  readonly messageIndex: number
+}
+
+/**
+ * The openings of every scanned message in a body, one entry per TEXT PART.
+ *
+ * `system` AND `assistant`, because both are read by the gate (measured; see
+ * {@link scansOpening}). `developer` counts as a system message because the
+ * plugin rewrites `developer` → `system` on the wire.
+ *
+ * Array content contributes ONE ENTRY PER PART, for the same reason the request
+ * path neutralises every part: the gate reads every text part, so "which line
+ * tripped it" can be any of them.
+ *
+ * Capped at {@link SYSTEM_EVIDENCE_LIMIT} entries, and never throws — losing
+ * the failure measurement is not an acceptable price for reading an excerpt.
+ */
+export function openingEvidenceOfBody(bodyJson: string): OpeningEvidence[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return []
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return []
+  const messages = (parsed as Record<string, unknown>)['messages']
+  if (!Array.isArray(messages)) return []
+  const evidence: OpeningEvidence[] = []
+  for (let index = 0; index < messages.length; index++) {
+    if (evidence.length >= SYSTEM_EVIDENCE_LIMIT) break
+    const value = messages[index]
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    const message = value as Record<string, unknown>
+    const role = message['role']
+    if (typeof role !== 'string') continue
+    const roleName = role.trim().toLowerCase()
+    // `developer` counts because prepareChatBody rewrites it to `system`.
+    if (roleName !== 'system' && roleName !== 'assistant' && roleName !== 'developer') continue
+    const roleOfEvidence: 'system' | 'assistant' = roleName === 'assistant' ? 'assistant' : 'system'
+    const content = message['content']
+    const texts: string[] = []
+    if (typeof content === 'string') {
+      texts.push(content)
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+        const record = part as Record<string, unknown>
+        const type = record['type']
+        if (typeof type !== 'string' || type.trim().toLowerCase() !== 'text') continue
+        const text = record['text']
+        if (typeof text === 'string') texts.push(text)
+      }
+    }
+    for (const text of texts) {
+      if (evidence.length >= SYSTEM_EVIDENCE_LIMIT) break
+      const opening = firstNonEmptyLineOf(text).replace(/\s+/gu, ' ').trim()
+      if (opening === '') continue
+      evidence.push({
+        opening: clip(opening, SYSTEM_OPENING_LIMIT),
+        role: roleOfEvidence,
+        neutralized: startsWithNeutralHead(opening) || isUnapprovedChannelOpening(opening),
+        messageIndex: index,
+      })
+    }
+  }
+  return evidence
+}
+
+/**
+ * How many openings the failure path reports.
+ *
+ * Eight is generous: the gate scans every system message and every text part
+ * of it, so a body with more than a handful of openings is not a prompt the
+ * reader can act on anyway — the reply names the first ones and the failure
+ * body carries the rest.
+ *
+ * The cap is HERE and not in the reply: this function reports everything it
+ * found (up to eight) and the reply renders as many of them as fit, saying
+ * how many were left out. Truncating the evidence before the reply sees it
+ * would make "N more" unanswerable.
+ */
+const SYSTEM_EVIDENCE_LIMIT = 8
+
+/**
+ * The first line of a text that carries something.
+ *
+ * Blank lines are SKIPPED: the neutral head is followed by an empty line, so
+ * the head itself is the line worth reporting, and a content that opens with
+ * blank lines still has an opening.
+ */
+function firstNonEmptyLineOf(content: string): string {
+  for (const line of content.split('\n')) {
+    if (line.trim() !== '') return line
+  }
+  return ''
 }
 
 /**

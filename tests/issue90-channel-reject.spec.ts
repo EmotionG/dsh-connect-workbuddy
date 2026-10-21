@@ -45,7 +45,7 @@ import {
   classifyUpstreamError,
   isChannelRejectBody,
   parseUpstreamErrorDetail,
-  systemOpeningsOfBody,
+  openingEvidenceOfBody,
   WORKBUDDY_FALLBACK_SYSTEM_PROMPT,
 } from '../src/upstream.ts'
 import type { WorkBuddyChatResult, WorkBuddyUpstreamClient } from '../src/upstream.ts'
@@ -145,54 +145,59 @@ describe('the probe reports the channel gate as itself', () => {
   })
 })
 
-describe('systemOpeningsOfBody: what the gate actually looked at', () => {
-  it('returns the first lines of every system message', () => {
+describe('openingEvidenceOfBody: what the gate actually read', () => {
+  it('returns one entry per scanned message, with its role', () => {
+    // `system` AND `assistant` are scanned by the gate (measured, issue #98);
+    // `user` and `tool` are not, so they are not evidence.
     const body = JSON.stringify({
       model: 'm',
       messages: [
         { role: 'system', content: 'You are an AI agent powered by DeepSeek Harness.\n\nLong body follows.' },
         { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'Sure.\n\nHere is the answer.' },
         { role: 'system', content: 'Second system message.' },
+        { role: 'tool', content: 'a tool result', tool_call_id: 'call_1' },
       ],
     })
-    expect(systemOpeningsOfBody(body)).toEqual([
-      'You are an AI agent powered by DeepSeek Harness.',
-      'Second system message.',
+    expect(openingEvidenceOfBody(body)).toEqual([
+      { opening: 'You are an AI agent powered by DeepSeek Harness.', role: 'system', neutralized: true, messageIndex: 0 },
+      { opening: 'Sure.', role: 'assistant', neutralized: false, messageIndex: 2 },
+      { opening: 'Second system message.', role: 'system', neutralized: false, messageIndex: 3 },
     ])
   })
 
-  it('prefers the neutralised opening the plugin actually sent', () => {
-    // In production this is the point: after `prepareChatBody`, a KNOWN
-    // fingerprint no longer leads, so what gets echoed is the placeholder line —
-    // the truth about the bytes on the wire, not the host's original prompt.
+  it('reports the HOST opening and marks it as covered when the plugin rewrites it', () => {
+    // The regression this pins: the old excerpt read the PREPARED body, so the
+    // first line it could report was the plugin's own placeholder — the line
+    // issue #98's reporters were told had been refused. The evidence reads the
+    // host's body, so the host's own prompt is what is quoted.
     const body = JSON.stringify({
-      messages: [{ role: 'system', content: `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\nYou are an AI agent powered by DeepSeek Harness.` }],
+      messages: [{ role: 'system', content: 'You are an AI agent powered by DeepSeek Harness.' }],
     })
-    expect(systemOpeningsOfBody(body)[0]).toBe(WORKBUDDY_FALLBACK_SYSTEM_PROMPT)
+    const [entry] = openingEvidenceOfBody(body)
+    expect(entry?.opening).toBe('You are an AI agent powered by DeepSeek Harness.')
+    expect(entry?.neutralized).toBe(true)
   })
 
   it('clips a pathological opening instead of dumping a prompt', () => {
     const body = JSON.stringify({ messages: [{ role: 'system', content: `${'x'.repeat(5000)}\nrest` }] })
-    const [opening] = systemOpeningsOfBody(body)
-    expect(opening).toHaveLength(120)
-    expect(opening?.endsWith('…')).toBe(true)
+    const [entry] = openingEvidenceOfBody(body)
+    expect(entry?.opening).toHaveLength(120)
+    expect(entry?.opening.endsWith('…')).toBe(true)
   })
 
   it('caps how many openings it reports', () => {
     const messages = Array.from({ length: 8 }, (_, i) => ({ role: 'system', content: `opening ${i}` }))
-    expect(systemOpeningsOfBody(JSON.stringify({ messages }))).toHaveLength(3)
+    expect(openingEvidenceOfBody(JSON.stringify({ messages })).length).toBeLessThanOrEqual(8)
+    const many = Array.from({ length: 12 }, (_, i) => ({ role: 'assistant', content: `opening ${i}` }))
+    expect(openingEvidenceOfBody(JSON.stringify({ messages: many }))).toHaveLength(8)
   })
 
   it('never throws on a body it cannot read', () => {
     // Losing the failure measurement is not an acceptable price for an excerpt.
     for (const body of ['', 'not json', 'null', '[]', '"str"', '{"messages":"nope"}', '{"messages":[null,3,{"role":1}]}']) {
-      expect(systemOpeningsOfBody(body)).toEqual([])
+      expect(openingEvidenceOfBody(body)).toEqual([])
     }
-  })
-
-  it('ignores a message whose content is an array, not a string', () => {
-    const body = JSON.stringify({ messages: [{ role: 'system', content: [{ type: 'text', text: 'x' }] }, { role: 'system', content: 'kept' }] })
-    expect(systemOpeningsOfBody(body)).toEqual(['kept'])
   })
 })
 
@@ -279,7 +284,7 @@ async function chat(instance: WorkBuddyShim, systemOpening: string): Promise<{
 }
 
 describe('the rendered reply names the line the gate refused', () => {
-  it('echoes the system opening and refutes the client-identity story', async () => {
+  it('names the HOST opening (per role) and refutes the client-identity story', async () => {
     shim = mount(failure(400, CHANNEL_REJECT_BODY), async () => undefined)
     await shim.ready
 
@@ -293,7 +298,7 @@ describe('the rendered reply names the line the gate refused', () => {
     expect(type).toBe('channel_reject')
     // 1. The evidence, quoted — this is the whole fix. The reader can now see
     //    WHICH line was refused instead of cycling accounts.
-    expect(message).toContain(`命中的 system 提示开头：「${NOVEL}」`)
+    expect(message).toContain(`请求里被网关扫描的消息开头：「system：${NOVEL}」（不在插件已知名单里`)
     // 2. Support's handles, compact.
     expect(message).toContain('code 11128')
     expect(message).toContain('requestId 26d17b97-c53b-461a-bd21-34c61c86f15b')
@@ -304,21 +309,25 @@ describe('the rendered reply names the line the gate refused', () => {
     expect(message).not.toContain('换账号也不会改变结果，请按上面的提示调整后重试')
   })
 
-  it('quotes the bytes actually sent, after normalisation', async () => {
-    // `prepareChatBody` prepends the placeholder to a KNOWN fingerprint, so the
-    // echo must be that placeholder — proof the excerpt comes from the wire body
-    // and not from a re-read of the host's original prompt.
+  it('quotes the HOST prompt and says the plugin already covers it (issue #98)', async () => {
+    // The regression that misdirected ten reporters: the excerpt used to be
+    // read from the PREPARED body, where `prepareChatBody` has already put the
+    // placeholder in front of a known fingerprint — so the quoted line was
+    // `You are a helpful assistant.`, which returns 200 when sent alone.
+    // Reading the host's body reports the line the host actually wrote, and the
+    // marker says the plugin already neutralises it.
     shim = mount(failure(400, CHANNEL_REJECT_BODY), async () => undefined)
     await shim.ready
     const { message } = await chat(shim, 'You are an AI agent powered by DeepSeek Harness.')
-    expect(message).toContain(`「${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}」`)
-    expect(message).not.toContain('「You are an AI agent powered by DeepSeek Harness.」')
+    expect(message).toContain('「system：You are an AI agent powered by DeepSeek Harness.」（插件已加中性头）')
+    expect(message).not.toContain(`「system：${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}」`)
   })
 
-  it('echoes the injected fallback head when the host sent no system message', async () => {
-    // `ensureSystemHead` guarantees a head exists, so this is the closest the
-    // shim ever gets to "nothing to quote" — and the honest answer is still to
-    // quote what went on the wire, not to claim the request had no prompt.
+  it('says so when the host body carried no readable opening', async () => {
+    // `ensureSystemHead` injects a system head on the wire, but the evidence
+    // reads the HOST body, which here is a single user message. Inventing an
+    // excerpt would be worse than saying there is none — the remedy sentence
+    // below it stays true either way.
     shim = mount(failure(400, CHANNEL_REJECT_BODY), async () => undefined)
     await shim.ready
     const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
@@ -327,7 +336,7 @@ describe('the rendered reply names the line the gate refused', () => {
       body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }] }),
     })
     const parsed = JSON.parse(await response.text()) as { error: { message: string } }
-    expect(parsed.error.message).toContain(`「${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}」`)
+    expect(parsed.error.message).toContain('（请求里没有可读的 system 或 assistant 消息开头。）')
     expect(parsed.error.message).toContain('code 11128')
     expect(parsed.error.message).toContain('换账号或换区域也不会改变结果')
   })
@@ -475,7 +484,11 @@ describe('the host keeps the plugin\'s sentence and does not retry the gate', ()
     expect(isQuotaExceededError(text)).toBe(false)
 
     // And the sentence that must reach the reader is in the text the host reads.
-    expect(text).toContain('命中的 system 提示开头')
+    // This host call carries only a user message, so there is no opening to
+    // quote — the reply says so rather than inventing one, and the gate's own
+    // name still reaches the reader.
+    expect(text).toContain('被网关的渠道校验拦截')
+    expect(text).toContain('（请求里没有可读的 system 或 assistant 消息开头。）')
     expect(text).toContain('换账号或换区域也不会改变结果')
     // The upstream's misleading half must NOT be what the reader is left with.
     expect(text).not.toContain('请用官方版本重新发送')

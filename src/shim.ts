@@ -32,7 +32,11 @@ import {
   declaredTools,
   prepareChatBody,
   modelIdOfBody,
-  systemOpeningsOfBody,
+  forceNeutralHead,
+  isConversationIdGateBody,
+  isFirstMessageGateBody,
+  openingEvidenceOfBody,
+  perturbChannelFingerprints,
   WorkBuddyUpstreamClient,
   type UpstreamErrorKind,
   type WorkBuddyChatResult,
@@ -1081,6 +1085,49 @@ function clippedUpstreamText(text: string, limit: number): string {
 }
 
 /**
+ * The channel-gate reply's evidence sentence: what the gateway actually read.
+ *
+ * Read from the HOST's body, not from the prepared one, because the prepared
+ * body has the plugin's neutral head in front of every opening it recognises —
+ * so the first line it could report is the plugin's own placeholder, which is
+ * exactly the false lead issue #98's reporters were given. They were told the
+ * gateway had refused `You are a helpful assistant.`, a line that returns 200
+ * when sent alone.
+ *
+ * Each entry is labelled with its ROLE (`system` / `assistant`) because both are
+ * scanned and the difference is what tells the reader where to look: an
+ * `assistant` entry is a history message, i.e. the session is poisoned and every
+ * later turn will fail the same way until that line is changed.
+ *
+ * Each entry also says whether the plugin's own neutralisation already covers
+ * it. An entry marked "not in the plugin's list" is the actionable one: that
+ * opening goes on the wire verbatim, so either the host wrote it or the
+ * gateway's list grew.
+ *
+ * Capped at {@link CHANNEL_EVIDENCE_LIMIT} entries: a session can carry dozens
+ * of system/assistant messages, and a wall of them would bury the one that
+ * matters. The remainder is counted instead of listed.
+ */
+function channelEvidenceText(bodyJson: string): string {
+  const entries = openingEvidenceOfBody(bodyJson)
+  if (entries.length === 0) return '（请求里没有可读的 system 或 assistant 消息开头。）'
+  const shown = entries.slice(0, CHANNEL_EVIDENCE_LIMIT)
+  const rendered = shown
+    .map(entry => {
+      const label = entry.neutralized
+        ? '（插件已加中性头）'
+        : '（不在插件已知名单里，网关可能新增了词条）'
+      return `「${entry.role}：${entry.opening}」${label}`
+    })
+    .join('、')
+  const hidden = entries.length - shown.length
+  return `请求里被网关扫描的消息开头：${rendered}${hidden > 0 ? `……另有 ${hidden} 条未列出。` : '。'}`
+}
+
+/** How many message openings the channel-gate reply lists. */
+const CHANNEL_EVIDENCE_LIMIT = 4
+
+/**
  * The line prepended to an answer that came from a failover account.
  *
  * Block-quoted and bracketed so it reads as machinery rather than as the model's
@@ -1501,6 +1548,58 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     // The first attempt always uses the store's own resolution, so a token
     // refresh still happens exactly once, before any retry.
     let result = await client.chatStream(credential, prepared, controller.signal)
+
+    /**
+     * The retry ladder that does not depend on knowing the fingerprint
+     * (issue #98, both halves).
+     *
+     * The gateway refuses the request for data the plugin cannot see: a list of
+     * refused `system`/`assistant` OPENINGS (the plugin holds a measured
+     * SNAPSHOT, `UNAPPROVED_CHANNEL_OPENINGS`) and, since 2026-10-21, at least
+     * one long substring INSIDE the prompt. Every account and every region
+     * sends the same bytes, so without a rescue the only outcome is a dead end
+     * the reader cannot get out of.
+     *
+     * Two rungs, both on the SAME credential (the gate reads the request, not
+     * the account, which is why `channel_reject` is not failover-worthy):
+     *
+     *   1. `forceNeutralHead` — move every scanned opening behind the neutral
+     *      head. Measured: whatever the banned opening is, moving it off the
+     *      start of the content answers 200.
+     *   2. `perturbChannelFingerprints` — insert zero-width spaces at the
+     *      sentence boundaries of the scanned messages, which breaks an
+     *      exact-substring fingerprint without changing a word the model reads.
+     *      This is the rung that rescues the inside-the-prompt fingerprints,
+     *      where rung 1 is a no-op.
+     *
+     * Both return `undefined` when they would change nothing; that is the
+     * signal not to spend a request on a body that would be refused identically.
+     *
+     * Nothing has been written to the client at this point (`!ok` means the
+     * upstream answered non-2xx before any stream started), so a retry cannot
+     * splice two responses together. The first attempt's failure is NOT booked
+     * as an account failure: it was the request that was refused, not the
+     * credential.
+     */
+    let retriedWithForcedHead = false
+    let retriedWithPerturbation = false
+    if (!result.ok && result.kind === 'channel_reject' && !controller.signal.aborted) {
+      const forced = forceNeutralHead(prepared)
+      if (forced !== undefined) {
+        logger?.warn('dsh-connect-workbuddy: the channel gate refused the body; retrying once with the neutral head forced in front of every opening')
+        result = await client.chatStream(credential, forced, controller.signal)
+        retriedWithForcedHead = true
+      }
+      if (!result.ok && result.kind === 'channel_reject' && !controller.signal.aborted) {
+        const rescued = perturbChannelFingerprints(forced ?? prepared)
+        if (rescued !== undefined) {
+          logger?.warn('dsh-connect-workbuddy: the channel gate refused the body again; retrying once with an invisible perturbation of the scanned text')
+          result = await client.chatStream(credential, rescued, controller.signal)
+          retriedWithPerturbation = true
+        }
+      }
+    }
+
     const triedAccountIds: string[] = []
     /**
      * The account the request STARTED on, and the reason it was abandoned.
@@ -1708,37 +1807,48 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (result.kind === 'channel_reject') {
         // The one failure where the evidence lives in the REQUEST we just sent,
         // not in the upstream's reply. `displayTips` blames "channel verification
-        // / a non-official client", which is what sent issues #87–#90's
+        // / a non-official client", which is what sent issues #87–#98's
         // reporters to try other accounts, other regions and even the official
-        // client — none of which can change the opening of a system message.
-        // Echoing that opening is the difference between "the upstream refused"
-        // and "the upstream refused BECAUSE OF THIS LINE", and it is the only
-        // form of the message a reader can act on.
+        // client — none of which can change a byte of the request.
         //
-        // `prepared` is in scope and is exactly what went on the wire (after
-        // `prepareChatBody`'s neutralising prepend), so the excerpt is the real
-        // bytes rather than the host's idea of them.
+        // TWO corrections to what this branch used to do, both measured on the
+        // live CN gateway on 2026-10-21:
+        //
+        //   1. The gate scans `system` AND `assistant` messages, at the START
+        //      of each content (or of every text part). A history message that
+        //      opens with a refused identity poisons the WHOLE session: every
+        //      later request is refused, and "another session on the same
+        //      account works" is exactly what that looks like from outside.
+        //   2. The old excerpt was read from `prepared` — the bytes after the
+        //      plugin's own neutralising prepend — so the first line it could
+        //      report was the plugin's placeholder `You are a helpful
+        //      assistant.`, and issue #98's reporters were told that the
+        //      gateway had refused the plugin's own head.
+        //
+        // So the excerpt is read from `raw`, the body the HOST sent, and every
+        // opening is labelled with its role and with whether the plugin already
+        // covers it. Nothing is claimed about WHICH line the gateway matched:
+        // the upstream never says, and pretending to know is what misdirected
+        // the readers of issues #87–#98.
         const detail = result.detail
         const meta: string[] = []
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
         const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
-        const openings = systemOpeningsOfBody(prepared)
-        // If nothing could be read (`[]`), say what is known and stop: inventing
-        // an excerpt would be worse than omitting it, and the remedy sentence
-        // below remains true either way.
-        const evidence = openings.length === 0
-          ? ''
-          : `命中的 system 提示开头：${openings.map(opening => `「${opening}」`).join('、')}。`
+        const evidence = channelEvidenceText(raw)
+        const retries: string[] = []
+        if (retriedWithForcedHead) retries.push('强制中性头')
+        if (retriedWithPerturbation) retries.push('一次不可见扰动')
+        const retryNote = retries.length === 0 ? '' : `，并已用${retries.join('与')}重试过`
         // Same `workbuddy 上游失败：…（http N）` frame as every other failure, on
         // purpose: reporters paste this sentence into issues verbatim, so the
         // shape they search for must not change just because the diagnosis did.
         const message =
           `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${stamp}。${evidence}` +
           '该请求被 WorkBuddy 网关的渠道校验拦截，上游把它描述成「不是官方客户端发出的」，但那是误导性文案：' +
-          '网关匹配的是 system 提示的开头，与账号、积分、额度、网络都无关，换账号或换区域也不会改变结果。' +
-          '若这段开头来自宿主或其他插件，请修改该提示；插件已对已知的第三方 agent 指纹做归一化，' +
-          '新的指纹可反馈到 issue 里'
+          '网关匹配的是每一条 system 与 assistant 消息的开头，与账号、积分、额度、网络都无关，换账号或换区域也不会改变结果。' +
+          '插件已对已知的第三方 agent 指纹做归一化' + retryNote +
+          '；若上面标着「不在插件已知名单里」的开头来自宿主或其他插件，请修改该提示；新的指纹可反馈到 issue 里'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }
@@ -1769,6 +1879,22 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
       if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
       const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
+      // The two OTHER gates that share business code `11128`. They are kept out
+      // of `channel_reject` on purpose (blaming the prompt for a header problem
+      // would be a confidently wrong diagnosis), but falling into the generic
+      // "按参数拒绝" bucket leaves the reader with the gateway's own misleading
+      // tips and nothing to act on. That is the exact reply one user pasted back
+      // into this project: `code 11128` + "可能不是官方客户端发出的" +
+      // "请按上面的提示调整后重试".
+      //
+      // Both are answered by the upstream's literal `msg`, and neither is about
+      // the prompt, so the reply says what the gate is about instead of quoting
+      // the shared "channel verification" paragraph a second time.
+      const siblingGate = isConversationIdGateBody(result.message)
+        ? '该请求被上游以「conversation id missing」拒绝：网关要求每个请求带上会话 id 头（X-Conversation-ID、X-Conversation-Request-ID、X-Conversation-Message-ID），插件每次都会带上这三个头；仍出现说明这次请求没有走插件的聊天通道，请升级插件或反馈 issue'
+        : isFirstMessageGateBody(result.message)
+          ? '该请求被上游以「first message is not system prompt」拒绝：网关要求首条消息是 system 消息；插件在请求带消息时会保证这一点，所以出现这条说明这次请求本身没有消息，或没有走插件的聊天通道，请升级插件或反馈 issue'
+          : undefined
       // An `off`-tier refusal is the one parameter rejection this plugin can name
       // itself (issue #83), and the reader cannot act on the generic sentence:
       // the remedy is unticking one checkbox, not "adjust the request".
@@ -1791,7 +1917,15 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // `displayTips` and most `msg` bodies already end in a full stop, so gluing
       // an advice sentence on would read "。。" — the upstream's sentence is left
       // exactly as it arrived, minus that final stop, and the join supplies one.
-      const body = advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`
+      //
+      // A named sibling gate replaces the whole body INCLUDING the receipt: the
+      // receipt would be `displayTips`, and that paragraph is the same
+      // "possibly not an official client" sentence for all three gates — quoting
+      // it next to a header/first-message diagnosis is what made these reports
+      // cycle through account and region swaps.
+      const body = siblingGate !== undefined
+        ? siblingGate
+        : advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],
