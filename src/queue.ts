@@ -68,15 +68,20 @@ const WORKBUDDY_QUEUE_CODES: readonly number[] = [
   WORKBUDDY_QUEUE_USER_LIMIT,
 ]
 
-/** The app's default when the upstream sends no `retry_after` (`?? 5`). */
-const WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC = 5
-
 /** True when a business code is one of the app's three queue codes. */
 export function isQueueCode(value: unknown): boolean {
   return typeof value === 'number' && WORKBUDDY_QUEUE_CODES.includes(value)
 }
 
-/** One recognised queue condition, as the upstream stated it. */
+/**
+ * One recognised queue condition, as the upstream stated it.
+ *
+ * NO `retryAfterSec` FIELD (removed 2026-10-22 with the sentence it fed). It
+ * existed only to render 「约 N 秒后自动重试」, and nothing retries — see
+ * {@link queueNoticeText}. A parsed-but-unused countdown would invite the
+ * promise back, and this project's rule is that unreachable data is not a
+ * feature.
+ */
 export interface WorkBuddyQueueReport {
   /** `6020` / `6021` / `6022`. */
   code: number
@@ -84,8 +89,6 @@ export interface WorkBuddyQueueReport {
   position?: number
   /** How many requests are beyond it, when the upstream said. */
   size?: number
-  /** The upstream's own `retry_after` in seconds, else the app's default of 5. */
-  retryAfterSec: number
 }
 
 /** Read one queue condition out of a `data`-shaped object, or `undefined`. */
@@ -96,12 +99,12 @@ function reportFrom(code: number, data: unknown): WorkBuddyQueueReport | undefin
     typeof body[key] === 'number' && Number.isFinite(body[key] as number) ? body[key] as number : undefined
   const position = numberField('queue_position')
   const size = numberField('queue_size')
-  const retryAfter = numberField('retry_after')
+  // `retry_after` is deliberately NOT read any more: the countdown it fed
+  // promised a retry this plugin does not perform (see `queueNoticeText`).
   return {
     code,
     ...position === undefined ? {} : { position },
     ...size === undefined ? {} : { size },
-    retryAfterSec: retryAfter !== undefined && retryAfter > 0 ? retryAfter : WORKBUDDY_QUEUE_DEFAULT_RETRY_SEC,
   }
 }
 
@@ -166,12 +169,25 @@ function readEnvelope(value: unknown): WorkBuddyQueueReport | undefined {
  *
  * `waiting` names both numbers because they answer different questions: the
  * POSITION is how long the wait is, the SIZE is whether it is moving at all.
+ *
+ * IT NO LONGER PROMISES "自动重试" (removed 2026-10-22, at the maintainer's
+ * request). The sentence used to end with 「约 N 秒后自动重试」, and nothing
+ * retried: this plugin does not poll `/v2/chat/queue/status` and does not resend
+ * (see "WHAT THIS MODULE DOES NOT DO YET" above). The only retry that ever
+ * happened was the HOST's own bounded in-place retry on a 429 — two attempts,
+ * 0.5s then 1s, about 1.5 seconds — which is not "N seconds" and gives up long
+ * before a real queue of thousands moves.
+ *
+ * So the sentence now states the WAIT and leaves the next move to the reader.
+ * Reporting the position stays honest and useful — knowing you are 8,777th is
+ * the answer to "wait or switch" — but claiming a recovery the plugin does not
+ * perform turned a diagnostic into a promise it could not keep.
  */
 export function queueNoticeText(report: WorkBuddyQueueReport): string {
   if (report.code === WORKBUDDY_QUEUE_WAITING) {
     const position = report.position === undefined ? '未知' : `${report.position}`
     const size = report.size === undefined ? '' : `，队列共 ${report.size} 个请求`
-    return `模型排队中：你排在第 ${position} 位${size}；约 ${report.retryAfterSec} 秒后自动重试`
+    return `模型排队中：你排在第 ${position} 位${size}。请稍后重新发送这条消息，或换一个模型`
   }
   if (report.code === WORKBUDDY_QUEUE_FULL) {
     const size = report.size === undefined ? '' : `（共 ${report.size} 个请求排队）`

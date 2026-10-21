@@ -53,20 +53,20 @@ describe('parseQueueAnswer', () => {
       code: WORKBUDDY_QUEUE_WAITING,
       position: 8777,
       size: 9021,
-      retryAfterSec: 7,
     })
   })
 
-  it('falls back to the app’s 5-second default when no retry_after came', () => {
-    const body = JSON.stringify({ code: 6020, data: { queue_position: 3 } })
-    // The app's `?? 5`. Pinned as a literal rather than through an export: the
-    // constant is module-internal now, and the VALUE is the contract.
-    expect(parseQueueAnswer(body)?.retryAfterSec).toBe(5)
+  it('does not carry a retry countdown, because nothing retries', () => {
+    // `retry_after` used to be parsed into `retryAfterSec` and rendered as
+    // 「约 N 秒后自动重试」. Nothing polls the queue and nothing resends (see the
+    // module note), so the field is removed rather than parsed and dropped.
+    const body = JSON.stringify({ code: 6020, data: { queue_position: 3, retry_after: 7 } })
+    expect(Object.keys(parseQueueAnswer(body) ?? {}).sort()).toEqual(['code', 'position'])
   })
 
   it('reads a code nested one level down', () => {
     const body = JSON.stringify({ code: 0, data: { code: 6021, queue_size: 500 } })
-    expect(parseQueueAnswer(body)).toEqual({ code: WORKBUDDY_QUEUE_FULL, size: 500, retryAfterSec: 5 })
+    expect(parseQueueAnswer(body)).toEqual({ code: WORKBUDDY_QUEUE_FULL, size: 500 })
   })
 
   it('reads the app’s agent-protocol envelope, where the condition is a JSON string', () => {
@@ -104,25 +104,24 @@ describe('parseQueueAnswer', () => {
 
 describe('queueNoticeText', () => {
   it('names the position AND the queue size for a waiting request', () => {
-    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_WAITING, position: 8777, size: 9021, retryAfterSec: 7 })
+    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_WAITING, position: 8777, size: 9021 })
     expect(text).toContain('排队中')
     expect(text).toContain('8777')
     expect(text).toContain('9021')
-    expect(text).toContain('7 秒')
   })
 
   it('says the queue is full, and does not pretend a position exists', () => {
-    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_FULL, size: 500, retryAfterSec: 5 })
+    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_FULL, size: 500 })
     expect(text).toContain('队列已满')
     expect(text).not.toContain('第 ')
   })
 
   it('says the user already holds the maximum, for 6022', () => {
-    expect(queueNoticeText({ code: WORKBUDDY_QUEUE_USER_LIMIT, retryAfterSec: 5 })).toContain('排队任务已达上限')
+    expect(queueNoticeText({ code: WORKBUDDY_QUEUE_USER_LIMIT })).toContain('排队任务已达上限')
   })
 
   it('never prints an untranslated upstream message key', () => {
-    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_WAITING, position: 2, retryAfterSec: 5 })
+    const text = queueNoticeText({ code: WORKBUDDY_QUEUE_WAITING, position: 2 })
     expect(text).not.toContain('queue.')
   })
 })

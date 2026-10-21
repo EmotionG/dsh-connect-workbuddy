@@ -384,9 +384,18 @@ function hostErrorCode(kind: UpstreamErrorKind): string {
   return KIND_HOST_CODE[kind] ?? kind
 }
 
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
+function writeJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Readonly<Record<string, string>>,
+): void {
   const payload = JSON.stringify(body)
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) })
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+    ...headers,
+  })
   res.end(payload)
 }
 
@@ -398,9 +407,44 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
  * must not be disguised as one. The upstream failure path passes an explicit
  * `code` so the host classifies it correctly — see {@link KIND_HOST_CODE}.
  */
-function writeOpenAIError(res: ServerResponse, status: number, kind: string, message: string, code?: string): void {
-  writeJson(res, status, { error: { message, type: kind, code: code ?? kind } })
+function writeOpenAIError(
+  res: ServerResponse,
+  status: number,
+  kind: string,
+  message: string,
+  code?: string,
+  headers?: Readonly<Record<string, string>>,
+): void {
+  writeJson(res, status, { error: { message, type: kind, code: code ?? kind } }, headers)
 }
+
+/**
+ * Tell every retrying client NOT to retry this failure (2026-10-22, at the
+ * maintainer's request: the queue's automatic retry is removed).
+ *
+ * `x-should-retry` is a non-standard header that both clients in this stack
+ * check BEFORE their status-based rules — the pinned OpenAI SDK's `shouldRetry`
+ * and pi-ai's `isRetryableProviderError` each return false on "false".
+ *
+ * WHY THE QUEUE MUST NOT BE RETRIED. Without this header a 429 is retried by
+ * construction: `@deepseek-ai/dsh-llm` maps status 429 to the `RATE_LIMIT` code
+ * and `RATE_LIMIT` is in `DEFAULT_RETRYABLE_CODES`, so the HOST runs five
+ * in-place attempts with 0.5s→8s backoff. Measured, that budget totals roughly
+ * 15 seconds — against a queue the upstream reports in thousands. Every one of
+ * those attempts is a real request spent to be told the same position again, and
+ * none of them can clear the queue.
+ *
+ * So the queue is now reported ONCE, with the position intact, and the reader
+ * decides whether to resend or switch models. That is exactly what
+ * {@link queueNoticeText} tells them to do — the two changes are one decision: a
+ * diagnostic that declares itself final must actually be final.
+ */
+const NO_RETRY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
+  'x-should-retry': 'false',
+  // The same instruction in the standard spelling, for a client that prefers it
+  // over the vendor one. `0` means "do not wait, do not retry".
+  'retry-after': '0',
+})
 
 /** Read a request body with a size cap; over-limit bodies fail the request. */
 function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -1839,7 +1883,14 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // `6021`/`6022` the sentence says what to do instead of queueing.
       const queue = result.kind === 'model_queue' ? parseQueueAnswer(result.message) : undefined
       if (queue !== undefined) {
-        writeOpenAIError(res, 429, 'model_queue', `${queueNoticeText(queue)}（上游 code ${queue.code}）${note}`)
+        writeOpenAIError(
+          res,
+          429,
+          'model_queue',
+          `${queueNoticeText(queue)}（上游 code ${queue.code}）${note}`,
+          undefined,
+          NO_RETRY_HEADERS,
+        )
         return
       }
       if (result.kind === 'policy_reject') {
