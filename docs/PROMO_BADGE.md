@@ -9,70 +9,95 @@
 1. **上游在模型目录的同一次响应里下发活动信息**——`data.modelPromotions`（促销）与
    `data.modelTiers`（权益/等级标记）。两者与 `data.models` **同层**，插件读取模型目录时
    顺手就能拿到，**不需要新增任何一次请求**。
-2. **全球区实测有 3 条促销 + 1 条等级标记**；**国内区的网关不下发活动字段**，因此国内版的
-   模型行不会出现徽标——这是**数据源**问题，不是渲染问题：国内账号的活动确实存在，
-   只是上游没有把活动数组下发给插件手里这份凭据（见下文「国内区为何没有」）。
-3. 徽标必须按**当前时钟**求值，而不是把解析那一刻的快照冻住；并且要**保留全部候选活动**
+2. **两个区域都下发活动字段**：国内区实测 8 条促销 + 1 条等级标记（中文标签），国际区
+   5 条促销 + 1 条等级标记（英文标签）。
+3. **「按客户端通道下发」是唯一的关键变量**：同一条凭据、同一个 URL、同一天，
+   `/v3/config` 的答案取决于请求头里的**客户端身份**。以 App 身份（`WorkBuddy/… CLI/…`）
+   去要，答案里带 `modelPromotions` / `modelTiers`；以纯 CLI 身份去要，答案是它的**严格
+   子集**——**两个数组都不在里面**。插件此前用 CLI 身份读国内区的 `/v3/config`，
+   于是国内版模型行一个徽标都画不出来（根因见下文「根因」）。
+4. 徽标必须按**当前时钟**求值，而不是把解析那一刻的快照冻住；并且要**保留全部候选活动**
    再按优先级挑选——上游会用「同一模型两条互补条目」表达时段，只留一条必然出错。
 
 ## 数据来源
 
-| 区域 | 端点 | 结果 |
-| --- | --- | --- |
-| 全球区 | `GET https://www.workbuddy.ai/v3/config` | `data.modelPromotions` 5 条、`data.modelTiers` 1 条、`data.models` 28 条 |
-| 全球区 | `GET https://www.codebuddy.ai/v3/config` | 同上（同一份国际产品配置，换个官方主机） |
-| 国内区 | `GET https://www.codebuddy.cn/v3/config` | 18 个键，**无** `modelPromotions` / `modelTiers` |
-| 国内区 | `GET https://copilot.tencent.com/v3/config` | 5 个键，同样没有 |
-| 国内区 | `GET https://www.workbuddy.cn/v3/config` | 18 个键，同样没有（桌面端自己也是拉这个地址） |
-| 国内区 | `GET /v2/enterprises/personal/models` | 7 个键，同样没有 |
+| 区域 | 端点 | 客户端身份（User-Agent） | 结果 |
+| --- | --- | --- | --- |
+| 国内区 | `GET https://copilot.tencent.com/v3/config` | `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0` | 22 个键，`modelPromotions` **8 条**、`modelTiers` **1 条**、`models` 62 条 |
+| 国内区 | `GET https://www.workbuddy.cn/v3/config` | 同上 | 同上（桌面端自己也是拉这个地址与这个身份） |
+| 国内区 | `GET https://www.codebuddy.cn/v3/config` | 同上 | 同上 |
+| 国内区 | `GET https://copilot.tencent.com/v3/config` | `CLI/2.63.2 CodeBuddy/2.63.2` | 5 个键，35 个模型，**两个活动数组都没有** |
+| 国际区 | `GET https://www.workbuddy.ai/v3/config` | App 身份 | 17 个键，`modelPromotions` **5 条**、`modelTiers` **1 条**、`models` 28 条 |
+| 国际区 | `GET https://www.codebuddy.ai/v3/config` | App 身份 | 同上（同一份国际产品配置，换个官方主机） |
 
-插件读全球区走 `/v3/config`（`GLOBAL_CONFIG_PATH`，`src/upstream.ts`），国内区先试
-`/v3/config`、失败回落 `/v2/enterprises/personal/models`——两处都是读同一个 `data`，
-所以**促销是零新增请求**的副产品。
+主机之间**没有差别**：`www.workbuddy.cn`、`copilot.tencent.com`、`wb.tencentbuddy.com`、
+`www.codebuddy.cn` 在同一个身份下答案逐字节一致。所以要改的从来不是「地址」。
 
-## 国内区为何没有：上游产品配置的三层合并
+插件两个区域都走 `/v3/config`（`GLOBAL_CONFIG_PATH`，`src/upstream.ts`），国内区失败时
+回落 `/v2/enterprises/personal/models`——两处读的是同一个 `data`，所以**促销是零新增
+请求**的副产品。
 
-上游把「有哪些模型、哪些活动」放在同一份**产品配置文档**里，桌面端再把几层合并成
-最终配置。读代码（`app.asar` 的 `main/dev-env-override.js`）能看清这个层次：
+## 根因：产品配置按「客户端通道」下发，而不是按主机或账号
 
-| 层 | 优先级 | 来源 |
-| --- | --- | --- |
-| `ClientProductProvider` | 5 000 | 客户端内置的 `product.json` |
-| `CloudProductProvider` | 10 000 | **云端** `GET <endpoint>/v3/config`（`DEFAULT_CONFIG_PATH`） |
-| `EnvProductProvider` | 20 000 | 环境变量 `ACC_PRODUCT_CONFIG_V3` / `ACC_PRODUCT_CONFIG_PATH` |
+上游把「有哪些模型、哪些活动」放在同一份**产品配置文档**里，按请求方声明的**客户端
+身份**裁剪出不同形状的答案：
 
-合并结果按账号持久化，并发布给 CLI 子进程（CLI 的 `product.json` 里
-`productConfigEnv` / `productConfigPathEnv` 指的就是它）：
+| User-Agent | 国内区 `/v3/config` 的答案 |
+| --- | --- |
+| `CLI/2.63.2 CodeBuddy/2.63.2`（纯 CLI 身份，插件此前用的） | 5 个键、35 个模型、**无** `modelPromotions` / `modelTiers` |
+| `WorkBuddy/5.8.3`（App 身份，缺 CLI 段） | 18 个键、37 个模型、**无**活动数组 |
+| `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`（App 的真实身份） | 22 个键、62 个模型、**8 条促销 + 1 条等级标记** |
 
-- `~/.workbuddy/storage/user-<uid>-personal/scoped/<hash>/wb-product-config.json`
-- `~/.workbuddy/cache/acc-product-config-v3.json`（CLI 侧的落地副本）
+版本号是**惰性**的：`WorkBuddy/1.0.0 CLI/2.63.2 CodeBuddy/2.63.2` 与
+`WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0` 答案完全一致。决定答案形状的是**头里声明
+的通道**，不是版本。
 
-本机两个账号的快照里都有活动字段——**国内账号 8 条促销 + 1 条等级标记**
-（`glm-52-night-discount-202607`、`glm-52-night-discount-daytime-badge-202607`、
-`hy3-free-trial-202608`、`hy4-night-discount-badge-202609`、
-`hy4-night-discount-daytime-badge-202609`、`ds-discount-daytime-badge-202608`、
-`space-bunny-discount-202610`、`step-5-discount-daytime-badge-202610`，等级标记
-`tier-standard-2026q3`），标签是中文（「夜间折扣」「限时免费」「订阅优先」），
-而且带 `schedule.daily` 墙钟时段（如 `23:00 → 07:50`，跨零点）。
+这个身份不是插件自造的：**它就是上游自己发的头**。桌面端 `app.asar` 里的
+`buildVlmGatewayHeaders` 这样拼：
 
-也就是说：**活动数据国内区是有的，插件的解析器也吃得下**（同一套 schema）。拿不到
-的原因是上游那一层的下发策略——用插件手里这份凭据去要，`/v3/config` 的答案里就是
-没有这两个数组。实测矩阵（全部只读 GET，凭据取自插件自己的凭据库）：
+```js
+headers['User-Agent'] = [`WorkBuddy/${appVersion}`, `WorkBuddy/${appVersion}`,
+  ...(cliVersion ? [`CLI/${cliVersion}`] : [])].join(' ')
+```
 
-- 主机：`www.workbuddy.cn`、`copilot.tencent.com`、`wb.tencentbuddy.com`、
-  `staging.workbuddy.cn`、`www.codebuddy.cn`；
-- 路径：`/v3/config`、`/v2/enterprises/personal/models`、`/v3/product-config`、
-  `/v3/product/config`、`/v2/product-config`、`/product-config`、`/plugin/v3/config`
-  等 14 条；
-- 客户端通道：`CLI/2.63.2 CodeBuddy/2.63.2` 与 `WorkBuddy/5.8.3` 两种 UA；
-- 头部变体：`X-Product`、`X-Domain`、`X-Device-Id-List`（带本机 qimei36）、
-  `X-Custom-Channel-Id`、`__codebuddyProductConfigurationRequest`（头与查询参数两种放法）。
+桌面端自己的日志（`~/.workbuddy/logs/main.log`）实证了这一次请求：
 
-结果：国内区一律 0 条促销、0 条等级标记；同一份凭据去要国际区的
-`www.codebuddy.ai/v3/config` 则能拿到 5 条促销 + 1 条等级标记。
+```
+[CloudProductManager] fetch cloud product headers: {"user-agent":"WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0","x-product":"SaaS","x-request-id":"<uuid>"}
+[CloudProductManager] fetch cloud product from url:https://www.workbuddy.cn/v3/config success
+```
 
-因此插件在**全球区**能画徽标、在**国内区**画不出来，是上游的可见性策略决定的，
-不是渲染逻辑坏了。插件不去猜：宁可没有徽标，也不给国内用户编一个上游没下发的活动。
+即：**CLI 通道继承 IDE 的 UA**（CLI 产物里有 `CLIENT_INFO_USER_AGENT_EXTENSION` 与
+`X-Skip-User-Agent-Merge`），所以「CLI 通道带 WorkBuddy 段」是上游自己的客户端身份，
+不是伪造。插件以这个身份读产品配置，拿到的是**和桌面端同一份文档**。
+
+### 换身份带来的目录变化（以及为什么可以接受）
+
+国内区 App 身份的 `cli` 名单与 CLI 身份只差一项：**多 `auto`、少 `minimax-m2.7`**，
+其余 19 个模型**同名同价**（`hy4-preview` x0.29、`hy3` x0.00、`step-5-preview` x0.00、
+`space-bunny` x0.08、`deepseek-v4.1-flash` x0.11、`glm-5.2` x0.79、`glm-5.3` x0.69、
+`kimi-k2.8-preview` x0.77 …）。两个模型都**实测可对话**（POST
+`https://copilot.tencent.com/v2/chat/completions` 均 HTTP 200；上游把 `auto` 解析成
+`hy4-preview`），所以换身份不会让任何模型变得不可用；换来的是与桌面端**同一份名单**——
+桌面端的模型选择器里本来就是 `Auto / 快速 / 均衡 / 极致 / Deep / Hy4 / Hy3 / Step-5 …`。
+
+### 国内区的 8 条促销 + 1 条等级标记（真实样本，2026-10-21）
+
+| id | 标签 | 模型 | 时段/生命周期 |
+| --- | --- | --- | --- |
+| `glm-52-night-discount-202607` | 夜间折扣 | `glm-5.2` | 每日 23:00 → 次日 7:50 |
+| `glm-52-night-discount-daytime-badge-202607` | 夜间折扣 | `glm-5.2` | 每日 7:50 → 23:00（常驻徽标） |
+| `hy3-free-trial-202608` | 限时免费 | `hy3`（+`hy3-b`/`hy3-c`） | 07-06 → 11-01，`display: activeOnly` |
+| `hy4-night-discount-badge-202609` | 夜间免费 | `hy4-preview`（+ctrl/exp） | 每日 23:00 → 次日 8:00 |
+| `hy4-night-discount-daytime-badge-202609` | 夜间免费 | 同上 | 每日 0:00 → 8:00 与 23:00 → 23:59 |
+| `ds-discount-daytime-badge-202608` | 夜间折扣 | `deepseek-v4.1-flash`、`deepseek-v4-pro`（+ioa 变体） | 每日 0:00 → 23:59 |
+| `space-bunny-discount-202610` | 限时折扣 | `space-bunny` | 10-02 → 10-08（已过期，故今日不显示） |
+| `step-5-discount-daytime-badge-202610` | 独家限免 | `step-5-preview` | 10-12 → 10-26 |
+| `tier-standard-2026q3`（等级标记） | 订阅优先 | `glm-5.3`、`glm-5.3-flash`、`kimi-k2.8-preview` | 无时段 |
+
+20 个模型里有 **10 个**带徽标条目；与桌面端截图里逐个对得上（Hy4 preview「夜间免费」、
+Hy3「限时免费」、Step-5-Preview「独家限免」、Deepseek-V4.1-Flash「夜间折扣」、
+GLM-5.3「订阅优先」、Space-Bunny 今日无徽标——它的活动 10-08 就到期了）。
 
 ## 字段形状（真实样本，2026-10-21 取）
 
@@ -83,11 +108,12 @@
   "enabled": true,
   "priority": 200,
   "modelIds": ["hy3"],
-  "badge": { "label": "Free now", "color": "#FF0000", "display": "activeOnly" },
+  "badge": { "label": "限时免费", "color": "#009273", "display": "activeOnly",
+             "icon": "data:image/svg+xml;base64,…" },
   "discount": { "discountedCredits": "0x", "displayMode": "replace", "factor": 0 },
   "hover": {
-    "textZh": "Aug 6 – Oct 31: Free daily use with unlimited credits.",
-    "action": { "labelZh": "Use now", "type": "selectModel" }
+    "textZh": "7月6日–10月31日，每日赠送免费额度。",
+    "action": { "labelZh": "去使用", "type": "selectModel" }
   },
   "schedule": {
     "timezone": "Asia/Shanghai",
@@ -96,6 +122,9 @@
   }
 }
 ```
+
+国际区同一字段的标签是英文（`Free now` / `Pro Only`），国内区是中文；两边的 `badge`
+结构一致，**国内区另有 base64 `icon` 与可选的 `display: 'activeOnly'`**——解析器两者都吃。
 
 等级标记（`modelTiers`）少两个字段：没有 `schedule`（因此**恒定显示**），也没有 `discount`，
 但有 `hover.action.type = "upgrade"`：
@@ -119,7 +148,7 @@
 
 ### 必须丢弃的「污染项」
 
-全球区的 `modelPromotions` 数组里混着**不是活动**的条目：
+国际区的 `modelPromotions` 数组里混着**不是活动**的条目：
 
 ```jsonc
 { "id": "hy-image-3.5", "name": "HY-Image-3.5", "tags": ["…"] }
@@ -151,11 +180,15 @@
   没有正在运行的，再退回「常驻型」（`display !== 'activeOnly'`）里优先级最高的一条。
   同优先级时**促销优先于等级标记**（`source: 'promotion'` 排在 `source: 'tier'` 前面）。
 - **常驻徽标仍受绝对窗口约束**：`validUntil` 一到就消失，不做「过期了还挂着」的常驻。
+  这条与桌面端一致：`space-bunny-discount-202610` 已经在 10-08 到期，桌面端今日也**不**
+  给 Space-Bunny 画徽标。
 - **文案与颜色用上游的**：上游按区域自带语言（`label` / `labelEn`、`hover.textZh` /
   `hover.textEn`），插件不翻译、不改写；只在 `hover` 之外补上**有效期区间**与
   **每日时段**（含上游声明的时区），让「为什么现在有这枚徽标」一眼可查。
 - **颜色只接受 `#rgb` / `#rrggbb`**：上游给的就是这两种写法，其它一律当作没有颜色，
   避免把任意字符串塞进 CSS。
+- **产品配置用 App 身份读，聊天用 CLI 身份发**：这两件事的契约不同，混用会出事——
+  聊天那头绑着会话身份三元组，产品配置这头决定拿到哪一份文档。
 
 ## 未做与边界
 
@@ -163,27 +196,24 @@
   提示，点它不会替你选模型、也不会跳升级页。
 - 上游在**国内版**的产品配置里还会带 **base64 SVG icon**，没有内嵌（体积与安全）；
   徽标用 CSS 胶囊自绘。
-- **国内区今天拿不到活动源**，所以国内版模型行不会出现徽标。要支持有三条路：
-  (a) 国内区额外去读国际区的官方产品配置（`www.codebuddy.ai/v3/config`，同一份凭据
-  可读、同样带活动）——代价是国内用户每次刷新多一次跨境请求，且拿到的不是国内专属
-  活动（国内专属的「夜间折扣」那一组仍然拿不到）；
-  (b) 读本机 WorkBuddy 桌面端落地的产品配置快照——数据最准（就是国内那 8 条），
-  但那是**别的应用的私有存储**，插件不该依赖它；
-  (c) 等上游把活动数组下发给国内区的 `/v3/config`。
-  本 PR 选 (c) 之前的保守行为：**没有就是没有**。
+- **活动数组完全依赖上游的形状**：上游改了字段名，徽标就整体消失（不会画错，但也不会
+  画对）。这是刻意的取舍——插件不猜活动内容，只画上游明确写出来的那一条。
 
 ## 取证方式
 
 只读拉取、逐字段比对，脚本与样本落在本机临时目录（不入库）：
-`$env:TEMP\wb-dump-promos.mjs`（全球区促销/等级原始 JSON）、`$env:TEMP\wb-cn-probe.mjs`
-（国内区多主机多路径探测）、`$env:TEMP\wb-global-promos.json`（样本留存）。
-国内区那一轮追加了：`$env:TEMP\wb-cn-matrix.mjs`（4 主机 × 6 路径 × 2 客户端通道）、
-`$env:TEMP\wb-cn-headers.mjs`（头部变体）、`$env:TEMP\wb-official-endpoints.mjs`
-（产品配置里列出的全部官方主机）、`$env:TEMP\wb-cn-device.mjs`（设备归属头 +
-`__codebuddyProductConfigurationRequest`）、`$env:TEMP\wb-cn-paths2.mjs`（另外 8 条路径）。
-上游桌面端那一侧：`$env:TEMP\wb-asar-grep.mjs` / `wb-asar-dump.mjs`（直接读
-`app.asar` 里的 `main/dev-env-override.js` 等模块），以及本机
-`~/.workbuddy/storage/user-<uid>-personal/scoped/*/wb-product-config.json` 与
-`~/.workbuddy/cache/acc-product-config-v3.json` 两个落地的产品配置快照。
+`$env:TEMP\wb-cn-isolate.mjs`（国内区**只变 User-Agent** 的隔离矩阵 + 完整响应体）、
+`$env:TEMP\wb-cn-ua-roster.mjs`（8 种身份变体 × 键数/模型数/促销数/名单）、
+`$env:TEMP\wb-cn-compare-models.mjs`（两种身份下同名模型的价格与上下文字段）、
+`$env:TEMP\wb-cn-chat-auto.mjs`（换身份后 `auto` / `minimax-m2.7` 是否仍可对话）、
+`$env:TEMP\wb-global-isolate.mjs`（国际区的同一组隔离）、
+`$env:TEMP\wb-ua-parity.mjs`（两区「当前身份 vs App 身份」的名单差异）、
+`$env:TEMP\wb-e2e-badges.mjs`（直接 import `src/promo.ts` + `src/upstream.ts` 的端到端验证）。
+上游桌面端那一侧：`$env:TEMP\wb-asar-scan.mjs`（按字节偏移扫 `app.asar`，
+找到 `buildVlmGatewayHeaders` 与 `CloudProductProvider`）、以及本机
+`~/.workbuddy/logs/main.log` 里的真实请求头。本机落地快照
+`~/.workbuddy/cache/acc-product-config-v3.json` 与
+`~/.workbuddy/storage/user-<uid>-personal/scoped/*/wb-product-config.json`
+用于**核对**上游确实在发这些数组（它们是桌面端合并后的落地副本）。
 凭据取自插件自己的凭据库 `$DSH_HOME/workbuddy-vault/<region>/<accountId>.json`，
 **只发 GET**，不触发任何计费动作。

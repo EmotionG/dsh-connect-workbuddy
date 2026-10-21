@@ -25,7 +25,8 @@
  * picked up within a minute without a second timer.
  *
  * THE SHAPES THIS PARSER ACCEPTS (all observed on the global feed's
- * `/v3/config`, 2026-10-21):
+ * `/v3/config`, 2026-10-21 — the CN feed publishes the same two arrays, with
+ * Chinese labels and the extra fields listed at the end of this header):
  *
  *   {
  *     id: 'hy3-free-trial-202608',
@@ -56,13 +57,20 @@
  *     tier: 'standard',
  *   }
  *
- * The CN product configuration carries richer shapes (a `schedule.daily` list,
- * a base64 `badge.icon`, `badge.shortLabel`), but that document is the
- * desktop/CLI client's own cache — it is NOT reachable through any API this
- * plugin may call (the CN `/v3/config`, the CN fallback catalog and the CN
- * chat endpoints carry no promotion feed at all, verified 2026-10-21). The
- * parser therefore accepts those fields too, so the day the CN feed appears
- * the badge works without another change — but nothing today depends on it.
+ * THE CN FEED IS THE SAME FEED, READ AS THE APP READS IT. The CN gateway
+ * publishes `modelPromotions` (8 entries, measured 2026-10-21) and
+ * `modelTiers` (1 entry) in the SAME `/v3/config` document — with Chinese
+ * labels (`夜间折扣` / `限时免费` / `夜间免费` / `独家限免` / `限时折扣` /
+ * `订阅优先`), a `schedule.daily` night window, a base64 `badge.icon` and an
+ * optional `badge.display: 'activeOnly'`. Those richer shapes are exactly what
+ * this parser accepts below.
+ *
+ * They are visible only to the APP's product identity: the CLI channel's
+ * answer to the same URL publishes neither array, because it is a strict
+ * subset of the app channel's document. The plugin therefore reads the
+ * product configuration as the app does (`PRODUCT_UA` in `src/upstream.ts`) —
+ * which is why a CN account sees the same badges here as in the WorkBuddy
+ * app, without a second upstream request.
  *
  * @module dsh-connect-workbuddy/promo
  */
