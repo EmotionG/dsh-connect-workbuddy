@@ -30,6 +30,8 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { offRefused } from './off-thinking.ts'
+import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
+import type { WorkBuddyPromo } from './promo.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -122,6 +124,20 @@ export interface WorkBuddyUpstreamModel {
   descriptionZh?: string
   descriptionEn?: string
   supportsToolCall?: boolean
+  /**
+   * The upstream's own promotion / tier badges that name THIS model.
+   *
+   * Not a field of the model entry: the upstream publishes the badges in
+   * sibling arrays keyed by `modelIds` (`data.modelPromotions` /
+   * `data.modelTiers`), inside the SAME `/v3/config` document that carries
+   * the roster — so reading them costs no extra request.
+   *
+   * They ride along UNRESOLVED, and that is deliberate: a badge is a function
+   * of the clock (the upstream's windows are wall-clock hours in a named
+   * zone), so the entry that holds NOW is decided where the badge is drawn,
+   * not where the document was read. See `src/promo.ts`.
+   */
+  promos?: readonly WorkBuddyPromo[]
 }
 
 /** One billing package as the upstream returns it, dates already parsed. */
@@ -1397,6 +1413,29 @@ export function selectCliModels(rawModels: unknown, agents: unknown): WorkBuddyU
 }
 
 /**
+ * The roster plus the promotion badges the SAME document carries.
+ *
+ * `data.modelPromotions` and `data.modelTiers` sit beside `data.models` in
+ * the upstream's `/v3/config` document, so the badges cost no extra request:
+ * they are read out of the response the roster was read from. Which models
+ * they name is resolved here; WHICH badge holds at a given moment is not
+ * (see `src/promo.ts` — a badge is a function of the clock).
+ *
+ * The CN feed publishes neither array today (verified 2026-10-21 against
+ * `www.codebuddy.cn/v3/config`, `copilot.tencent.com/v3/config` and the
+ * personal-models fallback), so on that side this is a no-op — but the code
+ * path is the same one, so the day the feed appears the CN region gets the
+ * badges without a second change.
+ */
+function withPromos(
+  models: readonly WorkBuddyUpstreamModel[],
+  data: Record<string, unknown>,
+): readonly WorkBuddyUpstreamModel[] {
+  const promos = parseWorkBuddyPromos(data['modelPromotions'], data['modelTiers'])
+  return promos.length === 0 ? models : attachPromos(models, promos)
+}
+
+/**
  * Upstream HTTP client. One instance serves the whole plugin; requests take
  * the credential explicitly so token refreshes apply on the next call.
  */
@@ -1573,7 +1612,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return selectCliModels(data['models'], data['agents'])
+      return withPromos(selectCliModels(data['models'], data['agents']), data)
     }
     const readCatalog = async (path: string): Promise<readonly WorkBuddyUpstreamModel[]> => {
       const response = await fetch(`${chatBase(credential)}${path}`, {
@@ -1591,7 +1630,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return selectCliModels(data['models'], data['agents'])
+      return withPromos(selectCliModels(data['models'], data['agents']), data)
     }
     try {
       return await readCatalog(GLOBAL_CONFIG_PATH)

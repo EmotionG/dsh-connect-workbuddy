@@ -61,6 +61,8 @@ import { AccountTransfer } from './AccountTransfer.tsx'
 // and one set of tests.
 import { createLatestWins } from '../account-pool.ts'
 import { imageDefaultFor, nativeModalityOf } from '../native-modality.ts'
+import { selectPromoBadge } from '../promo.ts'
+import { promoBadgeColor, promoBadgeLabel, promoBadgeTooltip, uiLanguage } from './promo-badge.ts'
 import { inlineProbeReason } from './probe-reason.ts'
 import { remainingText } from './remaining.ts'
 import { WORKBUDDY_PLUGIN_ICON } from './icon.ts'
@@ -113,6 +115,46 @@ function imageCheckboxHint(model: { id: string }, t: Translate): string {
     case 'text': return t('row.modelImageText')
     default: return t('row.modelImageUnverified')
   }
+}
+
+/**
+ * The upstream's own promotion badge for one model, or nothing.
+ *
+ * Drawn from the model's UNRESOLVED promo list at RENDER time, because a badge
+ * is a function of the clock: the upstream's promotions run on wall-clock
+ * hours in a named zone, so a badge chosen when the document was read would
+ * keep claiming the night after the night is over. The card re-renders at
+ * least once a minute while it is open (it polls the usage route), so a
+ * window edge is picked up within a minute without a second timer.
+ *
+ * The chip says what the UPSTREAM says — its label, its colour, its hover
+ * copy — and adds nothing of its own: a badge the user cannot trace back to
+ * the upstream's feed is worse than no badge.
+ *
+ * One badge per model: the upstream's `priority` orders the entries that name
+ * a model, and a model row is one line wide — two badges would push the
+ * model name out of the row.
+ */
+function promoChip(model: WorkBuddyWebModel): ReactElement | null {
+  const promo = selectPromoBadge(model.promos, Date.now())
+  if (promo === undefined) return null
+  const language = uiLanguage()
+  const color = promoBadgeColor(promo)
+  const tooltip = promoBadgeTooltip(promo, language)
+  // A custom property cannot be written as an object literal in React's
+  // `CSSProperties` type, so the style is built as a plain record first.
+  const style: Record<string, string> | undefined = color === undefined
+    ? undefined
+    : { '--dsm-workbuddy-promo-color': color }
+  return (
+    <span
+      className="dsm-workbuddy-model-promo"
+      title={tooltip === '' ? undefined : tooltip}
+      style={style}
+    >
+      {promoBadgeLabel(promo, language)}
+    </span>
+  )
 }
 
 /** One region's unsaved model edits; switching tabs never drops these. */
@@ -1699,6 +1741,12 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                     {model.creditMultiplier === undefined ? null
                                       : <span className="dsm-workbuddy-model-name-rate">({model.creditMultiplier.toFixed(2)}x)</span>}
                                   </span>
+                                  {/* The upstream's own promotion badge, when one
+                                      holds for this model right now. It sits NEXT
+                                      to the name rather than inside it: the name
+                                      truncates with an ellipsis, and a badge
+                                      inside it would be cut off with the text. */}
+                                  {promoChip(model)}
                                 </span>
                               </label>
                               <label
