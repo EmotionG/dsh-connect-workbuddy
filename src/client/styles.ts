@@ -91,6 +91,37 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-tab-switch{display:inline-flex;align-items:center;flex:none;margin-left:auto;padding-left:10px;border-left:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24));cursor:pointer}
 .dsm-workbuddy-tab-switch input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
 .dsm-workbuddy-tab-switch input:disabled{cursor:default}
+/* SECTION TABS: the card's own top-level split (accounts / models / diagnostics).
+ *
+ * Deliberately NOT the boxed cells above. Those are the REGION scope — a
+ * two-way either/or, each side carrying its own on/off switch — while these are
+ * panels of ONE document, the shape a reader already knows from the app's own
+ * settings window. Two rows of boxes would read as one four-way choice.
+ *
+ * The hidden attribute on each panel is what does the work: an inactive panel
+ * stays MOUNTED, so switching back does not refetch, a half-filled catalog draft
+ * survives the trip, and the account pool keeps its log. It also takes the
+ * inactive panel out of the accessibility tree, which is exactly what
+ * role="tabpanel" wants — unlike display:none reached by a CSS class, it
+ * cannot be overridden by a later rule. */
+.dsm-workbuddy-panels{display:flex;align-items:stretch;gap:2px;margin:16px 0 0;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24))}
+.dsm-workbuddy-panel-tab{appearance:none;font:inherit;cursor:pointer;border:0;background:transparent;padding:7px 11px;margin-bottom:-1px;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary,#999);font-size:13px;font-weight:600;line-height:20px;white-space:nowrap;transition:color .15s,border-color .15s}
+.dsm-workbuddy-panel-tab:hover:not(.dsm-workbuddy-panel-tab-active){color:var(--dsw-alias-label-primary,#e6e6e6)}
+.dsm-workbuddy-panel-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-panel-tab-active{color:var(--dsw-alias-label-primary,#e6e6e6);border-bottom-color:var(--dsw-alias-brand-primary,#5686fe)}
+.dsm-workbuddy-panel{margin-top:12px}
+/* DIAGNOSTICS: a two-column fact table rather than prose. Each row is one thing
+ * the card actually READ, so a bug report can quote a line instead of
+ * paraphrasing the UI. No control lives here on purpose — a diagnostics panel
+ * that can change settings is a settings panel with a worse name. */
+.dsm-workbuddy-diag{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-2,#232529)}
+.dsm-workbuddy-diag-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:8px 12px}
+.dsm-workbuddy-diag-row+.dsm-workbuddy-diag-row{border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24))}
+.dsm-workbuddy-diag-label{flex:none;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
+.dsm-workbuddy-diag-value{min-width:0;color:var(--dsw-alias-label-primary,#e6e6e6);font-size:12px;line-height:18px;text-align:right;overflow-wrap:anywhere}
+.dsm-workbuddy-diag-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.dsm-workbuddy-diag-bad{color:var(--dsw-alias-label-caution,#e8b34b)}
+.dsm-workbuddy-diag-hint{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
 /* PREFERENCE LINES: a checkbox on a line that commits on the click, packed from
    the LEFT — the shape the reference card uses for this exact block.
  *
@@ -221,7 +252,14 @@ export const WORKBUDDY_CARD_CSS = `
    an error banner, because the fact it states is normal product behaviour
    rather than a failure. Weight is the only signal it needs. */
 .dsm-workbuddy-free-quota-warn{font-weight:600}
-.dsm-workbuddy-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden}
+/* The rows scroll INSIDE the box once the list outgrows it: the section owns a
+   fixed share of the card instead of setting its height from the roster's
+   length. Without this the list was the card's height all by itself — 20-odd
+   models, each carrying a budget field, a reasoning picker and an image toggle.
+   The rounded corners survive because the scroll container is the bordered box
+   itself, so the first and last row are clipped by the same radius the border
+   already draws. */
+.dsm-workbuddy-model-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#36373b);border-radius:10px;overflow:hidden;max-height:520px;overflow-y:auto}
 .dsm-workbuddy-model{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:10px 12px;background:var(--dsw-alias-bg-layer-2,#232529);transition:opacity .16s}
 .dsm-workbuddy-model-disabled{opacity:.55}
 .dsm-workbuddy-model+.dsm-workbuddy-model{border-top:1px solid var(--dsw-alias-border-l2,#36373b)}

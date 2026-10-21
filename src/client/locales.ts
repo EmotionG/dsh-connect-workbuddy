@@ -79,6 +79,29 @@ export const en = {
   'row.accountsWriteFailed': 'The account change was not saved: {message} — the active profile\'s configuration file could not be updated (on Windows it may be locked by an antivirus scanner or a sync client). Your previous choice is still in effect; close whatever holds that file and try again (see docs/WINDOWS.md in the plugin repo for the exact path).',
   'row.selectionLostHint': 'The saved account no longer exists locally.',
   'row.selectionLostMessage': 'The account saved for this region is no longer among the local sign-ins (WorkBuddy replaced its login or cleaned up backups). Your other sign-ins are fine — pick a current one from the list above. Signing in again in the desktop app will not fix this.',
+  // The card's three sections. The card is 3,500 px tall in one column, and the
+  // two jobs on it are unrelated: operating an account (who serves, how much is
+  // left, which order) and editing the catalog (which models, what context
+  // budget, which reasoning tiers). Their COMMIT semantics even differ — an
+  // account change lands on the click, a catalog change is a draft until saved —
+  // so a single column puts the save button three screens from the thing it
+  // saves.
+  'row.panelAccounts': 'Accounts',
+  'row.panelModels': 'Models',
+  'row.panelDiag': 'Diagnostics',
+  'row.panelAria': 'Card sections',
+  'row.diagHint': 'What this card actually read, so a report can quote it. Nothing here changes a setting.',
+  'row.diagRegion': 'Region',
+  'row.diagDomain': 'Upstream domain',
+  'row.diagAccount': 'Serving account',
+  'row.diagToken': 'Sign-in expires',
+  'row.diagCatalog': 'Models in the catalog',
+  'row.diagEnabled': 'Enabled models',
+  'row.diagPool': 'Account pool',
+  'row.diagPoolOn': 'on · {count} accounts',
+  'row.diagPoolOff': 'off',
+  'row.diagFailures': 'Last failure',
+  'row.diagNoFailures': 'Nothing reported.',
   'row.modelsTitle': 'Models',
   'row.modelsSummary': '{count} enabled',
   // Shown in the section header while the list is COLLAPSED. The save/discard
@@ -495,6 +518,22 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.accountsWriteFailed': '账号改动未保存：{message} —— 当前 profile 的配置文件写入失败（Windows 上可能被杀毒软件或同步盘占用）。当前仍是原来保存的选择，请先关闭占用该文件的程序再重试（文件的确切路径见插件仓库的 docs/WINDOWS.md）。',
   'row.selectionLostHint': '已保存的账号在本机已不存在。',
   'row.selectionLostMessage': '该区域保存的账号已不在本机登录列表中（WorkBuddy 更换了登录或清理了备份文件）。本机其他登录仍然可用——请在上方列表中重新选择一个当前账号。重新登录桌面端 App 无法修复此问题。',
+  'row.panelAccounts': '账号',
+  'row.panelModels': '模型',
+  'row.panelDiag': '诊断',
+  'row.panelAria': '卡片分区',
+  'row.diagHint': '这张卡片实际读到了什么，方便贴进问题反馈。这里没有任何会改动设置的控件。',
+  'row.diagRegion': '区域',
+  'row.diagDomain': '上游域名',
+  'row.diagAccount': '当前服务账号',
+  'row.diagToken': '登录有效期至',
+  'row.diagCatalog': '目录中的模型',
+  'row.diagEnabled': '已启用的模型',
+  'row.diagPool': '账号池',
+  'row.diagPoolOn': '开启 · {count} 个账号',
+  'row.diagPoolOff': '关闭',
+  'row.diagFailures': '最近一次失败',
+  'row.diagNoFailures': '没有报错。',
   'row.modelsTitle': '模型',
   'row.modelsSummary': '已启用 {count} 个',
   // 折叠态显示在标题行。保存/放弃按钮在折叠区里面，没有这个提示，用户会把

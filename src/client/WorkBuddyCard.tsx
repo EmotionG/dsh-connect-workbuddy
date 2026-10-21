@@ -396,6 +396,21 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * appear before anything billing-side has answered.
    */
   const [statusByRegion, setStatusByRegion] = useState<Partial<Record<WorkBuddyWebRegion, WorkBuddyWebUsage>>>({})
+  /**
+   * Which of the card's three sections is on screen.
+   *
+   * The section tabs exist because the card grew into one 3,500 px column that
+   * carried two unrelated jobs: operating an account (who serves, how much is
+   * left, which order) and editing the catalog (which models, what context
+   * budget, which reasoning tiers). They even commit differently — an account
+   * change lands on the click, a catalog change is a draft until saved — so a
+   * single column put the save button three screens away from what it saves.
+   *
+   * Only the ACTIVE section is visible; the others stay MOUNTED (the `hidden`
+   * attribute), so switching back never refetches, a half-filled draft
+   * survives, and the pool keeps its log.
+   */
+  const [panel, setPanel] = useState<'accounts' | 'models' | 'diag'>('accounts')
   const [busy, setBusy] = useState(false)
   const [settingsRevision, setSettingsRevision] = useState(0)
   /** Per-region unsaved model edits; a draft on one tab is never dropped by
@@ -646,6 +661,14 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const loading = loaded === undefined
   const status: WorkBuddyWebUsage = loaded
     ?? { status: 'signed-out', accounts: [], selectionExplicit: false }
+  /**
+   * Whether the ACTIVE region has a usable sign-in.
+   *
+   * The section tabs render only here: a signed-out card is one screen of
+   * instructions, and splitting that into panels would hide the only thing it
+   * has to say behind a tab.
+   */
+  const signedIn = status.status === 'signed-in'
 
   /**
    * Whether the ACTIVE region knows of any account at all.
@@ -1503,6 +1526,60 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                   )
                 })}
               </div>
+              {/* THE CARD'S THREE SECTIONS. Above them, the region pair is the
+                  SCOPE (which provider's data this whole panel is about) and
+                  scrolls with the content like any other header row. */}
+              {signedIn
+                ? <div className="dsm-workbuddy-panels" role="tablist" aria-label={t('row.panelAria')}>
+                    <button
+                      type="button"
+                      role="tab"
+                      id="dsm-workbuddy-tab-accounts"
+                      aria-controls="dsm-workbuddy-panel-accounts"
+                      aria-selected={panel === 'accounts'}
+                      className={`dsm-workbuddy-panel-tab${panel === 'accounts' ? ' dsm-workbuddy-panel-tab-active' : ''}`}
+                      onClick={() => { setPanel('accounts') }}
+                    >
+                      {t('row.panelAccounts')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      id="dsm-workbuddy-tab-models"
+                      aria-controls="dsm-workbuddy-panel-models"
+                      aria-selected={panel === 'models'}
+                      className={`dsm-workbuddy-panel-tab${panel === 'models' ? ' dsm-workbuddy-panel-tab-active' : ''}`}
+                      onClick={() => { setPanel('models') }}
+                    >
+                      {t('row.panelModels')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      id="dsm-workbuddy-tab-diag"
+                      aria-controls="dsm-workbuddy-panel-diag"
+                      aria-selected={panel === 'diag'}
+                      className={`dsm-workbuddy-panel-tab${panel === 'diag' ? ' dsm-workbuddy-panel-tab-active' : ''}`}
+                      onClick={() => { setPanel('diag') }}
+                    >
+                      {t('row.panelDiag')}
+                    </button>
+                  </div>
+                : null}
+
+              {/* ACCOUNTS — the default section: the account pool, the two
+                  credit switches, and every notice about the credential, all at
+                  the top instead of three screens down a single column. */}
+              <div
+                className="dsm-workbuddy-panel"
+                role="tabpanel"
+                id="dsm-workbuddy-panel-accounts"
+                aria-labelledby="dsm-workbuddy-tab-accounts"
+                /* `signedIn &&` — a signed-out card has no section tabs, so its
+                   one screen of instructions must not be hidden by a panel
+                   state the user cannot see or change. */
+                hidden={signedIn && panel !== 'accounts'}
+              >
               <p className="dsm-workbuddy-models-summary">{t('row.tabHint')}</p>
               {/* Its OWN paragraph rather than a clause appended to the hint
                   above: this one is BOLD and is the only sentence here that
@@ -1655,7 +1732,18 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       // (see the `onRefresh` prop note in AccountPool).
                       onRefresh={() => refreshUsage(activeRegion)}
                     />
+                  </>
+                : null}
+              </div>
 
+              {signedIn
+                ? <div
+                  className="dsm-workbuddy-panel"
+                  role="tabpanel"
+                  id="dsm-workbuddy-panel-models"
+                  aria-labelledby="dsm-workbuddy-tab-models"
+                  hidden={panel !== 'models'}
+                >
                     <section className="dsm-workbuddy-models" aria-label={t('row.modelsTitle')}>
                       {/* The model list no longer folds. It used to be a native
                           <details>: a header that toggled on click, with a
@@ -1911,8 +1999,85 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       </div>
                       </div>
                     </section>
-                  </>
+              </div>
                 : null}
+              {/* DIAGNOSTICS — the third section, and the one that earns its tab
+                  by holding nothing the other two already say: the facts a bug
+                  report needs (which region, which host, which account, which
+                  credential expiry, how big the catalog actually is) plus the
+                  upstream's own error text rather than a summary of it. No
+                  control lives here, on purpose. */}
+              <div
+                className="dsm-workbuddy-panel"
+                role="tabpanel"
+                id="dsm-workbuddy-panel-diag"
+                aria-labelledby="dsm-workbuddy-tab-diag"
+                hidden={!signedIn || panel !== 'diag'}
+              >
+                {status.status !== 'signed-in'
+                  ? null
+                  : <>
+                      <div className="dsm-workbuddy-diag">
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagRegion')}</span>
+                          <span className="dsm-workbuddy-diag-value">
+                            {status.region === 'cn' ? t('row.tabCn') : t('row.tabGlobal')}
+                          </span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagDomain')}</span>
+                          <span className="dsm-workbuddy-diag-value dsm-workbuddy-diag-mono">
+                            {status.domain === undefined || status.domain === ''
+                              ? t('row.modelUnknown')
+                              : status.domain}
+                          </span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagAccount')}</span>
+                          <span className="dsm-workbuddy-diag-value">{nameOf(status.accountName)}</span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagToken')}</span>
+                          <span className="dsm-workbuddy-diag-value dsm-workbuddy-diag-mono">
+                            {formatDate(status.tokenExpiresAtMs)}
+                          </span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagCatalog')}</span>
+                          <span className="dsm-workbuddy-diag-value">{formatNumber(status.models.length)}</span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagEnabled')}</span>
+                          <span className="dsm-workbuddy-diag-value">{formatNumber(status.enabledModelIds.length)}</span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagPool')}</span>
+                          <span className="dsm-workbuddy-diag-value">
+                            {status.pool?.enabled === true
+                              ? t('row.diagPoolOn', { count: status.pool.accounts.length })
+                              : t('row.diagPoolOff')}
+                          </span>
+                        </div>
+                        <div className="dsm-workbuddy-diag-row">
+                          <span className="dsm-workbuddy-diag-label">{t('row.diagFailures')}</span>
+                          {(() => {
+                            const failures: string[] = []
+                            if (status.credentialRejected === true) failures.push(t('row.credentialRejectedTitle'))
+                            if (status.refreshError !== undefined) failures.push(status.refreshError)
+                            if (status.creditsError !== undefined) failures.push(status.creditsError)
+                            // The upstream's OWN text, joined — not a rewritten
+                            // sentence. This panel exists to be quoted.
+                            return failures.length === 0
+                              ? <span className="dsm-workbuddy-diag-value">{t('row.diagNoFailures')}</span>
+                              : <span className="dsm-workbuddy-diag-value dsm-workbuddy-diag-bad dsm-workbuddy-diag-mono">
+                                  {failures.join(' · ')}
+                                </span>
+                          })()}
+                        </div>
+                      </div>
+                      <p className="dsm-workbuddy-diag-hint">{t('row.diagHint')}</p>
+                    </>}
+              </div>
               {status.status === 'signed-out' && loading
                 // NOT the signed-out branch: nothing has answered yet. Showing
                 // "not signed in" here was issue #77 — a signed-in user with a
