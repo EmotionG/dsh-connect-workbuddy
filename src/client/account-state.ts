@@ -59,6 +59,10 @@ export function outcomeText(t: Translate, outcome: WorkBuddyWebProbeOutcome): st
     case 'model-busy': return t('row.poolExcludedModelBusy')
     case 'out-of-credit': return t('row.poolExcludedOutOfCredit')
     case 'credential-rejected': return t('row.probeCredentialRejected')
+    // NOT `default` (which reads "✗ 测试失败"): this row is shown next to an
+    // ACCOUNT name, and a bare "test failed" invites the account fix that cannot
+    // work. The label names the prompt as the thing the gateway refused.
+    case 'channel-rejected': return t('row.probeChannelRejected')
     case 'not-found': return t('row.probeNotFound')
     case 'unavailable': return t('row.probeUnavailable')
     default: return t('row.probeFailed')
@@ -310,6 +314,7 @@ const PROBE_OUTCOMES: readonly WorkBuddyWebProbeOutcome[] = [
   'out-of-credit',
   'credential-rejected',
   'policy-rejected',
+  'channel-rejected',
   'unavailable',
   'not-found',
   'failed',

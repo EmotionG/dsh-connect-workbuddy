@@ -874,6 +874,16 @@ export type WorkBuddyWebProbeOutcome =
   | 'out-of-credit'
   | 'credential-rejected'
   | 'policy-rejected'
+  /**
+   * The gateway's channel gate refused the request itself (upstream code 11128).
+   *
+   * Kept apart from `failed` because its whole point is the question it answers:
+   * the probe passes and the chat fails on the SAME model and the SAME account,
+   * because the gate matches the OPENING of a `system` message and the probe's
+   * is a neutral one-liner. A generic failure would leave the user swapping
+   * accounts that cannot change a byte of their prompt (issues #87–#90).
+   */
+  | 'channel-rejected'
   | 'unavailable'
   | 'not-found'
   | 'failed'

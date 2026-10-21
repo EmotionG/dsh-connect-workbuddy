@@ -328,6 +328,13 @@ export function exclusionOf(
       // The measurement is still recorded, so the card can explain what
       // happened; it just must not remove the account from the pool.
       return undefined
+    case 'channel-rejected':
+      // Same treatment as `policy-rejected`, for the same structure of fact: the
+      // gateway refused the PROMPT, and every account sends that same prompt, so
+      // none of them is a better candidate. Benching this one would remove an
+      // account that has nothing wrong with it — and hide the real remedy
+      // (change the prompt, not the account).
+      return undefined
     default:
       // An outcome this build does not know is treated as unusable rather than
       // as a candidate: billing through a state we cannot interpret is worse

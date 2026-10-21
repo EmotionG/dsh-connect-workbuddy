@@ -32,6 +32,7 @@ import {
   declaredTools,
   prepareChatBody,
   modelIdOfBody,
+  systemOpeningsOfBody,
   WorkBuddyUpstreamClient,
   type UpstreamErrorKind,
   type WorkBuddyChatResult,
@@ -276,6 +277,10 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   model_busy: 429,
   session_dead: 401,
   policy_reject: 403,
+  // A 400, because that is what the gateway answered and the request really is
+  // malformed from its point of view. See KIND_HOST_CODE for why the host must
+  // not read this as a retryable transport failure.
+  channel_reject: 400,
   not_found: 502,
   server: 502,
   client: 400,
@@ -345,6 +350,13 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
  * reset is hours away, so the retry budget cannot produce an answer and must
  * not be spent. One word, two opposite temporal claims — so the spelling
  * follows the clock, not the status code both share.
+ *
+ * `channel_reject` is not listed, and the reason is the same rule applied to a
+ * third clock: the gate's verdict is DETERMINISTIC for a given prompt, so an
+ * in-place retry would spend the budget re-sending bytes it already refused, and
+ * cross-provider failover cannot help either (every account sends that same
+ * prompt). Its 400 already places it outside the host's retry set, so `type`
+ * alone, untranslated, is the honest spelling.
  */
 const KIND_HOST_CODE: Partial<Readonly<Record<UpstreamErrorKind, string>>> = {
   soft_rate: 'quota_exceeded',
@@ -1011,6 +1023,12 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
       return '登录已失效'
     case 'policy_reject':
       return '被服务端策略拒绝'
+    // The gateway's channel gate: it refuses the PROMPT, not the account or the
+    // model. Its own `displayTips` blames "channel verification / an unofficial
+    // client", which is what sent issues #87–#90's reporters through account
+    // swaps; none of them could help, and saying so is the point of this line.
+    case 'channel_reject':
+      return '被网关的渠道校验拦截（不是账号、额度或网络问题）'
     case 'not_found':
       return '模型不可用'
     case 'server':
@@ -1410,7 +1428,13 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
    * which another account may well survive.
    */
   function isFailoverWorthy(kind: UpstreamErrorKind): boolean {
-    return kind !== 'client' && kind !== 'model_busy'
+    // `channel_reject` joins the two non-failover kinds. The gate matches the
+    // OPENING of a system message, and every account sends that same opening, so
+    // the next account answers the same 11128 one round trip later — while each
+    // attempt burns real quota and records a false statistic against a credential
+    // that was never at fault (issues #87–#90 were reported as account problems
+    // for exactly this reason).
+    return kind !== 'client' && kind !== 'model_busy' && kind !== 'channel_reject'
   }
 
   async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1678,6 +1702,43 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           `${lead}（${meta.join('，')}）${note}。这不是账号被限流，也与积分、额度无关——` +
           '同一凭据下换一个模型即可正常使用；插件不会为此切换账号，因为该限制跟随模型本身。' +
           '这类失败会被自动重试几次；若仍然失败，请等待约 1 分钟后重试，或切换到负载较低的模型'
+        writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
+        return
+      }
+      if (result.kind === 'channel_reject') {
+        // The one failure where the evidence lives in the REQUEST we just sent,
+        // not in the upstream's reply. `displayTips` blames "channel verification
+        // / a non-official client", which is what sent issues #87–#90's
+        // reporters to try other accounts, other regions and even the official
+        // client — none of which can change the opening of a system message.
+        // Echoing that opening is the difference between "the upstream refused"
+        // and "the upstream refused BECAUSE OF THIS LINE", and it is the only
+        // form of the message a reader can act on.
+        //
+        // `prepared` is in scope and is exactly what went on the wire (after
+        // `prepareChatBody`'s neutralising prepend), so the excerpt is the real
+        // bytes rather than the host's idea of them.
+        const detail = result.detail
+        const meta: string[] = []
+        if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
+        if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
+        const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
+        const openings = systemOpeningsOfBody(prepared)
+        // If nothing could be read (`[]`), say what is known and stop: inventing
+        // an excerpt would be worse than omitting it, and the remedy sentence
+        // below remains true either way.
+        const evidence = openings.length === 0
+          ? ''
+          : `命中的 system 提示开头：${openings.map(opening => `「${opening}」`).join('、')}。`
+        // Same `workbuddy 上游失败：…（http N）` frame as every other failure, on
+        // purpose: reporters paste this sentence into issues verbatim, so the
+        // shape they search for must not change just because the diagnosis did.
+        const message =
+          `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${stamp}。${evidence}` +
+          '该请求被 WorkBuddy 网关的渠道校验拦截，上游把它描述成「不是官方客户端发出的」，但那是误导性文案：' +
+          '网关匹配的是 system 提示的开头，与账号、积分、额度、网络都无关，换账号或换区域也不会改变结果。' +
+          '若这段开头来自宿主或其他插件，请修改该提示；插件已对已知的第三方 agent 指纹做归一化，' +
+          '新的指纹可反馈到 issue 里'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }

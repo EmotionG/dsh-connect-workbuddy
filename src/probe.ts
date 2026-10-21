@@ -176,6 +176,14 @@ export function probeRequestBody(modelId: string, inputTokens: number = DEFAULT_
  * loaded, everywhere, for everyone; a 6004 says THIS ACCOUNT exceeded a volume
  * limit. Reporting both as `rate-limited` made the pool bench every account for
  * the cooldown of one, which is the outage issue #56 describes.
+ *
+ * `channel-rejected` is a third split, and it is the one that answers the
+ * question the probe itself raises: the probe's own system prompt is a neutral
+ * one-liner, so it can return `ok` on a model whose real chat requests are all
+ * refused with `11128`. Filing that as `failed` (the generic bucket) made the
+ * pair "test passes, chat fails, every account" look like a flaky upstream
+ * instead of what it is — the gateway objecting to the PROMPT, not the account
+ * (issues #87–#90).
  */
 export type WorkBuddyProbeOutcome =
   | 'ok'
@@ -184,6 +192,7 @@ export type WorkBuddyProbeOutcome =
   | 'out-of-credit'
   | 'credential-rejected'
   | 'policy-rejected'
+  | 'channel-rejected'
   | 'unavailable'
   | 'not-found'
   | 'failed'
@@ -399,9 +408,10 @@ export function cooldownOf(input: {
  * answer means. The extra splits here are `credential-rejected`, which the
  * upstream signals with a non-JSON 401/403 edge page and which needs completely
  * different advice (re-auth, not "wait"), `policy-rejected`, a JSON 403
- * content-policy refusal where re-auth advice would be actively misleading, and
+ * content-policy refusal where re-auth advice would be actively misleading,
  * `model-busy`, the model-scoped 14003 throttle that must NOT be benched as an
- * account failure (issue #56).
+ * account failure (issue #56), and `channel-rejected`, the gateway's 11128 gate
+ * on the PROMPT's opening, which no account can change.
  */
 export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOutcome {
   if (status === 401 || status === 403) {
@@ -413,6 +423,7 @@ export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOu
     case 'model_busy': return 'model-busy'
     case 'hard_credit': return 'out-of-credit'
     case 'session_dead': return 'credential-rejected'
+    case 'channel_reject': return 'channel-rejected'
     case 'not_found': return 'not-found'
     default: return status === 0 || status >= 500 ? 'unavailable' : 'failed'
   }

@@ -319,6 +319,10 @@ function probeResultView(
       }
     case 'credential-rejected': return { text: t('row.probeCredentialRejected'), tone: 'bad' }
     case 'policy-rejected': return { text: t('row.probePolicyRejected'), tone: 'bad' }
+    // `warn`, not `bad`: nothing about the account is wrong, and the row's own
+    // job is to keep the user from reading this as "this account is broken".
+    // The label says the remedy lives in the prompt.
+    case 'channel-rejected': return { text: t('row.probeChannelRejected'), tone: 'warn' }
     case 'not-found': return { text: t('row.probeNotFound'), tone: 'bad' }
     case 'unavailable': return { text: t('row.probeUnavailable'), tone: 'bad' }
     default:

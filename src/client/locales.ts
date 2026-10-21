@@ -134,6 +134,7 @@ export const en = {
   'row.probeOutOfCreditAt': '✗ Not enough credits · quota refreshes {at}',
   'row.probeCredentialRejected': '✗ WorkBuddy refused this account\'s token — sign in again or pick another account',
   'row.probePolicyRejected': '✗ WorkBuddy\'s server refused this request under its content policy — re-signing in won\'t help; try the desktop app or another region/account',
+  'row.probeChannelRejected': '✗ The gateway refused the PROMPT itself, not this account — the opening of a system message matched its third-party-agent filter, so another account or region answers the same way',
   'row.probeNotFound': '✗ The upstream does not know this model',
   'row.probeUnavailable': '✗ The upstream could not be reached — no usable answer came back',
   'row.probeFailed': '✗ Test failed',
@@ -545,6 +546,13 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.probeOutOfCreditAt': '✗ 积分不足 · 积分包 {at} 刷新',
   'row.probeCredentialRejected': '✗ WorkBuddy 拒绝了这个账号的 token——请重新登录或换一个账号',
   'row.probePolicyRejected': '✗ WorkBuddy 服务端按内容策略拒绝了这次请求——重新登录无效；可在桌面端验证或切换区域/账号',
+  // PLAIN TEXT, no `**bold**` markup: this label is rendered as a JSX text
+  // child (`probeResultView` → `<p>{view.text}</p>`), not through a rich-text
+  // renderer, so markdown emphasis would reach the screen as literal
+  // asterisks. Every sibling probe label in this file is plain text for the
+  // same reason. (The `**` style IS used elsewhere — but only in strings that
+  // go into a `title=` tooltip, where the host renders markdown.)
+  'row.probeChannelRejected': '✗ 网关拦的是提示词本身，不是这个账号——某条 system 消息的开头命中了它的第三方 agent 过滤，换账号或换区域都会得到同一个答案（测试能过、聊天被拒，正是这个原因）',
   'row.probeNotFound': '✗ 上游不认识这个模型',
   'row.probeUnavailable': '✗ 连不上上游——上游没有给出可用答复',
   'row.probeFailed': '✗ 测试失败',

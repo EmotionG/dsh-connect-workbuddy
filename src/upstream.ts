@@ -70,6 +70,26 @@ export type UpstreamErrorKind =
   | 'model_busy'
   | 'session_dead'
   | 'policy_reject'
+  /**
+   * The gateway's channel gate refused the request itself (business code
+   * 11128, "Illegal API invocation from an unapproved channel").
+   *
+   * Deliberately its own kind, because its `displayTips` — "this call failed
+   * channel verification, possibly because it was not sent from an official
+   * client" — names the account or the client version, and NEITHER is the
+   * cause. The gate matches the OPENING of a `system` message against a list of
+   * known third-party-agent prompts, so the same credential answers 200 to a
+   * probe and 400 to a real chat request one second later (issues #87 / #88 /
+   * #89 / #90). Filing it as `client` was technically true and practically
+   * useless: the generic "refused on its parameters" sentence left the reader
+   * to try another account, which cannot change a byte of the prompt.
+   *
+   * NOT failover-worthy for the same reason: every account sends the same
+   * system prompt, so a second account answers the same 11128 one round trip
+   * later and each attempt teaches the pool a false fact about a credential
+   * that was never the problem.
+   */
+  | 'channel_reject'
   | 'not_found'
   | 'server'
   | 'client'
@@ -434,6 +454,53 @@ const POLICY_REJECT_MARKERS: readonly string[] = ['request illegal', '"code":111
 const MODEL_BUSY_CODE = '"code":14003'
 
 /**
+ * Business code of the gateway's CHANNEL gate (`11128`, "Illegal API invocation
+ * from an unapproved channel").
+ *
+ * The quoted-key form for the same reason as the markers above: a request id is
+ * hexadecimal and can contain the digits `11128` by coincidence.
+ *
+ * A DIFFERENT gate from the one {@link conversationHeaders} works around, which
+ * also answers `11128` (`conversation id missing`). The code is the same
+ * because the gateway reuses it for every rule in that family; the BODY is what
+ * tells them apart, so {@link isChannelRejectBody} requires both halves.
+ */
+const CHANNEL_REJECT_CODE = '"code":11128'
+
+/**
+ * Wording that identifies the CHANNEL half of `11128` (the other halves being
+ * `conversation id missing` and `first message is not system prompt`).
+ *
+ * Matched against the upstream's `msg`, NEVER against `displayTips`. That is not
+ * a style choice: the tips are the SAME misleading sentence for every member of
+ * the `11128` family — "这次调用没通过渠道校验，可能不是官方客户端发出的" — which is
+ * why matching them would claim the conversation-id gate too and blame the
+ * prompt's opening for a header problem this plugin already fixes.
+ *
+ * Lower-cased before the search. Two spellings are listed because the observed
+ * bodies name the code and the phrase together
+ * (`{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`),
+ * and either half is enough to identify it.
+ */
+const CHANNEL_REJECT_MARKERS: readonly string[] = [
+  'unapproved channel',
+  'illegal api invocation',
+]
+
+/**
+ * The other gates that answer the SAME business code.
+ *
+ * Excluded explicitly so a body that also carries the channel wording can never
+ * be read as the prompt rule: a confidently wrong diagnosis is worse here than
+ * the generic `client` reply, because it sends the user to rewrite a system
+ * prompt that is not at fault.
+ */
+const OTHER_CHANNEL_CODE_GATES: readonly string[] = [
+  'conversation id missing',
+  'first message is not system prompt',
+]
+
+/**
  * The upstream's own advice for {@link MODEL_BUSY_CODE}, in both shapes it ships
  * (`displayTips.zh` and its English twin).
  *
@@ -475,6 +542,77 @@ export function carriesModelBusyTip(body: string): boolean {
   return MODEL_BUSY_TIPS_MARKERS.some(marker => body.includes(marker))
 }
 
+/**
+ * Whether a failure body is the gateway's CHANNEL gate rather than the other
+ * `11128` ({@link conversationHeaders}' `conversation id missing`).
+ *
+ * Both halves are required. The code alone would claim the conversation-id gate
+ * too, and its reply would then blame the prompt's opening for a request-header
+ * problem the plugin already fixed — a confidently wrong diagnosis is worse
+ * here than the generic `client` reply, because it sends the user to rewrite a
+ * system prompt that is not at fault.
+ */
+export function isChannelRejectBody(body: string): boolean {
+  if (!body.includes(CHANNEL_REJECT_CODE)) return false
+  const lower = body.toLowerCase()
+  if (OTHER_CHANNEL_CODE_GATES.some(marker => lower.includes(marker))) return false
+  return CHANNEL_REJECT_MARKERS.some(marker => lower.includes(marker))
+}
+
+/**
+ * The OPENINGS of the `system` messages in a prepared request body.
+ *
+ * This is the evidence the channel gate actually reacts to, and echoing it is
+ * what turns "the upstream refused" into "the upstream refused because of this
+ * line" — the reader can then fix the prompt or report the new opening, instead
+ * of cycling accounts that cannot change a byte of it.
+ *
+ * Each entry is the first non-empty line, clipped: a fingerprint lives at the
+ * START of the content, so the rest of a 10 KB system prompt is noise that
+ * would bury the one sentence worth reading. At most three entries are kept —
+ * the gate scans every `system` message, but a body with more than three of them
+ * is already worth showing compactly.
+ *
+ * Never throws: a malformed body is the upstream's to reject, and losing the
+ * failure measurement is not an acceptable price for reading an excerpt.
+ */
+export function systemOpeningsOfBody(bodyJson: string): string[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return []
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return []
+  const messages = (parsed as Record<string, unknown>)['messages']
+  if (!Array.isArray(messages)) return []
+  const openings: string[] = []
+  for (const value of messages) {
+    if (openings.length >= 3) break
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    const message = value as Record<string, unknown>
+    const role = message['role']
+    if (typeof role !== 'string' || role.trim().toLowerCase() !== 'system') continue
+    const content = message['content']
+    if (typeof content !== 'string') continue
+    const opening = firstLineOf(content).replace(/\s+/gu, ' ').trim()
+    if (opening !== '') openings.push(clip(opening, SYSTEM_OPENING_LIMIT))
+  }
+  return openings
+}
+
+/** Longest system-prompt opening echoed back to the user, in characters. */
+const SYSTEM_OPENING_LIMIT = 120
+
+function firstLineOf(content: string): string {
+  const newline = content.indexOf('\n')
+  return newline === -1 ? content : content.slice(0, newline)
+}
+
+function clip(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
+}
+
 /** Classify an upstream failure from its HTTP status and body excerpt. */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
   if (status === 402) return 'hard_credit'
@@ -498,6 +636,11 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   for (const marker of POLICY_REJECT_MARKERS) {
     if (body.includes(marker)) return 'policy_reject'
   }
+  // AFTER the policy markers so a body that really is a content refusal keeps
+  // that (more specific) reply, and BEFORE the plain 400 fallback so the channel
+  // gate stops being filed as `client` — the misclassification that sent issues
+  // #87–#90's reporters through account swaps that could not help.
+  if (isChannelRejectBody(body)) return 'channel_reject'
   // BEFORE the plain 429 branch: a 14003 is a 429, and classifying it as
   // `soft_rate` is the whole of issue #56 — it made the pool treat a
   // model-scoped, second-scale throttle as a 30-minute per-account cooldown and
