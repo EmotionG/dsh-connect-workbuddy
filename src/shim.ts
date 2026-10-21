@@ -28,6 +28,7 @@ import type { WorkBuddyRefusalReport } from './off-thinking.ts'
 import { usageOfChunk } from './body-report.ts'
 import { DsmlStreamBuffer } from './dsml-recovery.ts'
 import type { RecoveredToolCall, RecoveryGate } from './dsml-recovery.ts'
+import { parseQueueAnswer, queueNoticeText } from './queue.ts'
 import {
   declaredTools,
   prepareChatBody,
@@ -1650,6 +1651,22 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // (compaction, for one) swallows the reply text (issue #83).
       const refusedReport = refusedTierReport(result, requestModelId)
       if (refusedReport !== undefined) reportRefusedTier(refusedReport)
+      // A QUEUE CONDITION IS NOT A FAILURE OF THE REQUEST. The upstream accepted
+      // the call and stated where it stands in line — `6020` (waiting),
+      // `6021` (queue full), `6022` (this user already holds the maximum). The
+      // app answers that with a banner and a poll, never with "请求失败"; so does
+      // this path, using the app's own vocabulary ("排队中 / 第 N 位") rather than
+      // the raw envelope. Recognised from the BODY because the condition rides as
+      // a business code, not an HTTP status — see `src/queue.ts`.
+      //
+      // 429 keeps the host's bounded in-place retry available: for `6020` a
+      // retry is exactly the right next move (the queue is moving), and for
+      // `6021`/`6022` the sentence says what to do instead of queueing.
+      const queue = parseQueueAnswer(result.message)
+      if (queue !== undefined) {
+        writeOpenAIError(res, 429, 'model_queue', `${queueNoticeText(queue)}（上游 code ${queue.code}）${note}`)
+        return
+      }
       if (result.kind === 'policy_reject') {
         // A content-policy refusal is the one upstream failure whose own words
         // the user needs: the server tells them WHAT to change ("内容未通过安全

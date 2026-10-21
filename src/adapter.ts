@@ -32,6 +32,7 @@ import { WORKBUDDY_FALLBACK_SYSTEM_PROMPT } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { piAiRuntimeInfo } from './pi-ai-runtime.ts'
 import type { PiAiGeneration } from './pi-ai-runtime.ts'
+import { busyDisplaySuffix } from './busy.ts'
 import type { ContextRescue } from './context-rescue.ts'
 
 /** Provider route this bundle owns for the domestic (CN) gateway. */
@@ -242,9 +243,14 @@ export function workBuddyModelInput(info: WorkBuddyModelInfo): ('text' | 'image'
  * `x0.00`, matching WorkBuddy's rendering of free models.
  */
 export function workBuddyDisplayName(info: WorkBuddyModelInfo): string {
-  return info.creditMultiplier === undefined
+  const base = info.creditMultiplier === undefined
     ? info.name
     : `${info.name} · x${info.creditMultiplier.toFixed(2)}`
+  // Load rides on the END of the same string, in the app's own words
+  // ("极度拥堵" / "轻微拥堵"), and only for a level worth drawing: the healthy
+  // default adds nothing, so a roster with no congestion reads exactly as it did
+  // before this existed. See `src/busy.ts`.
+  return `${base}${busyDisplaySuffix(info.busyLevel)}`
 }
 
 /**

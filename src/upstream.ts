@@ -32,6 +32,8 @@ import type { WorkBuddyCredential } from './auth.ts'
 import { offRefused } from './off-thinking.ts'
 import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
 import type { WorkBuddyPromo } from './promo.ts'
+import { batchModelIds, parseBusyLevels } from './busy.ts'
+import type { WorkBuddyBusyLevel } from './busy.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -158,6 +160,16 @@ export interface WorkBuddyUpstreamModel {
    * not where the document was read. See `src/promo.ts`.
    */
   promos?: readonly WorkBuddyPromo[]
+  /**
+   * How busy this model is RIGHT NOW, from the upstream's own probe
+   * (`POST /v2/chat/busy`, see `src/busy.ts`).
+   *
+   * Deliberately NOT part of the catalog document, and deliberately not
+   * persisted: the directory is a fact that survives a restart, a load level is
+   * a fact about the minute it was measured. It is stamped onto the in-memory
+   * catalog entry at refresh time and disappears with the process.
+   */
+  busyLevel?: WorkBuddyBusyLevel
 }
 
 /** One billing package as the upstream returns it, dates already parsed. */
@@ -365,6 +377,24 @@ const MODELS_CATALOG_PATH = '/v2/enterprises/personal/models'
  * byte-identically under the same header.
  */
 const GLOBAL_CONFIG_PATH = '/v3/config'
+
+/**
+ * The app's model-load probe (see `src/busy.ts`), read-only and free.
+ *
+ * Not part of any catalog document: this endpoint answers ONE fact per model id
+ * — how busy it is right now — and answers it for up to 50 ids at a time. It is
+ * host- and identity-insensitive on the CN side (measured 2026-10-21 on all
+ * three CN hosts, under both the CLI and the app user agent: byte-identical),
+ * so it is asked as the chat channel's own identity.
+ */
+const MODEL_BUSY_PATH = '/v2/chat/busy'
+
+/**
+ * The app's own ceiling for one probe (`timeout: 5e3` in its
+ * `useModelBusyLevels`). Short on purpose: a slow load probe is worth less than
+ * the refresh it is attached to, and the catalog must not wait on it.
+ */
+const MODEL_BUSY_TIMEOUT_MS = 5_000
 
 /**
  * The chat channel's user agent — the identity the plugin's adapter speaks as.
@@ -1843,6 +1873,41 @@ export class WorkBuddyUpstreamClient {
       )
       return await readCatalog(MODELS_CATALOG_PATH)
     }
+  }
+
+  /**
+   * Read how busy each model is right now, from the upstream's own probe.
+   *
+   * Batched at the upstream's ceiling (`WORKBUDDY_BUSY_BATCH_SIZE`), because the
+   * probe takes a list of ids and answers only about the ids it was given.
+   *
+   * Throws on anything that is not a clean `code: 0`, like every other reader in
+   * this class — the CALLER decides that a failed load probe is survivable and
+   * catches it. Nothing here is persisted: the level belongs to the refresh that
+   * asked for it.
+   */
+  async fetchModelBusy(
+    credential: WorkBuddyCredential,
+    modelIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Map<string, WorkBuddyBusyLevel>> {
+    const levels = new Map<string, WorkBuddyBusyLevel>()
+    for (const batch of batchModelIds(modelIds)) {
+      const response = await fetch(`${chatBase(credential)}${MODEL_BUSY_PATH}`, {
+        method: 'POST',
+        headers: {
+          ...commonHeaders(credential),
+          'Authorization': `Bearer ${credential.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ models: batch }),
+        signal: signal ?? AbortSignal.timeout(MODEL_BUSY_TIMEOUT_MS),
+      })
+      const envelope = await readEnvelope(response)
+      if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+      for (const [id, level] of parseBusyLevels(envelope.data)) levels.set(id, level)
+    }
+    return levels
   }
 
   /** Query today's check-in status without changing account state. */
