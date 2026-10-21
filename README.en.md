@@ -344,6 +344,8 @@ Marketplace screenshots and GitHub README badges are two separate mechanisms:
 - **Marketplace screenshots** follow the current convention and are declared in the plugin's own root [`screenshots.json`](screenshots.json) (this project declares its usage-card screenshot there). The registry's `data/screenshots.json` is a legacy fallback and **no longer accepts new keys** (this project removed its edit before submitting).
 - **Marketplace icons/placeholders** follow each marketplace's own display rules; they are not a generic npm `package.json` field nor a README badge.
 
+**The title and description on the plugin card are not rendered by this plugin** — they are **package metadata** the DSH plugin manager reads: it takes its words from `meta.title` / `meta.description` in `locale/<lang>.json` (`locale/en.json` is the anchor, so without it `zh.json` is never read; without the `"./locale/*.json"` wildcard in `exports` the whole directory is skipped **silently**), and falls back to `package.json`'s `description` for English. The same sentence therefore lives in three places in this repository, and [`tests/locale-meta.spec.ts`](tests/locale-meta.spec.ts) pins them together: the card dictionary (`locale/en.json` / `locale/zh.json`), the English fallback (`package.json.description`) and the listing draft (`description.en` / `description.zh` in `awesome-dsh-plugin-submission/dingminhua__dsh-connect-workbuddy.yml`). **Edit one, edit all three.**
+
 ## Known limitations
 
 - The plugin depends on WorkBuddy client endpoints (not an official public API), so a WorkBuddy update may require adjustments.

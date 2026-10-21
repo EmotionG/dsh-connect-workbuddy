@@ -355,6 +355,8 @@ else { await envelope.response.text() /* 或者按 SSE 消费 */ }
 - **市场截图**按当前约定由**插件自己仓库根目录的 `screenshots.json`** 声明（本项目声明了 [screenshots.json](screenshots.json)，含使用界面截图），注册表 `data/screenshots.json` 是旧约定下的回退，**不再添加新键**（本项目已在提交前撤销该文件的改动）。
 - **市场图标/占位图**由具体市场的展示规则决定，并不是 npm `package.json` 的通用字段，也不是 README 徽章。
 
+**插件卡上那句标题与简介不是本插件渲染的**——那是 DSH 插件管理器读的**包元数据**：它按 `locale/<lang>.json` 的 `meta.title` / `meta.description` 取词（`locale/en.json` 是锚点，缺了它 `zh.json` 永远不会被读；`exports` 里缺 `"./locale/*.json"` 通配则整个目录被**静默**跳过），英文回退到 `package.json` 的 `description`。因此同一句话在本仓库写在三处，并由 [`tests/locale-meta.spec.ts`](tests/locale-meta.spec.ts) 钉死：卡面字典（`locale/en.json` / `locale/zh.json`）、英文回退（`package.json.description`）、市场条目草稿（`awesome-dsh-plugin-submission/dingminhua__dsh-connect-workbuddy.yml` 的 `description.en` / `description.zh`）。**改一处就要同改三处。**
+
 ## 已知限制
 
 - 依赖 WorkBuddy 客户端接口（非官方开放 API），WorkBuddy 更新后插件可能需要随之调整。

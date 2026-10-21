@@ -263,6 +263,7 @@ uin <B> (<账号乙>): catalog HTTP 200, 28 models, 16 cli, credits total=0
 ```
 dsh-connect-workbuddy/
 ├── package.json            # trae 的元数据形态 + workbuddy 的 bin 字段
+├── locale/                 # 市场卡面文案：en.json（锚点）/ zh.json（宿主读，不经本插件）
 ├── cordis.patch.yml        # - insert: [{ id: dsh-connect-workbuddy, name: dsh-connect-workbuddy }]
 ├── tsdown.config.ts        # 双入口（node ESM + browser CJS） + version define
 ├── tsconfig.json / .client.json
@@ -361,3 +362,25 @@ dsh-subagent-default-model (MIT) ──► dsh-connect-trae (MIT, LaoDing)      
    - **「未登录」不等于「读不出来」**：两者在 `readAll()` 之后都表现为账号数为 0，此前共用同一句「请重新登录一次」。而加密文件读不出时用户**本来就是登录着的**，那句话指向的是唯一无效的动作。现在 `resolve()` 在失败路径上跑一次 `diagnose()`，把 `encrypted` 单独归为 `WorkBuddyEncryptedCredentialError`（`code` 标记而非 `instanceof`，跨打包边界可靠），给出「安装 App / 用 `WORKBUDDY_APP_EXECUTABLE` 指定」这条**可执行**的建议。健康路径一次探针都不跑。
    - `encrypted` 之所以**只能**来自桌面文件、不需要额外过滤：该原因由 `probeAuthFile()` 赋予，而插件自有副本从不经过它（按自有文档形状解析，损坏时是 `invalid`/`unreadable`）。代码里那句 `source === 'desktop'` 过滤是**不可达**的，已删——留着会让它看起来在防守一件它并没防的事。
 7. **合规** —— 沿用 workbuddy 的免责声明；第三方声明登记 `workbuddy2api` (MIT) 与架构参考。
+
+---
+
+## 七、卡面文案：插件在市场上的门面
+
+插件卡上的标题与简介**不是本插件渲染的**（`plugins.bundle.config` 槽位只插面板本体），而是 DSH 插件管理器读的**包元数据**：`readPluginMeta()`（`@deepseek-ai/dsh-app-boot`）先解析 `<包名>/locale/en.json`，再**扫描这个文件所在的目录**取出其余语言文件，逐个读 `meta.title` / `meta.description`；客户端按当前语言的兜底链取词（`en` = `["en"]`，`zh` = `["zh","en"]`）。三条机制事实（2026-10-21 取证于 `@deepseek-ai/dsh-app-boot`）：
+
+1. **`locale/en.json` 是锚点**：读取端遍历的是「英文资源所在目录」，没有 `en.json` 就不会去读 `zh.json`——中文永不生效，而且**不报错**。
+2. **缺 `exports` 里的 `"./locale/*.json"` 通配 = 静默失败**：解析抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，读取端把它连同 `ENOENT` / `ERR_MODULE_NOT_FOUND` 一起当「没有本地化元数据」**直接吞掉**——只显示英文，没有任何告警。
+3. **`displayName` 不在这条链上**：标题的回退是**裸包名**（`manifest.name`），不是 `package.json` 的 `displayName`。没有 `meta.title` 时，卡上写的就是 `dsh-connect-workbuddy`。
+
+英文简介的回退是 `package.json` 的 `description`（**只认字符串**，非字符串即丢），所以本仓库的 `package.json.description` 是**英文**。同一句话因此共有三处副本：
+
+| 副本 | 位置 | 作用 |
+|---|---|---|
+| 卡面字典 | `locale/en.json` / `locale/zh.json` | 宿主读到的真正文案（中文界面读 zh，英文界面读 en） |
+| 英文兜底 | `package.json.description` | 没有 `locale/` 时的兜底，也是 npm 页面上的描述 |
+| 市场条目草稿 | `awesome-dsh-plugin-submission/dingminhua__dsh-connect-workbuddy.yml` 的 `description.en` / `description.zh` | 市场页面的收录文案 |
+
+三处由 `tests/locale-meta.spec.ts` 钉死：**改一处就要同改三处**。`files` 里写**裸目录名** `locale`（整个目录随包分发），`exports` 里写通配 `"./locale/*.json": "./locale/*.json"`（宿主按**子路径**解析资源，缺了就静默跳过）。
+
+> **教训**（本仓库反复踩的那一族）：**「插件自己渲染的界面」与「DSH 渲染的插件元数据」是两套真源**。前者走 `ctx.locale` 注册的字典（`src/client/locales.ts`，中英 1:1 对齐），后者走 `package.json` + `locale/`。只改一套，就会出现「面板全中文、卡片全英文」这种自相矛盾的自述面。而本条里的三个坑**没有一个会报错**，只会安静地不生效——凡是**框架替我读**的文件，先找到读它的代码，再问一句「它读不到时会说什么」。
