@@ -1,5 +1,26 @@
 # Changelog
 
+## 未发布
+
+> 版本号留空（新增能力属 **minor**）。**默认关闭，关闭时插件行为与 4.15.1 完全一致**：不多一个工具、不多一条指令、不多一个请求，provider 路由、模型、凭据与计费一律未变。
+
+### Features
+
+- **CLI 路线（可选）：让本机已登录的 CodeBuddy CLI 直接干活**
+  - **为什么**：provider 那条路必须让请求看起来像 CodeBuddy 客户端才能过网关的渠道校验，4.15.0/4.15.1 已经升级到「按提示词中段做精确子串匹配 + 句读处插零宽空格」。这是军备竞赛，而且已经不再免费——issue #98 里出现 `code 11140`「账号存在异常行为，已被限制使用」的**账号级**限制。CLI 路线没有这层暴露：跟网关说话的那个进程**真的是**登录着的 CodeBuddy CLI，没有身份要伪造。
+  - **两个入口**：`codebuddy_ask` 工具（模型自己调用，目录由调用方给）与 `/codebuddy` 指令（用户敲，**自动取当前会话工作区**，留空 = 评审未提交改动并强制只读 `plan` 模式）。
+  - **结论回注会话模型**：跑完后把结论交给会话模型（空闲则 `steer` 起一轮，运行中则 `inject` 排进下一步），模型才知道刚才发生了什么。`injectResult` 可关。
+  - **凭据复用**：`CODEBUDDY_AUTH_TOKEN` → 插件已维护的 vault（`$DSH_HOME/workbuddy-vault/<region>/<account>.json`），**不需要再登录一次**。区域优先于新鲜度（国内令牌对 `copilot.tencent.com` 有效，国际版 401），`regionOrder` 默认 `cn,global`，401 才换下一个候选。
+  - **非破坏性装配**：`cliBridge.enabled` 默认 `false`；`tools` / `commands` 两个宿主服务用 `ctx.get()` **可选查找**，不写进 `export const inject` —— 宿主没有这两个服务时只是少一个工具/指令，provider 照常挂载。这是刻意的：装这个插件的人多数只关心 provider，一个硬依赖要么让他们的挂载失败，要么悄悄撤掉他们的模型。
+  - **CLI 调用方式**：prompt 走 **stdin** 的 `--input-format stream-json`（不落 argv，避免 Windows `.cmd` shim 的 shell 注入面），用 `process.execPath` 直跑 JS 入口、`shell: false`；只有找不到入口才退回 `codebuddy.cmd` + `shell: true`。`--output-format stream-json` 解析 assistant / tool_use / result（assistant 文本兼容 `event.message.content` 与顶层 `content`）。
+  - **不猜目录**：工具入口的目录阶梯是 显式 `working_dir` → 宿主 `exec.cwd` → 配置 `workingDir` → （仅 `allowUnattended` 时）临时目录 → **拒绝并列出三条出路**。绝不用宿主进程 cwd（那等于无人值守跑在用户 home 里）。
+  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。
+
+### Tests
+
+- 新增 `tests/cli-bridge.spec.ts`（53 条）：工具与指令的注册形状与关闭态（一个都不注册、也不打日志）、output schema 落在宿主闭合子集内、目录四级阶梯与「拒绝时点名三条出路」、空 message / 非法 permissionMode / 非法 effort 的具名拒绝、失败渲染成文本而不抛、footer 记账行、回注相位（idle → steer、running → inject、**status 缺失按 running 处理**）、空行 → 评审简报、同会话并发去重、`cliBridge` 配置 schema 的默认值与显式键、`resolveCliEntry` 按字面使用显式路径且找不到安装时不编造路径、`looksLikeAuthFailure` 只把凭据类错误算作可换号。
+- 全量 `vitest run`：102 个文件 / 1718 条通过（原 1663 条，新增 55）。`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均无输出。
+
 ## 4.15.1 (2026-10-21)
 
 > 版本号是 **patch**：没有接口与配置变更。发往上游的请求在**没有被网关拒绝时仍然逐字节不变**；改动的只有「被渠道校验拒绝之后」那一段——多一级重试。路由、模型、凭据、计费与换号规则未变。
