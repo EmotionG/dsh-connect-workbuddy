@@ -1,5 +1,26 @@
 # Changelog
 
+## 5.0.1 (2026-10-22)
+
+> 版本号是 **patch**：只改卡面上的一个字符串（标题）与三处描述它的文档，没有接口、配置项或请求结构的变更。
+
+### Fixes
+
+- **插件卡片的标题改回包名 `dsh-connect-workbuddy`** —— 5.0.0 里补 `locale/{en,zh}.json` 时，`meta.title` 写成了「WorkBuddy 模型接入」/「WorkBuddy Model Access」，于是卡片标题从裸包名变成了那个名字。这个插件的身份就是包名——仓库、npm 页面、issue 里都是这个叫法——所以改回去。
+  - **显式写出包名，而不是删掉 `meta.title` 留空**。两种做法渲染出的字完全一样（宿主 `localizedText` 的 fallback 就是 `manifest.name`），但留空之后文件里没有任何地方记录「标题应当等于包名」这件事，下一次「给它起个好听点的名字」看起来就会像一次免费改进，而不是一次回退。`tests/locale-meta.spec.ts` 现在钉住它。
+  - **简介不受影响**：仍由 `locale/zh.json` / `locale/en.json` 各自的 `meta.description` 提供，中英分离如初。
+
+### Docs
+
+- `docs/DESIGN.md` 更正一处过时说法（原文写「本仓库的 `package.json.description` 是英文」，那是 PR 原本的写法，合并时按「保持中文」处理了）；并补上第 4 条机制事实：`meta.title` 就写成包名，以及为什么写出来而不是留空。
+- `CHANGELOG` 的 5.0.0 条目同步改成包名口径。
+- 顺带说明 `package.json` 里那个 `DSH Connect WorkBuddy`（`displayName`）**不参与任何渲染**——宿主标题的回退是 `manifest.name`，不是它。保留只是历史遗留。
+
+### Tests
+
+- `tests/locale-meta.spec.ts` 那条从「标题**不**等于包名」改为「两种语言的标题**都**等于包名」，并把理由写进用例：这是一个决定，不是一个默认值。
+- 全量 `npx vitest run` = **107 文件 / 1751 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
+
 ## 5.0.0 (2026-10-21)
 
 > 版本号是 **major**：接口与配置项没有破坏性变更（顶层配置字段一个不少，也没有导出被删），但这一版把「花不花钱」的决定权**第一次交给了模型**。在此之前，本插件每一次花钱都跟一个人工动作绑在一起：一条聊天请求是你发的，模型行的「测试」按钮是你点的。5.0.0 新增的 `workbuddy_draw_image` 是模型自己决定调的——约 5.71 积分一张，而宿主没有「调用前先确认」的机制（`needsApproval` / `toolApproval` 在 `app.asar` 里都不存在）。
