@@ -19,6 +19,22 @@
 
 A [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) bundle plugin that connects locally signed-in WorkBuddy models to the DSH model picker — **both the CN app and the international WorkBuddy AI app are supported** — with an account pool, selectable model management, and a set of read-only capabilities built around credits: **every catalog refresh reads each model's credit multiplier from upstream** (the `x0.79` figure comes entirely from the upstream catalog; the plugin neither hard-codes it nor guesses), image input is toggled per model, multiple accounts can be switched or fail over automatically through the pool, and daily check-in plus read-only credit overviews shown as compact pills on the card and in the composer. **The CN and international sides are two parallel providers (`workbuddy` / `workbuddy-global`) that can be used at the same time**; the settings card separates them with tabs for convenient management. All it needs is a WorkBuddy sign-in on this machine — or **one sign-in from the browser**.
 
+## Risk notice — read this before installing
+
+> **WorkBuddy has begun restricting requests from unofficial clients. This plugin offers no bypass of the account or billing layer, and it does not promise that these endpoints will keep working; the day upstream tightens its rules, the plugin may stop working. Read the [Disclaimer](#disclaimer) at the end of this file and judge the account risk for yourself. Using the official WorkBuddy client is always the safest choice.**
+
+Concretely, three parts of this plugin are built on "trying to make the request acceptable to the gateway" — and upstream is equally entitled to refuse it:
+
+1. reading the product configuration and catalog with the official client's **User-Agent** (`PRODUCT_UA` in `src/upstream.ts`);
+2. after the channel gate refuses a request (`11128`), prefixing a neutral system line to the scanned messages and **retrying once**;
+3. if it is refused again, inserting zero-width spaces at sentence boundaries to break the content fingerprint, and **retrying once more**.
+
+All three make **the request itself** conform before the gate judges it (they change the request body, not the rule), so they can stop working at any time and could be treated as evasion. **There is no billing or privilege bypass here**: every call spends your own account's quota at the multiplier upstream reports, and no account state is ever modified.
+
+The restriction is escalating: `11128` (unapproved channel) went from "only the opening of `system`" to "`assistant` history messages too", then to "exact substring matching inside the prompt"; issue #98 also shows `11140` — an **account-level** penalty ("账号存在异常行为，已被限制使用"). **Working normally and being billed normally do not mean you are authorized, and do not mean there is no account risk.**
+
+Third-party access carries account risk of its own: the official terms of service restrict unauthorised third-party access, and using this project may lead to account or feature restrictions, **account bans**, or suspension and termination of service. **Understand the risk and decide for yourself whether to install it.** Account restrictions, lost credits and service interruptions caused by using this project are **your own responsibility**; if you cannot accept that, use the official client.
+
 ## Features
 
 - **Dual parallel providers (CN + international)** — the CN side registers as the `workbuddy` provider (`GLM-5.3`, `DeepSeek-V4-Pro`, `Kimi-K3`, `MiniMax-M3`, `Hy3`, etc.), the international side as `workbuddy-global` (`GPT-5.6`, `Gemini-3.5-Flash`, `GLM-5.3`, `Kimi-K3`, etc.). **A region's models appear in the DSH model picker when that region has an account**: with accounts on both sides, both rosters are selectable at once, and different sessions can each pick a side without interfering. **A region with no local sign-in lists no models** — it cannot serve a single request, so listing them would offer nothing but failures. Sign in once for that region and its models come back on "detect accounts again" or after a restart; the provider itself stays registered either way, because its settings card is how you sign in (re-detection lives in the pool block). Model names carry the upstream credit multiplier (e.g. `GLM-5.3 · x0.79`), matching WorkBuddy's own model menu.
@@ -374,10 +390,15 @@ Marketplace screenshots and GitHub README badges are two separate mechanisms:
 
 ## Disclaimer
 
-- This project is **for personal study and research only**. It drives only your own WorkBuddy account locally; do not use it commercially or beyond reasonable personal use.
-- You must comply with WorkBuddy's terms of service. Any consequence of using this project (including account restriction, quota depletion, or service interruption) is your own responsibility.
-- The author is not liable for any direct or indirect loss arising from the use or misuse of this project.
-- This project is unaffiliated with and unendorsed by Tencent, WorkBuddy, or DeepSeek. Names appear solely to describe compatibility; their trademarks belong to their respective owners.
+**Read all of it, then decide whether to install.** (There is also a [risk notice](#risk-notice--read-this-before-installing) near the top; the two say the same thing.)
+
+- **Third-party access carries account risk.** The official terms of service restrict unauthorised third-party access. Using this project may lead to account or feature restrictions, **account bans**, or suspension and termination of service. **Working normally and being billed normally do not mean you are authorized, and do not mean there is no account risk.**
+- This project is **for personal study and research only**. It drives only your own WorkBuddy / WorkBuddy AI account locally; **do not use it commercially or beyond reasonable personal use**.
+- Using this project **does not guarantee continuous availability, an unrestricted account, or always-accurate credit figures**. The author cannot control the platform's limits, penalties or service changes; the day upstream tightens its rules, the plugin may stop working.
+- **The restriction timeline in these docs is itself the evidence**: `11128` (unapproved channel) went from "only the opening of `system`" to "`assistant` history messages too" to "exact substring matching inside the prompt", and issue #98 shows `11140`, an **account-level** penalty ("账号存在异常行为，已被限制使用"). Every adaptation chases upstream, and the next rule change can still break it.
+- **Understand the risk and decide for yourself whether to install.** Account restrictions, lost credits and service interruptions caused by using this project are **your own responsibility**; if you cannot accept that, use the **official WorkBuddy client**, which is always the safest choice.
+- The author is **not liable for any direct or indirect loss** arising from the use or misuse of this project.
+- This project is **unaffiliated with and unendorsed by Tencent, WorkBuddy, or DeepSeek**. Names appear solely to describe compatibility; **their trademarks belong to their respective owners**.
 
 ## Acknowledgements
 
