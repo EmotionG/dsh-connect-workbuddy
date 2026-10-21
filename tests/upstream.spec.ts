@@ -12,6 +12,7 @@ import {
   prepareChatBody,
   regionOf,
   globalBase,
+  selectCliModels,
 } from '../src/upstream.ts'
 
 const POLICY_REJECT_BODY = JSON.stringify({
@@ -1134,5 +1135,52 @@ describe('WorkBuddyUpstreamClient.chatStream', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     caller.abort()
     await expect(answer).resolves.toMatchObject({ ok: false, status: 0, kind: 'server' })
+  })
+})
+
+describe('selectCliModels drops the regional routers, and keeps doing it', () => {
+  /** A minimal entry `parseUpstreamModel` accepts (both token counts positive). */
+  const entry = (id: string, name: string) => ({ id, name, maxInputTokens: 176_000, maxOutputTokens: 24_000 })
+
+  it('drops CN `auto` from the roster', () => {
+    const roster = selectCliModels(
+      [entry('auto', 'Auto'), entry('hy3', 'Hy3')],
+      [{ name: 'cli', models: ['auto', 'hy3'] }],
+    )
+    expect(roster.map(model => model.id)).toEqual(['hy3'])
+  })
+
+  it('drops the international `default-model`, the same router under another id', () => {
+    const roster = selectCliModels(
+      [entry('default-model', 'Auto'), entry('fast-model', 'Fast')],
+      [{ name: 'cli', models: ['default-model', 'fast-model'] }],
+    )
+    expect(roster.map(model => model.id)).toEqual(['fast-model'])
+  })
+
+  it('does not resurrect a router the SAVED SELECTION still names', () => {
+    // The case that made the `keepIds` filter necessary rather than decorative:
+    // a profile saved before routers were dropped still carries `auto` in
+    // `enabledModelIds`, and `keepIds` exists so a refresh never withdraws a
+    // model the user is running. Without the filter, that stored id comes back
+    // through the kept branch — and does so on EVERY refresh, so the row would
+    // be impossible to get rid of by unchecking it.
+    const roster = selectCliModels(
+      [entry('auto', 'Auto'), entry('default-model', 'Auto'), entry('hy3', 'Hy3')],
+      [{ name: 'cli', models: ['hy3'] }],
+      ['auto', 'default-model'],
+    )
+    expect(roster.map(model => model.id)).toEqual(['hy3'])
+  })
+
+  it('still keeps a real model the upstream roster dropped', () => {
+    // The other half of the same branch: filtering routers must not break the
+    // issue #32 guarantee that a user's running model survives a refresh.
+    const roster = selectCliModels(
+      [entry('auto', 'Auto'), entry('hy3', 'Hy3'), entry('retired-model', 'Retired')],
+      [{ name: 'cli', models: ['hy3'] }],
+      ['retired-model'],
+    )
+    expect(roster.map(model => model.id)).toEqual(['hy3', 'retired-model'])
   })
 })

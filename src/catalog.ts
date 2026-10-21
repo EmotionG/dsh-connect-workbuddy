@@ -15,6 +15,7 @@
  * @module dsh-connect-workbuddy/catalog
  */
 
+import { isRouterModelId } from './native-modality.ts'
 import type { WorkBuddyUpstreamModel } from './upstream.ts'
 
 /** One model entry the adapter exposes. */
@@ -54,7 +55,11 @@ export const FALLBACK_WORKBUDDY_MODELS: readonly WorkBuddyModelInfo[] = [
  * usable before the first fetch lands. Order and rates mirror the upstream.
  */
 export const FALLBACK_WORKBUDDY_MODELS_GLOBAL: readonly WorkBuddyModelInfo[] = [
-  { id: 'default-model', name: 'Auto', contextWindow: 176_000, maxTokens: 24_000, creditMultiplier: 0.79 },
+  // `default-model` is deliberately ABSENT: it is the international gateway's
+  // `auto` router (name "Auto", `isDefault: true`, no declared `credits`), and
+  // `ROUTER_MODEL_IDS` drops it from the live roster. This list must agree —
+  // shipping it here would reintroduce the row on the offline path only, which
+  // is the one place nobody looks. See `src/native-modality.ts`.
   { id: 'fast-model', name: 'Fast', contextWindow: 200_000, maxTokens: 32_000, creditMultiplier: 0.34 },
   { id: 'balanced-model', name: 'Balanced', contextWindow: 256_000, maxTokens: 32_000, creditMultiplier: 0.59 },
   { id: 'primary-model', name: 'Primary', contextWindow: 272_000, maxTokens: 72_000, creditMultiplier: 3.31 },
@@ -85,6 +90,24 @@ export const FALLBACK_WORKBUDDY_MODELS_GLOBAL: readonly WorkBuddyModelInfo[] = [
  */
 export function fallbackModelsFor(region: 'cn' | 'global'): readonly WorkBuddyModelInfo[] {
   return region === 'global' ? FALLBACK_WORKBUDDY_MODELS_GLOBAL : FALLBACK_WORKBUDDY_MODELS
+}
+
+/**
+ * Drop the upstream's ROUTER rows from a roster that came from settings.
+ *
+ * The static lists and `selectCliModels` both refuse routers already, but
+ * `lastCatalog` is a SNAPSHOT the user's profile carries from an earlier
+ * version — and every read of it (the card's list, the runtime catalog, the
+ * provider's advertisement) would otherwise keep showing the row long after the
+ * code stopped offering it. Filtering at the READ point instead of migrating the
+ * saved value is deliberate: the stored slot stays exactly what the last refresh
+ * wrote, so nothing is silently rewritten on load, and the row disappears the
+ * moment the new code runs rather than at the next refresh.
+ */
+export function withoutRouters(
+  models: readonly WorkBuddyModelInfo[],
+): readonly WorkBuddyModelInfo[] {
+  return models.filter(model => !isRouterModelId(model.id))
 }
 
 /**

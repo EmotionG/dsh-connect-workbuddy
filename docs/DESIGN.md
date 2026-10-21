@@ -130,7 +130,7 @@ Config:
 > **本机实测影响面**（用真实名册跑判定）：
 >
 > - CN 16 个里 **7 个**会预勾选（`glm-5.3-flash`、`glm-5v-turbo`、`deepseek-v4.1-flash`、`kimi-k2.6/2.7/k3-1`、`minimax-m3`）；被排除的纯文本有 `glm-5.3`、`glm-5.2`、`hy3`、`hy4-preview`、`deepseek-v4-pro`（上游对前五个全报 true）。
-> - 国际 23 个里只有 **3 个**有厂商来源（`glm-5.3-flash`、`deepseek-v4.1-flash`、`kimi-k2.6`），其余 17 个（`gpt-5.x`、`gemini-3.5-flash`、`grok-4.7`、自建别名 `default-model`/`fast-model` 等）都是 `unknown`，默认不勾。这是「不猜」的代价，也是它的意义。
+> - 国际 23 个里只有 **3 个**有厂商来源（`glm-5.3-flash`、`deepseek-v4.1-flash`、`kimi-k2.6`），其余 17 个（`gpt-5.x`、`gemini-3.5-flash`、`grok-4.7`、自建别名 `fast-model`/`balanced-model` 等）都是 `unknown`，默认不勾。这是「不猜」的代价，也是它的意义。（`default-model` 已不在名册里：它是国际区的 `auto` 路由，见下条。）
 >
 > **维护负担**：这张表是**快照而非实时同步**，且与 `workbuddy-manager` 仓库各存一份。新增 id 必须附厂商来源与核验日期；两边更新时需手动同步。表在卡片上体现为勾选框 tooltip（`row.modelImageText` / `row.modelImageUnverified`），否则一排勾选中间夹着两个空框会显得像 bug。
 >
@@ -151,7 +151,7 @@ Config:
 | 网关 | 抽样 | 结果 | 单次耗时 | `credit` |
 |---|---|---|---|---|
 | CN `copilot.tencent.com` | `auto` / `hy4-preview` / `hy3` / `glm-5.3` / `minimax-m3` | 全部 200 | 0.8～3.4s | 0～0.01 |
-| 国际 `www.workbuddy.ai` | `default-model` / `fast-model` / `balanced-model` | 全部 200 | 1.0～2.1s | 0 |
+| 国际 `www.workbuddy.ai` | `fast-model` / `balanced-model` / `primary-model` | 全部 200 | 1.0～2.1s | 0 |
 
 一次探测前后查余额：**933 → 933，不变**。同一名册正常一次回答为 0.79x 起，所以探测的代价可忽略。
 

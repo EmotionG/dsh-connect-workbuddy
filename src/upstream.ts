@@ -2150,8 +2150,15 @@ export function selectCliModels(
     .filter(id => !isRouterModelId(id))
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
+  // `keepIds` is the user's own selection, carried so a refresh does not
+  // withdraw a model the user is running (issue #32). A ROUTER is excluded here
+  // too, and that filter is load-bearing rather than belt-and-braces: a profile
+  // saved BEFORE routers were dropped still lists `auto`/`default-model` in
+  // `enabledModelIds`, and without this line that stored id would be re-added
+  // through the kept branch — resurrecting the exact row this version stops
+  // offering, and doing it on every single refresh rather than once.
   const kept = keepIds
-    .filter(id => !ids.includes(id))
+    .filter(id => !ids.includes(id) && !isRouterModelId(id))
     .map(id => byId.get(id))
     .filter((model): model is WorkBuddyUpstreamModel => model !== undefined)
   // Guard the ANSWER, not the upstream's share of it. A roster that is nothing

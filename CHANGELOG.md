@@ -2,9 +2,14 @@
 
 ## 5.0.1 (2026-10-22)
 
-> 版本号是 **patch**：改卡面上的一个字符串（标题）、去掉模型列表的一条 CSS 规则，以及几处描述它们的文档。没有接口、配置项或请求结构的变更。
+> 版本号是 **patch**：改卡面上的一个字符串（标题）、去掉模型列表的一条 CSS 规则与两行路由项，以及几处描述它们的文档。没有接口或配置结构的变更——但如果你的配置里存着 `auto` / `default-model`，升级后它不再出现在列表里。
 
 ### Fixes
+
+- **国际区的 `Auto` 行也从模型列表里去掉了** —— 它和国内区的 `auto` 是**同一个东西的两个 id**：都是该区的默认路由（`isDefault: true`、都叫 `Auto`），也都是各自名册里**唯一不声明积分倍率**的那一行（实测 2026-10-22：国内 20 个里 19 个标了价，国际 28 个里 27 个）。国内区的 `auto` 早就被过滤了，国际区的 `default-model` 一直漏着——一个插件无法标价的行，就是它无法向你交代成本的行。
+  - **判据不是名字**：`fast-model` / `balanced-model` / `primary-model` 也是别名，但它们都声明了真实倍率（x0.34 / x0.59 / x3.31），所以保留。丢掉它们会平白拿走三个用户真正会选的模型。
+  - **顺带修掉一个会把它带回来的漏洞**：`keepIds` 分支（让用户正在用的模型不被刷新撤掉，issue #32）原本不过滤路由，于是**旧配置里 `enabledModelIds` 还留着 `auto` 的人，每次刷新都会把这行重新加回来**——而且取消勾选也去不掉。现在两条路径都过滤。
+  - **在读取点过滤，而不是迁移已保存的配置**：`lastCatalog` 是配置里带着的历史快照，卡片读的就是它。只改刷新逻辑的话，升级后这一行会继续显示到下次刷新为止，看起来就像「没修好」。现在 `withoutRouters()` 在 `displayModels` 与 `configuredModels` 两处读取时过滤，存进去的值不动——升级后立刻消失，而不是等一次刷新。
 
 - **模型页不再有内部滚动条，所有模型一次全部呈现** —— 设置卡片「模型」栏的列表此前带 `max-height: 520px` + `overflow-y: auto`，20 多个模型只显示七行左右，其余藏在一条需要先发现、再拖动的滚动条后面；而面板本身已经在滚动，于是是两条滚动条叠在一起。
   - **`overflow: hidden` 保留**，而且是必要的：圆角由这个带边框的盒子绘制，不裁剪的话首行与末行会把直角画到圆角上。只是现在盒子的高度就等于内容高度，不会再裁掉任何东西。
@@ -24,7 +29,10 @@
 
 - `tests/locale-meta.spec.ts` 那条从「标题**不**等于包名」改为「两种语言的标题**都**等于包名」，并把理由写进用例：这是一个决定，不是一个默认值。
 - `tests/client-host-contract.spec.ts` 新增 1 条守卫：`.dsm-workbuddy-model-list` 的规则里**不得**出现 `max-height` 或 `overflow-y`，同时**必须**保留 `overflow:hidden`（只断言「没有上限」会让人以后把裁剪也顺手删掉，而那是圆角所依赖的）。
-- 全量 `npx vitest run` = **107 文件 / 1752 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
+- `tests/catalog.spec.ts` 新增 4 条 `withoutRouters` 用例：过滤旧快照里的路由、CN 的 `auto` 与国��的 `default-model` 都被认出、`fast`/`balanced`/`primary` 不受牵连、不修改入参；并把「两个区的 fallback 名册都不含各自的路由」从只查 `auto` 扩到两个 id。
+- `tests/upstream.spec.ts` 新增 4 条 `selectCliModels` 用例：两个区各自的 `auto` 都被丢掉、**旧配置里仍写着 `auto` 时不会借 `keepIds` 复活**、真正的「已下架但你在用」的模型仍然被保住（issue #32 那一半不能被这次过滤破坏）。
+- `tests/native-modality.spec.ts` 的路由用例扩成两个 id，并明确 `fast`/`balanced`/`primary`/`deep` 不算路由。
+- 全量 `npx vitest run` = **107 文件 / 1760 测试全绿**；`tsc` 两个 project 均 exit 0；`npm run build` 成功。
 
 ## 5.0.0 (2026-10-21)
 

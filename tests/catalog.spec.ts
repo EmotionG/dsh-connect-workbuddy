@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveCatalog, fallbackModelsFor, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog } from '../src/catalog.ts'
+import { deriveCatalog, fallbackModelsFor, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog, withoutRouters } from '../src/catalog.ts'
 import type { WorkBuddyModelInfo } from '../src/catalog.ts'
 
 const MODELS: readonly WorkBuddyModelInfo[] = [
@@ -161,15 +161,21 @@ describe('fallbackModelsFor', () => {
     expect([...global].some(id => id.startsWith('gpt-') || id.startsWith('gemini-'))).toBe(true)
     expect([...cn].some(id => id.startsWith('gpt-') || id.startsWith('gemini-'))).toBe(false)
     expect([...cn].some(id => id.startsWith('minimax-'))).toBe(true)
-    // The international roster uses `default-model`, the CN one its real ids.
-    expect(global.has('default-model')).toBe(true)
-    expect(cn.has('default-model')).toBe(false)
-    // Neither region's fallback carries the upstream's `auto` ROUTER: it
-    // resolves to a different model per request, so it is not a row this plugin
-    // can describe. `selectCliModels` drops it from the live roster for the same
-    // reason — keeping it here would reintroduce it on the offline path only.
+    // NEITHER roster carries its region's `auto` ROUTER. They are the same
+    // concept under two ids — CN `auto`, international `default-model` (name
+    // "Auto", `isDefault: true`, and the only roster entry declaring no
+    // `credits`). `selectCliModels` drops both from the live roster, so the
+    // static list must agree or the row reappears on the offline path only.
     expect(cn.has('auto')).toBe(false)
     expect(global.has('auto')).toBe(false)
+    expect(global.has('default-model')).toBe(false)
+    // The international roster's OTHER aliases stay: `fast`/`balanced`/`primary`
+    // are real routes with declared prices (x0.34 / x0.59 / x3.31), so they are
+    // rows this plugin CAN describe. Dropping them with the router would remove
+    // three models the user may legitimately want.
+    expect(global.has('fast-model')).toBe(true)
+    expect(global.has('balanced-model')).toBe(true)
+    expect(global.has('primary-model')).toBe(true)
     // The CN open-weight deepseek ids stay CN-only; the one deepseek id the
     // international desktop channel offers is its own.
     expect(cn.has('deepseek-v4-pro')).toBe(true)
@@ -237,5 +243,40 @@ describe('WorkBuddyCatalog region enabled', () => {
     // Only when BOTH gates pass does the catalog reappear.
     catalog.setRegionUsable(true)
     expect(catalog.current()).not.toHaveLength(0)
+  })
+})
+
+describe('withoutRouters', () => {
+  const saved = [
+    { id: 'default-model', name: 'Auto', contextWindow: 176_000, maxTokens: 24_000 },
+    { id: 'fast-model', name: 'Fast', contextWindow: 200_000, maxTokens: 32_000 },
+    { id: 'hy3', name: 'Hy3', contextWindow: 192_000, maxTokens: 64_000 },
+  ]
+
+  it('drops a router that a SAVED catalog still names', () => {
+    // The upgrade path. `lastCatalog` is a snapshot the profile carries from an
+    // earlier version, and it is what the card lists — so filtering only the
+    // fresh roster would leave the row on screen until the next refresh, which
+    // reads as "the fix did not work".
+    expect(withoutRouters(saved).map(model => model.id)).toEqual(['fast-model', 'hy3'])
+  })
+
+  it('drops the CN router under its own id', () => {
+    const cn = [{ id: 'auto', name: 'Auto', contextWindow: 256_000, maxTokens: 32_000 }]
+    expect(withoutRouters(cn)).toEqual([])
+  })
+
+  it('touches nothing else — the rows a user can actually pick survive', () => {
+    // `fast`/`balanced`/`primary` are aliases too, but they declare real prices
+    // and are legitimate picks. A broader "drop the aliases" filter would take
+    // three usable models away.
+    expect(withoutRouters(saved)).toHaveLength(2)
+    expect(withoutRouters(saved).map(model => model.name)).toEqual(['Fast', 'Hy3'])
+  })
+
+  it('does not mutate its input', () => {
+    const before = JSON.stringify(saved)
+    withoutRouters(saved)
+    expect(JSON.stringify(saved)).toBe(before)
   })
 })

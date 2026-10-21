@@ -26,8 +26,20 @@ describe('nativeModalityOf', () => {
     }
   })
 
-  it('treats the auto entry as a router, not a model', () => {
+  it('treats both regional routers as routers, not models', () => {
+    // One concept, two ids: CN publishes `auto`, the international gateway
+    // publishes `default-model`. Both are named "Auto", both carry
+    // `isDefault: true`, and both are the ONLY entry in their roster that
+    // declares no `credits` — measured 2026-10-22: CN 19 of 20 priced, global
+    // 27 of 28. A row the plugin cannot price is a row whose cost it cannot
+    // state, so neither is offered.
     expect(nativeModalityOf('auto')).toBe('router')
+    expect(nativeModalityOf('default-model')).toBe('router')
+    // The other international aliases are NOT routers: they declare real
+    // prices and are the rows a user actually picks.
+    for (const id of ['fast-model', 'balanced-model', 'primary-model', 'deep-model']) {
+      expect(nativeModalityOf(id), id).not.toBe('router')
+    }
   })
 
   it('leaves an unlisted model unknown instead of guessing', () => {

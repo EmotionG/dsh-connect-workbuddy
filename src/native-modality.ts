@@ -52,17 +52,30 @@ export const NATIVE_MODALITY_BY_MODEL_ID: Readonly<Record<string, 'text' | 'mult
 /**
  * Ids the upstream lists in the model roster that are ROUTERS, not models.
  *
- * `auto` (CN) is the one observed today: the gateway resolves it to whichever
- * model it considers the best fit (measured: CN `auto` → `hy4-preview`), so its
- * price, context window and behaviour are decided at request time by something
- * else. Offering it as a row advertises a model whose terms the plugin cannot
- * state, and it duplicates a real row already in the same roster.
+ * Two of them are known, one per region, and they are the SAME concept under
+ * two ids:
+ *
+ * - `auto` (CN gateway) — the gateway resolves it to whichever model it
+ *   considers the best fit (measured: CN `auto` → `hy4-preview`), and its own
+ *   description says so outright: 「平衡效果与速度。自动为每个任务匹配最优模型，
+ *   积分倍率随之浮动」 ("picks the best model per task; the credit multiplier
+ *   floats accordingly").
+ * - `default-model` (international gateway) — identical role (name "Auto",
+ *   `isDefault: true`, the region's default pick), also the ONLY entry in that
+ *   roster that declares no `credits` at all.
+ *
+ * The evidence for treating both as routers is the shared, self-describing
+ * shape, not the name: measured 2026-10-22 against both live gateways, these
+ * two entries are the ONLY ones whose `credits` field is absent/empty (CN 19
+ * of 20 priced, global 27 of 28), and the ones carrying `isDefault: true`.
+ * A row the plugin cannot price is a row whose cost it cannot state, and the
+ * router duplicates a real row already in the same roster.
  *
  * Kept as an explicit table rather than a heuristic: a router is an upstream
  * concept with no declared flag, and guessing from the name would eventually
  * hide a real model. Add an id here only after the same kind of evidence.
  */
-export const ROUTER_MODEL_IDS: ReadonlySet<string> = new Set(['auto'])
+export const ROUTER_MODEL_IDS: ReadonlySet<string> = new Set(['auto', 'default-model'])
 
 /** Whether this id is an upstream router rather than a model. */
 export function isRouterModelId(modelId: string): boolean {

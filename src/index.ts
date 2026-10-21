@@ -31,7 +31,7 @@ import type { AdapterRegistrationHandle, DirectoryRegistrationHandle } from '@de
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { workbuddyAccountId, WorkBuddyCredentialStore, type WorkBuddyCredential } from './auth.ts'
-import { deriveCatalog, fallbackModelsFor, WorkBuddyCatalog } from './catalog.ts'
+import { deriveCatalog, fallbackModelsFor, withoutRouters, WorkBuddyCatalog } from './catalog.ts'
 import type { WorkBuddyContextBudget, WorkBuddyModelInfo } from './catalog.ts'
 import { createAccountUsabilityProbe } from './credential-recovery.ts'
 import { BENEFIT_CACHE_MS, claimableBenefits, type WorkBuddyBenefitView } from './benefits.ts'
@@ -948,7 +948,7 @@ export function apply(ctx: Context, config: Config): void {
   ): readonly WorkBuddyModelInfo[] => {
     const state = regionStateOf(value, region)
     const roster = state.lastCatalog?.length
-      ? state.lastCatalog
+      ? withoutRouters(state.lastCatalog)
       : liveModels.length
         ? liveModels
         : fallbackModelsFor(region)
@@ -992,7 +992,12 @@ export function apply(ctx: Context, config: Config): void {
   // runtime is still serving it.
   const displayModels = (value: Config, region: WorkBuddyRegion): readonly WorkBuddyModelInfo[] => {
     const state = regionStateOf(value, region)
-    if (state.lastCatalog?.length) return state.lastCatalog
+    // Routers are dropped at every read, not just in the fresh roster. A
+    // `lastCatalog` saved by an earlier version still names `auto` /
+    // `default-model`, and this snapshot is what the card lists — so without
+    // the filter the row would survive the upgrade and only vanish at the next
+    // refresh, which reads as "the fix did not work".
+    if (state.lastCatalog?.length) return withoutRouters(state.lastCatalog)
     const live = stacks[region]?.catalog?.current()
     return live?.length ? live : fallbackModelsFor(region)
   }

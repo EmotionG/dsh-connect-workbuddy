@@ -701,7 +701,10 @@ const NO_REASONING_EFFORTS: LlmModelReasoningInfo = {
  * catalog has six of them (`default`, `glm-5.0`, `glm-4.7`, `glm-4.6`,
  * `hunyuan-chat`, `hunyuan-image-alpha`), the live global one two
  * (`default-model`, `deep-model`), and EVERY entry of both static fallback lists
- * — the inherited `high` is not a tier that model has. `resolveReasoningLevel`
+ * — the inherited `high` is not a tier that model has. (`default-model` is the
+ * international `auto` router and is not offered as a row since 5.0.1; the
+ * measurement is kept verbatim because the defect it documents was observed
+ * against the full roster.) `resolveReasoningLevel`
  * then throws `UNSUPPORTED_REASONING_EFFORT` before the request is even built,
  * so the model is unusable locally: no wire call, no upstream error, nothing to
  * retry. Introduced by v4.11.0, which made the profile default explicit; before
