@@ -142,15 +142,24 @@ describe('locale metadata', () => {
     }
   })
 
-  it('titles the card instead of letting it fall back to the package name', () => {
-    // `displayName` is not part of the read chain: without `meta.title` the
-    // card shows the bare package name.
+  it('shows the package name as the card title, in every language', () => {
+    // The title is the PACKAGE NAME on purpose. `displayName` is not part of the
+    // host's read chain (the fallback is `manifest.name`), so a localized title
+    // can only ever REPLACE the name on the card — and the maintainer wants the
+    // card to say `dsh-connect-workbuddy`, which is what the repository, the npm
+    // page and every issue refer to.
+    //
+    // Written out in both files rather than omitted: an absent `meta.title` also
+    // renders the package name (via `localizedText`'s `fallback`), so the pixels
+    // would match either way — but then nothing in the file would record that
+    // this was a decision, and the next "let's give it a nicer name" edit would
+    // look like a free improvement instead of a reversal.
     const { name } = manifest()
-    expect(metaOf('en').title).not.toBe(name)
-    expect(metaOf('zh').title).not.toBe(name)
-    // Two languages, two titles — one shared string would mean one of them is
+    expect(metaOf('en').title).toBe(name)
+    expect(metaOf('zh').title).toBe(name)
+    // Same in both languages. A differing pair would mean one of them is
     // showing the other language's name.
-    expect(metaOf('en').title).not.toBe(metaOf('zh').title)
+    expect(metaOf('en').title).toBe(metaOf('zh').title)
   })
 
   it('keeps the Chinese copy Chinese and the English copy English', () => {

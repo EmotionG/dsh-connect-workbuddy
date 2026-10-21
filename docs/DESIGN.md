@@ -372,8 +372,9 @@ dsh-subagent-default-model (MIT) ──► dsh-connect-trae (MIT, LaoDing)      
 1. **`locale/en.json` 是锚点**：读取端遍历的是「英文资源所在目录」，没有 `en.json` 就不会去读 `zh.json`——中文永不生效，而且**不报错**。
 2. **缺 `exports` 里的 `"./locale/*.json"` 通配 = 静默失败**：解析抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，读取端把它连同 `ENOENT` / `ERR_MODULE_NOT_FOUND` 一起当「没有本地化元数据」**直接吞掉**——只显示英文，没有任何告警。
 3. **`displayName` 不在这条链上**：标题的回退是**裸包名**（`manifest.name`），不是 `package.json` 的 `displayName`。没有 `meta.title` 时，卡上写的就是 `dsh-connect-workbuddy`。
+4. **本仓库的 `meta.title` 就写成包名**：两处 `locale/*.json` 的 `title` 都是 `dsh-connect-workbuddy`。不是「懒得起名」，而是刻意与仓库名、npm 包名、issue 里的叫法一致——这个插件的身份就是那个包名。写出来而不是留空，是因为留空也会经 `localizedText` 的 `fallback` 渲染出同样的字，但文件里就没有任何地方记录「这是决定」，下一次「给它起个好听点的名字」看起来就会像免费改进。
 
-英文简介的回退是 `package.json` 的 `description`（**只认字符串**，非字符串即丢），所以本仓库的 `package.json.description` 是**英文**。同一句话因此共有三处副本：
+简介的回退是 `package.json` 的 `description`（**只认字符串**，非字符串即丢）。本仓库这一处是**中文**：它同时出现在 npm 包页面和 GitHub 的仓库简介上，而这两处的读者就是中文用户；英文文案住在 `locale/en.json`，而 `localizedText` 会把字典里的词**覆盖**在 fallback 之上（`{ en: fallback, ...entries }`），所以英文界面读到的仍是英文，中文只用于「locale 读不到」的降级与商品页。同一句话因此共有三处副本：
 
 | 副本 | 位置 | 作用 |
 |---|---|---|

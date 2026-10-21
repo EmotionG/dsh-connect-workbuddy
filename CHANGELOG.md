@@ -32,7 +32,7 @@
   - **`locale/en.json` 是锚点**：读取端遍历的是「英文资源所在目录」，没有它 `zh.json` 永远不会被读——而且不报错。
   - **`exports` 缺 `"./locale/*.json"` 通配 = 静默失败**：解析抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，读取端把它连同其它失败一起吞掉。
   - **`files` 必须带裸目录 `locale`**，否则发布出去的 tarball 里没有它自己那份文案。
-  - 现在中文界面显示「WorkBuddy 模型接入」＋中文简介，英文界面显示「WorkBuddy Model Access」＋英文简介。`package.json` 的 `description` **保持中文**：它同时是 npm 包页面的简介、GitHub 的仓库简介，和「万一 locale 读不到」的最后兜底——英文文案住在 `locale/en.json` 里，那才是能覆盖兜底的那一份。
+  - 现在中文界面读 `locale/zh.json`、英文界面读 `locale/en.json`，两边各有自己的简介。**标题就是包名 `dsh-connect-workbuddy`**（两处 `meta.title` 都这么写）：这个插件的身份就是那个包名，仓库、npm 页面与 issue 里都是这个叫法；写出来而不是留空，是因为留空也会经 `localizedText` 的 `fallback` 渲染出同样的字，但文件里就没有任何地方记录「这是决定」。`package.json` 的 `description` **保持中文**：它同时是 npm 包页面的简介、GitHub 的仓库简介，和「万一 locale 读不到」的最后兜底——英文文案住在 `locale/en.json` 里，那才是能覆盖兜底的那一份。
 
 - **新增生图工具 `workbuddy_draw_image`（国内区，默认关闭，需显式授权）** —— 把 WorkBuddy 官方 CLI 的文生图能力暴露成一个 DSH agent 工具，模型可以按用户的描述直接画一张图。
   - **为什么它是 opt-in，而其他功能不是**：这是本插件唯一「由模型决定花钱」的能力。聊天请求是你发的，「测试」按钮是你点的，而工具调用是模型自己发起的——约 5.71 积分一张，宿主又没有逐次确认的机制。所以开关归你：`regions.cn.imageToolEnabled`，默认 `false`，关着时工具不注册。这与 3.0.0 给账号池的处理是同一个道理（能改变账单落点的功能必须显式打开）。
