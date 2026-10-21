@@ -302,10 +302,12 @@ export const WORKBUDDY_CARD_CSS = `
    meta line, because a cooldown sentence ("rate limited - the upstream gave no
    time") does not fit next to the context/output chips, and truncating it would
    hide exactly the part the user needs. */
-/* Three buttons now live here (refresh + the two sweeps), and the sweep labels are
-   long in Chinese (一键测试所有模型). flex:none alone let the group run past the
-   header on a narrow card, so the group may WRAP and each label refuses to break
-   mid-word — the same failure the pool row's action buttons had. */
+/* FOUR buttons now live here (refresh + two availability sweeps + the speed
+   sweep added for issue #92), and the labels are long in Chinese
+   (一键测速启用模型). flex:none alone let the group run past the header on a
+   narrow card, so the group may WRAP and each label refuses to break mid-word —
+   the same failure the pool row's action buttons had. The wrap is what makes a
+   fourth button safe; without it the header would need a scroll. */
 .dsm-workbuddy-models-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .dsm-workbuddy-models-head-actions .dsm-btn{white-space:nowrap}
 /* The sweep buttons keep the outline weight of the refresh button beside them, so

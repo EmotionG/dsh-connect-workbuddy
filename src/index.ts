@@ -52,6 +52,7 @@ import { createWorkBuddyShim } from './shim.ts'
 import { registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
 import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
+import { measureTps } from './tps.ts'
 import type { UpstreamErrorKind } from './upstream.ts'
 import {
   checkinAllAccounts,
@@ -213,6 +214,7 @@ import {
   WORKBUDDY_CHECKIN_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_PROBE_PATH,
+  WORKBUDDY_TPS_PATH,
   WORKBUDDY_REGION_PARAM,
   WORKBUDDY_REGIONS,
   WORKBUDDY_SETTINGS_NS,
@@ -234,6 +236,7 @@ import {
   type WorkBuddyWebPoolExclusion,
   type WorkBuddyWebRegion,
   type WorkBuddyWebSearchPath,
+  type WorkBuddyWebTpsResult,
   type WorkBuddyWebUsage,
   type WorkBuddyTransferExportAnswer,
   type WorkBuddyTransferImportAnswer,
@@ -246,6 +249,7 @@ export {
   WORKBUDDY_CHECKIN_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_PROBE_PATH,
+  WORKBUDDY_TPS_PATH,
   WORKBUDDY_REGION_PARAM,
   WORKBUDDY_REGIONS,
   WORKBUDDY_SETTINGS_NS,
@@ -1312,6 +1316,53 @@ export function apply(ctx: Context, config: Config): void {
           ...quotaRefreshAtMs === undefined ? {} : { quotaRefreshAtMs },
           ...options?.signal === undefined ? {} : { signal: options.signal },
         }))
+      }
+      return results
+    },
+    /**
+     * Output-speed measurement (issue #92), region-scoped like every other
+     * spending path.
+     *
+     * Deliberately NOT routed through the probe's failover machinery: a speed
+     * number describes the MODEL, and having the pool silently serve the run
+     * from a different account would attach one account's rate limit (6004) to
+     * another's measurement. The selected credential runs all three samples, so
+     * "it failed" means this account could not measure it, which is the honest
+     * answer.
+     */
+    async measureTps(region, modelIds, options) {
+      let credential
+      try {
+        credential = await stacks[region].store.resolve()
+      } catch (error: unknown) {
+        // A missing credential is per-model, actionable information: report it
+        // rather than failing the route, so the card can show WHY.
+        const message = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)
+        return modelIds.map(modelId => ({
+          modelId,
+          outcome: 'credential-rejected' as const,
+          samples: 0,
+          message,
+        }))
+      }
+      const results: WorkBuddyWebTpsResult[] = []
+      for (const modelId of modelIds) {
+        const sample = await measureTps({
+          client,
+          credential,
+          modelId,
+          ...options?.signal === undefined ? {} : { signal: options.signal },
+        })
+        results.push({
+          modelId: sample.modelId,
+          outcome: sample.tokensPerSecond === undefined ? 'failed' as const : 'ok' as const,
+          ...sample.tokensPerSecond === undefined ? {} : { tokensPerSecond: sample.tokensPerSecond },
+          ...sample.timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs: sample.timeToFirstTokenMs },
+          ...sample.outputTokens === undefined ? {} : { outputTokens: sample.outputTokens },
+          samples: sample.samples,
+          ...sample.reason === undefined ? {} : { reason: sample.reason },
+          ...sample.credit === undefined ? {} : { credit: sample.credit },
+        })
       }
       return results
     },

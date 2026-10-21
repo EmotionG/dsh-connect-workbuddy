@@ -40,6 +40,7 @@ import {
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_GITHUB_URL,
   WORKBUDDY_PROBE_PATH,
+  WORKBUDDY_TPS_PATH,
   WORKBUDDY_REGIONS,
   WORKBUDDY_USAGE_PATH,
   toPersistedWorkBuddyModel,
@@ -50,6 +51,7 @@ import type {
   WorkBuddyCreditPosition,
   WorkBuddyWebModel,
   WorkBuddyWebProbeResult,
+  WorkBuddyWebTpsResult,
   WorkBuddyWebRegion,
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
@@ -317,6 +319,49 @@ function retrySuffix(t: Translate, untilMs: number | undefined, nowMs: number): 
   return remaining === '' ? '' : ` · ${remaining}`
 }
 
+/**
+ * Render one measured speed, or why there is none (issue #92).
+ *
+ * The timestamp is PART of the value, not decoration: speed changes with load,
+ * and a number without its moment is indistinguishable from a fresh one. When the
+ * measurement could not be timed the row says so and names the reason — never a
+ * zero, and never a guess extrapolated from `elapsedMs`, which for some runs is
+ * time-to-first-token and for others a whole-request duration.
+ */
+export function tpsResultView(
+  result: WorkBuddyWebTpsResult,
+  t: Translate,
+  measuredAtMs: number | undefined,
+): { text: string, tone: 'ok' | 'warn' | 'bad' } {
+  const stamp = measuredAtMs === undefined ? '' : ` · ${t('row.tpsMeasuredAt', { at: formatDate(measuredAtMs) })}`
+  if (result.tokensPerSecond === undefined) {
+    const reason = result.reason === 'few-chunks'
+      ? 'row.tpsNoSample'
+      : result.reason === 'no-usage'
+        ? 'row.tpsNoUsage'
+        : 'row.tpsAllFailed'
+    return {
+      text: result.samples > 0 && result.reason !== undefined
+        ? `${t(reason)}${stamp}`
+        : `${t('row.tpsAllFailed')}${stamp}`,
+      tone: 'bad',
+    }
+  }
+  const speed = result.samples < TPS_EXPECTED_RUNS
+    ? t('row.tpsPartial', { tps: String(result.tokensPerSecond), samples: String(result.samples) })
+    : result.timeToFirstTokenMs === undefined
+      ? t('row.tpsValue', { tps: String(result.tokensPerSecond) })
+      : t('row.tpsValueTtft', {
+        tps: String(result.tokensPerSecond),
+        ttft: (result.timeToFirstTokenMs / 1000).toFixed(1),
+      })
+  const cost = result.credit === undefined ? '' : ` · ${t('row.tpsCredit', { credit: String(result.credit) })}`
+  return { text: `${speed}${cost}${stamp}`, tone: result.samples < TPS_EXPECTED_RUNS ? 'warn' : 'ok' }
+}
+
+/** Runs a complete measurement takes; below this the row says "n runs". */
+const TPS_EXPECTED_RUNS = 3
+
 function probeResultView(
   result: WorkBuddyWebProbeResult,
   t: Translate,
@@ -464,6 +509,26 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const probesRef = useRef<Record<string, WorkBuddyWebProbeResult>>({})
   /** Progress of an in-flight sweep, or undefined when none is running. */
   const [sweeping, setSweeping] = useState<{ done: number, total: number } | undefined>(undefined)
+  /**
+   * Measured output speed per model (issue #92), keyed by model id.
+   *
+   * Kept in its own map, NOT merged into `probes`: a speed run says nothing about
+   * availability and an availability run says nothing about speed, so one map
+   * holding both would let a fresh speed reading overwrite a stale availability
+   * verdict (or the reverse) with no field to tell them apart.
+   *
+   * Deliberately survives a region switch's re-render but is NOT persisted: a
+   * speed number is only meaningful with the moment it was taken, and a stored
+   * one would be indistinguishable from a fresh measurement. The row prints the
+   * time beside it for the same reason.
+   */
+  const [tpsResults, setTpsResults] = useState<Record<string, WorkBuddyWebTpsResult>>({})
+  /** Which speed runs are in flight, so the row and the sweep button can spin. */
+  const [tpsProbing, setTpsProbing] = useState<Record<string, boolean>>({})
+  /** Progress of a speed sweep, so the button can show "n/m" instead of hanging. */
+  const [tpsSweeping, setTpsSweeping] = useState<{ done: number, total: number } | undefined>(undefined)
+  /** When each model's speed was measured, in ms; printed beside the number. */
+  const [tpsMeasuredAt, setTpsMeasuredAt] = useState<Record<string, number>>({})
   /** The last sweep's tally, cleared when the next one starts. */
   const [sweepSummary, setSweepSummary] = useState<string | undefined>(undefined)
   const mounted = useRef(true)
@@ -1263,6 +1328,79 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   }
 
   /**
+   * Measure OUTPUT SPEED for one or more models (issue #92).
+   *
+   * One model per request, like every other spending route: the upstream route
+   * refuses more than one id, and that cap is what keeps a stale bundle from
+   * turning a click into an unaccounted spend over a whole roster. The loop for a
+   * sweep therefore lives here, not on the Host.
+   *
+   * A failed model does NOT abort the sweep. Unlike an availability sweep — where
+   * a rejected credential answers identically for every remaining model and
+   * continuing only spends credit to hear the same answer — a speed failure is
+   * specific to that model, so stopping would hide the one thing the sweep was
+   * asked to find out.
+   */
+  const measureTpsFor = async (modelIds: readonly string[]): Promise<void> => {
+    if (modelIds.length === 0) return
+    setTpsProbing(previous => {
+      const next = { ...previous }
+      for (const id of modelIds) next[id] = true
+      return next
+    })
+    try {
+      for (const [index, modelId] of modelIds.entries()) {
+        if (!mounted.current) return
+        try {
+          const response = await fetch(withWorkBuddyRegion(WORKBUDDY_TPS_PATH, activeRegion), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ modelIds: [modelId] }),
+          })
+          const body = await response.json().catch(() => undefined) as
+            | { results?: WorkBuddyWebTpsResult[]; error?: string }
+            | undefined
+          if (!response.ok || !Array.isArray(body?.results)) {
+            throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+          }
+          if (!mounted.current) return
+          const landed = body.results[0]
+          if (landed !== undefined) {
+            setTpsResults(previous => ({ ...previous, [landed.modelId]: landed }))
+            setTpsMeasuredAt(previous => ({ ...previous, [landed.modelId]: Date.now() }))
+          }
+        } catch (error: unknown) {
+          if (!mounted.current) return
+          setProbeError(error instanceof Error ? error.message : t('row.requestFailed'))
+        } finally {
+          if (mounted.current) {
+            setTpsProbing(previous => {
+              const next = { ...previous }
+              delete next[modelId]
+              return next
+            })
+          }
+        }
+        if (mounted.current) setTpsSweeping({ done: index + 1, total: modelIds.length })
+      }
+    } finally {
+      if (mounted.current) setTpsSweeping(undefined)
+    }
+  }
+
+  /**
+   * Sweep speed for the models this region has ENABLED.
+   *
+   * Enabled-only rather than the whole catalog: a speed run is three real
+   * requests, so covering a 20-model roster would cost 60 requests to learn
+   * something about 18 models the user does not use.
+   */
+  const sweepTpsEnabledModels = (): void => {
+    void measureTpsFor(visibleModels.filter(model => activeEnabledIds.has(model.id)).map(model => model.id))
+  }
+
+  /**
    * Sweep EVERY model in the region's live catalog, enabled or not.
    *
    * Deliberately the whole VISIBLE catalog and nothing else: those are the ids
@@ -1271,6 +1409,16 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    */
   const sweepAllModels = (): void => {
     void sweepModels(visibleModels.map(model => model.id))
+  }
+
+  /**
+   * Sweep speed for the WHOLE visible catalog.
+   *
+   * Same rule as {@link sweepAllModels}: the visible catalog only, because those
+   * are the ids the host can validate against its own roster.
+   */
+  const sweepTpsAllModels = (): void => {
+    void measureTpsFor(visibleModels.map(model => model.id))
   }
 
   const saveModels = async (): Promise<void> => {
@@ -1880,6 +2028,26 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                 ? t('row.modelsTestAll')
                                 : t('row.modelsTesting', { done: sweeping.done, total: sweeping.total })}
                             </button>
+                            {/* Speed sweep (issue #92). A separate button from the
+                                two above because it answers a different question
+                                and costs a different amount: the availability
+                                probes send 25k input tokens each, while a speed
+                                run sends ~35 and asks for 256 back, so this is
+                                roughly 30x cheaper per model yet still three real
+                                requests. Keeping it separate means the cost hint
+                                on each button stays true. */}
+                            <button
+                              type="button"
+                              className="dsm-btn dsm-btn-outline dsm-workbuddy-models-sweep"
+                              disabled={busy || tpsSweeping !== undefined || tpsProbing !== undefined
+                                || activeEnabledIds.size === 0}
+                              title={t('row.tpsSweepEnabledHint')}
+                              onClick={sweepTpsEnabledModels}
+                            >
+                              {tpsSweeping === undefined
+                                ? t('row.tpsSweepEnabled')
+                                : t('row.tpsTesting', { done: tpsSweeping.done, total: tpsSweeping.total })}
+                            </button>
                           </div>
                         </div>
                       {probeError === undefined ? null
@@ -2019,6 +2187,20 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                 >
                                   {probing[model.id] === true ? t('row.probing') : t('row.probe')}
                                 </button>
+                                {/* Speed, beside availability (issue #92). Its own
+                                    button because the two answers are about
+                                    different things: a model can be perfectly
+                                    available and half the speed of its
+                                    neighbour at the same credit multiplier. */}
+                                <button
+                                  type="button"
+                                  className="dsm-btn dsm-btn-outline dsm-workbuddy-model-probe"
+                                  disabled={tpsProbing[model.id] === true || status.status !== 'signed-in'}
+                                  title={t('row.tpsHint')}
+                                  onClick={() => { void measureTpsFor([model.id]) }}
+                                >
+                                  {tpsProbing[model.id] === true ? t('row.tpsMeasuring') : t('row.tpsMeasure')}
+                                </button>
                                 </div>
                               </div>
                               <div className="dsm-workbuddy-model-details">
@@ -2044,6 +2226,24 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                   >
                                     {view.text}
                                     {reason === undefined ? null : ' · ' + reason}
+                                  </p>
+                                )
+                              })()}
+                              {/* Speed sits on its OWN line, below the
+                                  availability verdict: the two are independent
+                                  facts and merging them into one <p> would make
+                                  a fast-but-unavailable model read as one
+                                  combined state that does not exist. */}
+                              {(() => {
+                                const measured = tpsResults[model.id]
+                                if (measured === undefined) return null
+                                const view = tpsResultView(measured, t, tpsMeasuredAt[model.id])
+                                return (
+                                  <p
+                                    className={`dsm-workbuddy-model-probe-result dsm-workbuddy-model-probe-result-${view.tone}`}
+                                    role="status"
+                                  >
+                                    {view.text}
                                   </p>
                                 )
                               })()}

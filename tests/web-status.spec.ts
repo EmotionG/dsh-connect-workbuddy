@@ -566,7 +566,7 @@ describe('registerWorkBuddyStatusRoute', () => {
     return captured
   }
 
-  it('mounts the usage, account, check-in, benefit, model, probe, pool, save, oauth, and transfer routes', async () => {
+  it('mounts the usage, account, check-in, benefit, model, probe, speed, pool, save, oauth, and transfer routes', async () => {
     const captured = await mountRoutes()
     expect(captured.map(entry => entry.path)).toEqual([
       '/plugins/dsh-connect-workbuddy/usage',
@@ -579,6 +579,10 @@ describe('registerWorkBuddyStatusRoute', () => {
       '/plugins/dsh-connect-workbuddy/benefit/claim',
       '/plugins/dsh-connect-workbuddy/models/refresh',
       '/plugins/dsh-connect-workbuddy/probe',
+      // Output-speed measurement (issue #92). Its own route because it asks the
+      // opposite question with the opposite request shape: tiny input, long
+      // output, and a fraction of a probe's cost.
+      '/plugins/dsh-connect-workbuddy/tps',
       '/plugins/dsh-connect-workbuddy/pool',
       '/plugins/dsh-connect-workbuddy/__save',
       '/plugins/dsh-connect-workbuddy/oauth',

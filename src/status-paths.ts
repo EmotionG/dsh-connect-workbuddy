@@ -71,6 +71,18 @@ export const WORKBUDDY_CHECKIN_PATH = '/plugins/dsh-connect-workbuddy/checkin'
 export const WORKBUDDY_PROBE_PATH = '/plugins/dsh-connect-workbuddy/probe'
 
 /**
+ * Plugin-owned OUTPUT-SPEED measurement endpoint (issue #92).
+ *
+ * Separate from {@link WORKBUDDY_PROBE_PATH} because the two ask opposite
+ * questions and cost different amounts: the availability probe sends 25,000
+ * input tokens and caps output at one (measured `credit 0.72`), while this one
+ * sends ~35 input tokens and caps output at 256 (measured `credit 0.01`–`0.15`).
+ * Sharing the route would mean sharing its one-model-per-request cap and its
+ * cost wording, and the two would then be wrong for each other.
+ */
+export const WORKBUDDY_TPS_PATH = '/plugins/dsh-connect-workbuddy/tps'
+
+/**
  * Plugin-owned account-pool endpoint: one batch action per call.
  *
  * `?action=checkin` claims the daily reward for every account of a region;
@@ -982,6 +994,39 @@ export interface WorkBuddyWebProbeResult {
 /** The probe endpoint's answer document. */
 export interface WorkBuddyWebProbeAnswer {
   results: readonly WorkBuddyWebProbeResult[]
+}
+
+/**
+ * One model's output-speed result, as the card renders it (issue #92).
+ *
+ * Deliberately its own type rather than extra fields on
+ * {@link WorkBuddyWebProbeResult}: the two runs answer different questions, and
+ * a shared type would let a card render an availability verdict with a speed on
+ * it, or vice versa, with nothing to stop it.
+ */
+export interface WorkBuddyWebTpsResult {
+  modelId: string
+  /** `ok` when at least one run answered; the speed fields say what was learned. */
+  outcome: 'ok' | 'unavailable' | 'credential-rejected' | 'failed'
+  /** Median output tokens/second over the usable runs. */
+  tokensPerSecond?: number
+  /** Median time to first content chunk, in ms. */
+  timeToFirstTokenMs?: number
+  /** Output tokens the upstream counted for the fastest usable run. */
+  outputTokens?: number
+  /** How many runs contributed; below the planned count when runs were lost. */
+  samples: number
+  /** Why {@link tokensPerSecond} is absent, when it is. */
+  reason?: 'few-chunks' | 'no-usage' | 'all-failed'
+  /** Total credit the runs reported, rounded to 2dp. */
+  credit?: number
+  /** Upstream's own words when the run failed outright. */
+  message?: string
+}
+
+/** The speed endpoint's answer document. */
+export interface WorkBuddyWebTpsAnswer {
+  results: readonly WorkBuddyWebTpsResult[]
 }
 
 /** Why one account is currently out of the pool. */

@@ -56,6 +56,7 @@ import {
   WORKBUDDY_POOL_PATH,
   WORKBUDDY_POOL_ACCOUNT_PARAM,
   WORKBUDDY_PROBE_PATH,
+  WORKBUDDY_TPS_PATH,
   WORKBUDDY_TRANSFER_PATH,
   WORKBUDDY_ACCOUNT_CREDITS_PATH,
   WORKBUDDY_USAGE_PATH,
@@ -72,6 +73,8 @@ import type {
   WorkBuddyWebPoolExclusion,
   WorkBuddyWebProbeOutcome,
   WorkBuddyWebProbeResult,
+  WorkBuddyWebTpsAnswer,
+  WorkBuddyWebTpsResult,
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from './status-paths.ts'
@@ -83,6 +86,7 @@ export {
   WORKBUDDY_OAUTH_PATH,
   WORKBUDDY_POOL_PATH,
   WORKBUDDY_PROBE_PATH,
+  WORKBUDDY_TPS_PATH,
   WORKBUDDY_TRANSFER_PATH,
   WORKBUDDY_USAGE_PATH,
 }
@@ -160,6 +164,23 @@ export interface WorkBuddyStatusRouteOptions {
     modelIds: readonly string[],
     options?: { signal?: AbortSignal },
   ): Promise<readonly WorkBuddyWebProbeResult[]>
+  /**
+   * Measure OUTPUT SPEED for each named model of a region (issue #92).
+   *
+   * Separate from {@link probeModels} because it answers the opposite question
+   * with the opposite request shape: tiny input, long output. The availability
+   * probe's `max_tokens: 1` means its `elapsedMs` is time-to-first-token and
+   * carries no rate information at all.
+   *
+   * Costs a fraction of a probe per model (measured `credit 0.01`–`0.15` against
+   * `0.72`), because this gateway prices by INPUT. It still spends real credit,
+   * so it stays one model per click like every other spending route.
+   */
+  measureTps?(
+    region: WorkBuddyRegion,
+    modelIds: readonly string[],
+    options?: { signal?: AbortSignal },
+  ): Promise<readonly WorkBuddyWebTpsResult[]>
   /**
    * The region's next monthly quota refresh, when the upstream declares one.
    *
@@ -1395,6 +1416,39 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         }
       },
     })
+    const disposeTps = ctx.webServer.register({
+      kind: 'exact',
+      path: WORKBUDDY_TPS_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (deps.measureTps === undefined) return json(res, 503, { error: 'tps measurement unavailable' })
+        const region = requestRegion(req, res)
+        if (region === undefined) return
+        try {
+          const body = await readJsonBody(req) as { modelIds?: unknown }
+          const modelIds = Array.isArray(body.modelIds)
+            ? body.modelIds.filter((id): id is string => typeof id === 'string' && id !== '')
+            : []
+          if (modelIds.length === 0) return json(res, 400, { error: 'modelIds must be a non-empty array of strings' })
+          // One model per request, for the same reason the probe route enforces
+          // it: a speed run is THREE real requests, and a batch routed through
+          // one call would turn a stale bundle into an unaccounted spend over a
+          // whole roster. The card's sweep loop lives on the client side.
+          if (modelIds.length > 1) {
+            return json(res, 400, { error: 'a tps measurement accepts exactly one model' })
+          }
+          const results: WorkBuddyWebTpsResult[] = []
+          for (const modelId of modelIds) {
+            results.push(...await deps.measureTps(region, [modelId]))
+          }
+          const answer: WorkBuddyWebTpsAnswer = { results }
+          json(res, 200, answer)
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
     const disposePool = ctx.webServer.register({
       kind: 'exact',
       path: WORKBUDDY_POOL_PATH,
@@ -1796,6 +1850,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       disposeUsage()
       disposeAccountCredits()
       disposeProbe()
+      disposeTps()
       disposePool()
       disposeOAuth()
       disposeTransfer()
