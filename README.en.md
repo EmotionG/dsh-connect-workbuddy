@@ -41,6 +41,7 @@ A [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) bund
 - **Multi-candidate credential paths** — probes the platform defaults for macOS / Windows / Linux in turn, overridable by environment variable or directly in the card. **When nothing is found, the card lists which paths were probed and why each one failed**: five distinct reasons (absent / unreadable / no usable token / encrypted with no key available / belongs to the other region), so the easiest case to misdiagnose — signed in, but the desktop app is not present — says the app must be there instead of telling you to sign in again. The **belongs to the other region** reason is different in kind: that sign-in is real and usable, it is simply filed under the other tab, so the card states the fix outright — switch tabs, no need to sign in again. The list says it once: the paragraph states the conclusion, the collapsed list supplies the per-path detail, and the two never repeat each other.
 - **Secure loopback shim** — one random port + in-process random secret per region; the real WorkBuddy token is never handed to pi-ai.
 - **Command-line diagnostics** — `status` / `doctor` / `logout`, reporting sign-in and credits per region, without a browser.
+- **CLI route (optional, off by default)** — dressing requests up as a CodeBuddy client to clear the gateway's channel check is an arms race, and it has already produced account-level restrictions (code 11140 in issue #98). There is another route that disguises nothing: let **the signed-in CodeBuddy CLI on this machine do the work itself** — it really is CodeBuddy, so there is no identity to forge. Turning on `cliBridge.enabled` adds a `codebuddy_ask` tool and a `/codebuddy` command, letting the CLI read files, run git and edit code, then hand the conclusion back. With it off, the plugin behaves **exactly** as before. See [CLI route](#cli-route-optional-let-codebuddy-do-the-work).
 
 ## How it works
 
@@ -272,6 +273,69 @@ dsh plugin --profile web exec dsh-connect-workbuddy status
 > `Desktop auth file: present` means the file was found; if `status` still reports not-signed-in while `Encrypted-credential support` is `unavailable` (no app on the server), that is the encrypted-credential-without-key case — carrying the file over cannot fix it.
 
 > 🔒 **The credential is the account**: that file is a directly usable session. Transfer it over an encrypted channel (`scp` / private network), tighten it with `chmod 600` once on the server, and keep it out of anything that gets packaged or committed.
+
+## CLI route (optional): let CodeBuddy do the work
+
+> Off by default (`cliBridge.enabled: false`). With it off the plugin behaves **exactly** as before: no extra tool, no extra command, no extra request.
+
+This route does not use CodeBuddy as a model provider but as a **tool**: the plugin offers a `codebuddy_ask` tool and a `/codebuddy` command, and the signed-in CodeBuddy CLI on this machine runs one real task in its own process — reading files, running `git`, editing code — then hands the conclusion back.
+
+**Why the route exists.** The provider route has to make requests look like a CodeBuddy client to clear the gateway's channel check. Since 4.15.x that check has escalated to an exact substring match against the *middle* of the prompt, dodged by inserting zero-width spaces at sentence boundaries — an arms race that is no longer free: issue #98 reports **account-level** restrictions (`code 11140`, "账号存在异常行为，已被限制使用"). The CLI route has none of that exposure — the process talking to the gateway really *is* the signed-in CodeBuddy CLI — so it keeps working when the disguised route is blocked.
+
+### Prerequisites
+
+- The CodeBuddy CLI is installed (`codebuddy` or `cbc`; point `cliBridge.binary` at it if it lives elsewhere).
+- It is signed in. The plugin looks for a credential in this order: the `CODEBUDDY_AUTH_TOKEN` environment variable, then **the vault this plugin already maintains** (`$DSH_HOME/workbuddy-vault/<region>/<account>.json`). In other words, **the account you signed into for this plugin is reused as-is — you do not sign in again.**
+- Region beats freshness: a CN token works against `copilot.tencent.com`, an international one gets 401 there. Hence the default order `cn,global`, moving to the next only when one fails.
+
+### Turn it on
+
+```jsonc
+{
+  "cliBridge": {
+    "enabled": true
+  }
+}
+```
+
+Every other key has a default. The full list is the table below.
+
+### Two entrances
+
+| Entrance | Triggered by | Working directory | Whose quota |
+| --- | --- | --- | --- |
+| `codebuddy_ask` tool | the model, on its own | whatever the caller passes as `working_dir`, else `cliBridge.workingDir` | DSH model tokens + CodeBuddy quota |
+| `/codebuddy` command | the user | **the current session's workspace, automatically** | CodeBuddy quota only |
+
+An **empty** `/codebuddy` asks CodeBuddy to review the uncommitted changes in the current workspace (that invocation forces the read-only `plan` permission mode); **any text** is sent through verbatim.
+
+When it finishes, the conclusion is **injected back into the session model** (`cliBridge.injectResult`, on by default): an idle session is woken for a new turn, a running one gets it queued onto its next step. So the model knows what just happened and can build on it — without that step, `/codebuddy` would be a command you ran in secret while the model stayed unaware.
+
+### Settings
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | The only switch. With `false` this route registers nothing. |
+| `binary` | `''` | CLI executable name or path; empty auto-detects `codebuddy` / `cbc`. An explicit path is taken **literally** and never swapped for another. |
+| `model` | `''` | Passed as `--model`; empty uses the CLI's own default. |
+| `permissionMode` | `acceptEdits` | `default` / `acceptEdits` / `bypassPermissions` / `plan` / `dontAsk` / `auto`. |
+| `effort` | `''` | `--effort`: `minimal` / `low` / `medium` / `high` / `xhigh` / `max`; empty uses the CLI default. |
+| `maxTurns` | `10` | Per-task CLI turn ceiling (hard cap 100). |
+| `timeoutSecs` | `900` | Per-task wall-clock timeout in seconds (hard cap 1800). |
+| `regionOrder` | `cn,global` | Credential region priority. |
+| `workingDir` | `''` | Default working directory for the tool entrance. The `/codebuddy` command ignores it — it has the session workspace. |
+| `appendSystemPrompt` | `''` | Appended to the CLI's system prompt; empty appends nothing. |
+| `allowUnattended` | `false` | Allow falling back to a scratch directory when there is **no** working directory at all. Off by default: the CLI can read and write, and should not run somewhere nobody named. |
+| `maxReplyChars` | `60000` | Maximum characters handed back to the session model; longer replies are truncated with a note (hard cap 400000). |
+| `injectResult` | `true` | Whether `/codebuddy` injects its conclusion back into the session model. |
+
+### Boundaries
+
+- **No shared context.** CodeBuddy is a separate agent and cannot see this conversation. It suits "review this one area" or "run one investigation"; it does not suit "continue the thread I was just on" — it would have to re-read the repository to get there.
+- **It can write.** `acceptEdits` is the default and it really will edit files. For read-only, set `permissionMode` to `plan`.
+- **The tool entrance has no session workspace.** The Host does not pass the session cwd to plugin tools, so `codebuddy_ask` must be given a directory (or you set `workingDir`); otherwise it **refuses and names the three ways out** rather than quietly running in the Host's process directory. The `/codebuddy` command does not have this problem — commands do receive the session workspace.
+- **Two separate ledgers.** CodeBuddy CLI quota and DSH model quota are different things. The command spends no DSH model tokens but still spends CodeBuddy quota.
+- **A restart is required.** A new bundle and any JS change only take effect after the DSH host restarts.
 
 ## Command line
 

@@ -48,6 +48,7 @@
 - **凭据路径多候选** —— macOS / Windows / Linux 逐一探测默认位置，也支持环境变量与卡片内直接指定。**未登录时卡片会列出「探测过哪些路径、各自为什么没成」**：五档原因（不存在 / 读不了 / 没有可用 token / 字段已加密且拿不到密钥 / 属于另一个地区）分开呈现，因此「已经登录了、但桌面 App 不在场」这种最容易误判的情况会明说需要 App 在场，而不是叫你重新登录一次。**属于另一个地区**那一档尤其不同：登录信息是真实可用的，只是挂在另一个标签页下，卡片会直接给出结论「切换标签页即可，不用重新登录」。列表只讲一次——提示段落说结论，折叠列表给路径细节，两处不重复同一件事。
 - **安全 loopback shim** —— 每区域一个随机端口 + 进程内随机 secret，真实 WorkBuddy token 不交给 pi-ai。
 - **命令行诊断** —— `status` / `doctor` / `logout`，按区域报告登录与积分，无需浏览器即可确认宿主状态。
+- **CLI 路线（可选，默认关闭）** —— 伪装成 CodeBuddy 客户端过渠道校验是一条军备竞赛的路，而且已经出现账号级限制（issue #98 的 code 11140）。另有一条路不伪装：让**本机已登录的 CodeBuddy CLI 自己跑任务**——它真的就是 CodeBuddy，没有身份要伪造。打开 `cliBridge.enabled` 后插件多出 `codebuddy_ask` 工具和 `/codebuddy` 指令，由 CLI 读文件、跑 git、改代码，再把结论交回来。关闭时插件行为与之前**完全一致**。详见 [CLI 路线](#cli-路线可选让-codebuddy-直接干活)。
 
 ## 工作原理
 
@@ -282,6 +283,69 @@ dsh plugin --profile web exec dsh-connect-workbuddy status
 > `Desktop auth file: present` 说明文件找到了；此时若 `status` 仍报未登录、而 `Encrypted-credential support` 为 `unavailable`（服务器上没有 App），那就是加密凭据 + 缺密钥的场景——搬运救不了它。
 
 > 🔒 **凭据等同于账号**：这份文件里是可直接使用的登录态。传输时请走加密通道（`scp` / 私网），落到服务器后用 `chmod 600` 收紧权限，别放进任何会被打包或提交的目录。
+
+## CLI 路线（可选）：让 CodeBuddy 直接干活
+
+> 默认关闭（`cliBridge.enabled: false`）。关闭时插件的行为与之前**完全一致**：不多一个工具、不多一条指令、不多一个请求。
+
+这条路不把 CodeBuddy 当模型提供方，而是当**工具**：插件提供一个 `codebuddy_ask` 工具和一条 `/codebuddy` 指令，由本机已登录的 CodeBuddy CLI 在自己的进程里跑一轮真实任务——读文件、跑 `git`、改代码——再把结论交回来。
+
+**为什么会有这条路。** 提供方那条路必须让请求看起来像 CodeBuddy 客户端才能过网关的渠道校验。4.15.x 起那条校验已经升级成「按提示词中段做精确子串匹配」，靠句读处插零宽空格躲开——这是军备竞赛，而且不再免费：issue #98 里已经出现**账号级**限制（`code 11140`，「账号存在异常行为，已被限制使用」）。CLI 路线没有这层暴露——跟网关说话的那个进程**真的是**登录着的 CodeBuddy CLI——所以伪装那条路被封的时候，它还能用。
+
+### 前提
+
+- 本机装了 CodeBuddy CLI（`codebuddy` 或 `cbc`；装在别处就用 `cliBridge.binary` 指路径）。
+- 它已登录。插件按这个顺序找凭据：环境变量 `CODEBUDDY_AUTH_TOKEN` → 本插件**已经维护的**那份 vault（`$DSH_HOME/workbuddy-vault/<region>/<account>.json`）。也就是说，**你为了用这个插件登录过的账号，CLI 路线直接复用，不需要再登录一次。**
+- 区域**优先于新鲜度**：国内账号的令牌对 `copilot.tencent.com` 有效，国际版的令牌在那边会 401。所以默认顺序是 `cn,global`，某个区域失败才换下一个。
+
+### 打开
+
+```jsonc
+{
+  "cliBridge": {
+    "enabled": true
+  }
+}
+```
+
+其余键都有默认值，不写就是默认。完整的键见下表。
+
+### 两个入口
+
+| 入口 | 谁触发 | 工作目录 | 花谁的额度 |
+| --- | --- | --- | --- |
+| `codebuddy_ask` 工具 | 模型自己决定调用 | 由调用方传 `working_dir`；不传就用 `cliBridge.workingDir` | DSH 模型的 token + CodeBuddy 的配额 |
+| `/codebuddy` 指令 | 用户敲 | **自动取当前会话的工作区** | 只花 CodeBuddy 的配额 |
+
+`/codebuddy` 后面**留空** = 让 CodeBuddy 评审当前工作区里未提交的改动（这种调用强制只读的 `plan` 权限模式）；**写了字** = 原样把这句话发过去。
+
+跑完之后结论会**回注给会话模型**（`cliBridge.injectResult`，默认开）：会话空闲时直接唤醒它起一轮，正在跑就排进它的下一步。所以模型知道刚才发生了什么，能接着用这份结论——这一步不做的话，`/codebuddy` 就只是「你偷偷跑了个命令」，模型全程不知情。
+
+### 配置
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 唯一的开关。`false` 时这个路由什么都不注册。 |
+| `binary` | `''` | CLI 的可执行文件名或路径；留空自动探测 `codebuddy` / `cbc`。显式给的路径**按字面使用**，不会被换成别的。 |
+| `model` | `''` | 传给 `--model`；留空用 CLI 自己的默认模型。 |
+| `permissionMode` | `acceptEdits` | `default` / `acceptEdits` / `bypassPermissions` / `plan` / `dontAsk` / `auto`。 |
+| `effort` | `''` | `--effort`：`minimal` / `low` / `medium` / `high` / `xhigh` / `max`；留空用 CLI 默认。 |
+| `maxTurns` | `10` | 单次任务的 CLI 轮数上限（硬上限 100）。 |
+| `timeoutSecs` | `900` | 单次任务的墙钟超时，秒（硬上限 1800）。 |
+| `regionOrder` | `cn,global` | 凭据区域的优先顺序。 |
+| `workingDir` | `''` | 工具入口的默认工作目录。`/codebuddy` 指令不看它——指令有自己的会话工作区。 |
+| `appendSystemPrompt` | `''` | 追加到 CLI 系统提示末尾；留空不追加。 |
+| `allowUnattended` | `false` | 允许在**没有任何工作目录**时退回一个临时目录。默认关：CLI 有读写权限，不该在没人指定的目录里跑。 |
+| `maxReplyChars` | `60000` | 交回给会话模型的最大字符数，超出截断并注明（硬上限 400000）。 |
+| `injectResult` | `true` | `/codebuddy` 跑完后是否把结论回注给会话模型。 |
+
+### 边界
+
+- **不共享上下文。** CodeBuddy 是另一个 agent，它看不到这段对话。它适合「独立审一块代码」「跑一轮调查」；不适合「接着我刚才那个思路改」——那种事它得自己重新把仓库读一遍。
+- **它有写权限。** 默认 `acceptEdits`，它真的会改文件。只想让它看，就把 `permissionMode` 设成 `plan`。
+- **工具入口拿不到会话工作区。** 宿主目前不把会话 cwd 传给插件工具，所以 `codebuddy_ask` 必须由调用方给目录（或你在配置里设 `workingDir`）；都没有就**拒绝并说明三条出路**，不会默默在宿主的进程目录里跑。`/codebuddy` 指令没有这个问题——指令能拿到会话自己的工作区。
+- **两套账。** CodeBuddy CLI 的配额和 DSH 的模型额度是两回事。走指令不花 DSH 模型的 token，但照样花 CodeBuddy 的配额。
+- **要重启。** 新增的 bundle 与 JS 改动都要重启 DSH 宿主才生效。
 
 ## 命令行
 
