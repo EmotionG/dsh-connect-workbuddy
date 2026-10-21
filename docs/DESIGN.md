@@ -34,9 +34,11 @@
    - chat：`POST {base}/v2/chat/completions`，base 由 `domain` 决定（`workbuddy.ai` → global，否则 cn → `copilot.tencent.com`）
    - 强制 `stream: true`（上游拒绝非流式）；`tool_choice` 从 OpenAI 对象形态压成上游要的字符串
    - **`11128` 是网关的一组门，不是一个原因。** 首条不是 system、`developer` 角色、缺 conversation 三件套（issue #66）、`system` 消息**开头**命中「已知第三方 agent 提示」清单，都回同一个业务码，而 `displayTips` 一律写成「渠道校验 / 不是官方客户端发出的」——误导性文案已在两次事件里各骗过一次。前三条分别由 `ensureSystemHead()` / `prepareChatBody()` 的 role 改写 / `conversationHeaders()` 处理；最后一条是内容前缀匹配（CN 实测拦 `You are an AI agent powered by DeepSeek Harness` 与 Claude Code，国际拦 Claude Code），由 `prepareChatBody()` 在命中者最前面补一行 `You are a helpful assistant.`，未命中的 body 逐字节不动。清单是**实测快照**，不是理论：测法、边界（只看开头、大小写不敏感、每条 system 都扫）见 `src/upstream.ts` 的 `UNAPPROVED_CHANNEL_OPENINGS` 注释
+   - **同一族码的三道门只能靠 body 区分**（4.13.2）。既然 `11128` 有三个来源、而 `displayTips` 对三者**一字不差**，那句话就永远不是判据。所以「提示开头命中」这一道在错误分类里**单独成类**（`channel_reject`），判据要**两半同时**成立：body 里有 `"code":11128` **且** `msg` 的措辞命中（`unapproved channel` / `illegal api invocation`）；另外两道门（`conversation id missing`、`first message is not system prompt`）**显式排除**——认错会让读者去改写一条根本没问题的 system 提示，比通用回复更糟。**只认 `msg`、绝不认 `displayTips`**：那句托词是全族共用的，认它等于把三道门混成一道
+   - **这类失败的三条行为都跟着「拒的是提示词，不是账号」走**：不换号（闸读的是每条账号都会发的同一句开头，换号只会晚一轮拿到同一个 11128，还烧真实额度）、不把账号踢出池（与 `policy-rejected` 同处理：测量照记，账号仍是候选）、探针与账号表用各自的文案（`channel-rejected`，语气 `warn` 而非 `bad`——账号没问题）。**证据在请求里而不在回复里**，所以这一类额外回显**实际发出去的** system 提示开头（`systemOpeningsOfBody()` 取归一化之后的那份 body，每条 system 取第一行、最多 3 条、每条截到 120 字符）——「上游拒绝了」与「上游因为这一行拒绝了」之间，差的就是这句
    - CLI 形态请求头：`X-User-Id` / `X-No-User-Id`、`X-Enterprise-Id` / `X-No-Enterprise-Id`、`X-Domain` / `X-No-Department-Info`、`X-Product: SaaS`
    - 刷新走独立的 `X-Refresh-Token` 头；**chat 请求绝不携带 refresh token**（原版注释标为安全红线）
-   - 错误分类：`hard_credit` / `soft_rate` / `model_busy` / `session_dead` / `policy_reject` / `not_found` / `server` / `client`，含中英文额度不足标记。`model_busy`（14003）与积分、账号无关、且是**暂时**的，因此与 `soft_rate`（6004，重置在几小时后）**必须区别对待**——见 §3.4 的「错误呈现」
+   - 错误分类：`hard_credit` / `soft_rate` / `model_busy` / `session_dead` / `policy_reject` / `channel_reject` / `not_found` / `server` / `client`，含中英文额度不足标记。`model_busy`（14003）与积分、账号无关、且是**暂时**的，因此与 `soft_rate`（6004，重置在几小时后）**必须区别对待**——见 §3.4 的「错误呈现」
 
 3. **shim 加固**（`shim.ts`）—— 全部保留
    - 随机端口 + 进程内随机 secret（`randomBytes(32).toString('base64url')`），`timingSafeEqual` 常量时间比对
@@ -226,6 +228,7 @@ uin <B> (<账号乙>): catalog HTTP 200, 28 models, 16 cli, credits total=0
   - `model_busy` **不翻译**（拼写成自己的名字）。文本里只剩 `429` ⇒ 宿主读作 `RATE_LIMIT` ⇒ 文案保留插件那句，**且**进入原地重试集合，由 `dsh-llm-retry` 有界重试几次。这正是 issue #84 报告的「模型繁忙显示成额度已用尽 + 请求重试」两件事的正解。
   - `soft_rate` **翻译成 `quota_exceeded`**：它的 6004 重置在几小时后，重试预算换不出答案，必须继续挡在重试集合外。
   - `hard_credit` **不翻译**：报文里就有 `Credits exhausted`，`isQuotaExceededError` 自然命中 ⇒ `QUOTA`，宿主的终局文案此时是**对的**。
+  - `channel_reject`（4.13.2）**也不翻译**，且**刻意不写成任何含英文限流措辞的形状**：它的中文文案里出现「额度」「积分」这些词是事实陈述（「与账号、积分、额度、网络都无关」），而宿主那几条 quota 正则全是英文的，所以不会被误判成额度失败——这条由 `tests/issue90-channel-reject.spec.ts` 用**宿主自己的** `isQuotaExceededError()` 钉住（真实 pi-ai 客户端打真实 shim）。它的 400 落在 `INVALID_REQUEST`，**不在**宿主原地重试集合（`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`）里，这也是对的：闸对同一段提示的判决是确定的，重试只是把同一串字节再发一遍。
 
   同一个 HTTP 429 有两种相反的时间判断，所以**拼写跟的是时钟，不是状态码**。回归：`tests/issue84-model-busy-not-quota.spec.ts` 用真实 pi-ai 客户端打真实 shim，把产出的文本交给**宿主自己的** `isQuotaExceededError()` 断言。
 - **区域开关**（对齐 trae 的 issue #11）：每个 tab 一个勾选框，取消即 `AdapterRegistrationHandle.replace([])` + `DirectoryRegistrationHandle.replace([])`，把该供应商从选择器与「设置 → 模型」页**彻底摘除**（不是只藏 tab）。改动只落在 `regions.<region>.enabled` 一个字段上，其余槽位原样带过。
