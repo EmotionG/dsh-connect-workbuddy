@@ -1,11 +1,21 @@
 # Changelog
 
-## Unreleased
+## 5.5.1 (2026-10-23)
+
+> 补丁版本：修「账号池状态重启就失效」的根因，以及同一症状的另外三处（手动排序箭头、`regionsMapOf` 跳层读旧副本、卡片保存把脏数据带回去）。**没有新增任何功能**：请求路径、provider 路由、模型目录、计费与凭据一律未变，5.5.0 的全部能力原样保留。
+> **本版会主动改写一个设置字段的形状**：被 5.4.0–5.5.0 写脏的 `regions` 字段会在**开机时**被清洗一次（只动形状，不动任何区域内容，干净 profile 不写）。如果你正是「账号池重启就失效」的受害者，升级后重启一次即可恢复，**不需要手动改 profile**；国际版整槽沉到第 4 层的情况也会被捞回来（本机实测 3 个成员与 27 个模型目录）。
 
 ### Fixes
 
 - **排序箭头在「账号池还没保存开启」时不出现 —— 先勾选再排序这条自然路径被堵死。** `AccountPool.tsx` 的 `moveEnabled` 读的是**已保存**的 `pool.enabled`，而同一行旁边的 `isMember` 读的却是**草稿** `active.memberAccountIds`。于是：勾选账号入池（草稿变了）→ 想去排序 → **箭头根本不存在**，因为开关还没保存；用户既看不到箭头，也就没有理由去按保存，下一次保存自然「什么都没写」——这正是「手动排序没保存」的实际形态。改成读草稿的 `active.enabled`：箭头描述的是草稿，就该跟着草稿走（报告运行中的池仍然是 `poolRunning`，那个值没有动）。变异验证：改回 `pool.enabled`，新增用例立刻红（期望 4 个箭头、实际 0 个）。
 - **`regionsMapOf()` 会跳到更深一层，读到同名区域的过期副本。** 旧规则是「只要有 `regions` 键就往下跳」，理由是可以同时接受「整份 settings」和「regions map」两种入参。但 regions **map 自己也可能有 `regions` 键** —— 本机真实 profile 里 `config.regions` 下就躺着 `accounts` / `regions` / `cliBridge` 三个旧写入留下的兄弟键。一旦跳下去，读到的就是**另一份更旧的同名区域**：实测同一份文档，「按 section 读」得到 `['c','a','b']`，「按 map 读」得到 `[]`（正是「排序明明存了却读不出来」）。现在改为**按形状判定**：外层对象只要含有区域 id（`cn` / `global`）就是 map，直接用它；否则才是 section，才往里跳。变异验证：把判定换回无条件跳，新增用例立刻红。
+- **「账号池状态重启就失效」的根因：目录修复把整份 settings 写进了 `regions` 字段。** 上一条修的是**读**，这一条修的是**造出那份脏数据的写**。`writeRegionCatalog()` 用 `{ op: 'set', path: ['regions'] }` 写回目录，所以它的值必须是 `regions` **字段**；但它把 `describe().value`（**整份 section**：`{authFile, accounts, regions, cliBridge, …}`）交给了 `mergeRegionCatalog()`，而后者把入参当字段读、又原样展开写回。结果每次开机目录修复都把 section 写进字段：真正的区域表被推到下一层 `regions` 键里，`accounts` / `cliBridge` 成了两个假区域槽，于是宿主 `regionStateOf(config, 'cn')`（只读一层）读到的是**空** —— 账号池开关、成员、手动排序、目标模型、模型选择全部「看起来没保存」，下次保存再把这份空写回去。每次开机多一层：本机实测 5 层、字段 103 KB（其中 3 层是纯拷贝）。修法：`mergeRegionCatalog()` 统一走 `regionsMapOf()`（接受 section 或字段），返回值恒为字段本身；`regionStateOf()`、设置保存端点 `__save`、卡片各写路径的合并基点、以及 `readOrderAccountIds()` 全部改走同一个窄化函数。
+  - **脏 profile 不靠人手修**：`regionsMapOf()` 现在同时做三件事 —— 丢掉 section/槽位的兄弟键名拷贝；把只活在下层的区域**捞回来**（本机 `global` 就是这种情况：外层 `cn` 还在、国际版整槽只在下一层，不捞就等于让第一次写入删掉用户的国际版池）；「在表里的区域」仍然以外层为准，且当多个深层副本都有同一区域时按**用户配置量**取舍而不是按深浅（本机就有 `{lastCatalog}` 的空壳副本躺在一个仍有 3 个成员的真副本上面 —— 按深浅会捞回空壳）。修复写仍只在目录指纹变化时触发，但**字段脏时也写一次**，否则「目录恰好一致」的 profile 永远等不到打扫。
+  - **修复写不再「只在目录变了才写」**：目录指纹相同时，只要 `Config['regions']` 还带兄弟键名就照写一次（`regionsFieldIsCorrupt()`），否则「目录恰好与上游一致」的 profile 永远等不到打扫 —— 那种 profile 的脏数据会活得比产生它的 bug 还久。写一次即净，之后这条分支不再触发。
+  - **开机再补一次独立清洗**（`healRegionsField()`）：上面那条挂在「拿到实时模型目录」之后，于是关掉的区域、断网启动、上游空回答这三种情况都不会清洗。新增一次纯形状写入 —— 不需要上游、不碰任何区域内容、干净 profile 直接返回不写（只扫一遍键名），失败只记 warn（读侧本来就已是对的）。
+  - **代价控制在请求路径上**：`regionStateOf()` 现在是每次请求都会走的读（池开关、模型选择、额度门控），而 heal 会深拷贝整份字段（每区一份多模型目录）。实测 28 模型槽位：不做快路径是 **11 µs/次**（原来裸读 0.05 µs），加「干净字段原样返回」的快路径后回到 **0.09 µs**；脏字段 0.86 µs 且只到 profile 被写入修复为止。快路径的成立条件写在代码注释里（只有**字段本身**是 volatile，槽内是普通数据），并用同引用断言（`toBe`）钉住，防止以后被顺手删掉。
+  - **实测（本机真实 profile）**：修复前该字段 5 层嵌套、103 KB；用新 `mergeRegionCatalog()` 对同一份 section 重算，输出恰为 `['cn','global']`，13 KB；`cn` 保住 `pool.enabled=true` / `step-5-preview` / **8 个成员**，`global` 从下层捞回 `pool.enabled=true` / `deepseek-v4.1-flash` / **3 个成员**与 27 个模型目录。另有「主动清空」的保护：外层已显式写成 `null`（schemastery 把 `{}` 简化成 `null`）时不再从下层捞，否则会把用户清掉的池子复活。
+  - **变异验证（六处，逐个改回旧行为都必红）**：①`mergeRegionCatalog()` 改回「把入参当字段」→ `catalog-write.spec.ts` 红 4 条；②`regionStateOf()` 改回单层裸读 → `region.spec.ts` 红（`global` 读成空）；③`__save` 改回对原始字段合并 → `web-status.spec.ts` 红（写回的值里出现 `regions` 兄弟键、`global` 消失）；④卡片写路径改回直接展开原始快照 → `client-account-selection.spec.ts` 红；⑤删掉快路径 → `region.spec.ts` 的同引用断言红；⑥删掉开机清洗的脏判断 → `catalog-write.spec.ts` 的「干净字段不写」红。新增 24 条测试（`catalog-write.spec.ts` 13 条、`region.spec.ts` 8 条、`web-status.spec.ts` / `client-account-selection.spec.ts` / `manual-order.spec.ts` 各 1 条）。
 
 ### Docs
 
