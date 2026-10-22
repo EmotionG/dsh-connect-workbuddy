@@ -107,6 +107,17 @@ export const WORKBUDDY_PROVIDERS: Readonly<Record<WorkBuddyRegion, string>> = {
 export const WORKBUDDY_MODEL_IDENTITY = 'workbuddy'
 
 /**
+ * The api string `dsh-llm-pi-ai` stamps on a replayed message it could not
+ * rebuild natively (`foreignAssistant()`), i.e. a message that went through the
+ * host's fallback path rather than this plugin's own request builder.
+ *
+ * It is the ONLY api value {@link alignAssistantIdentities} repairs, because it
+ * is the only one that proves the field is a host marker instead of a shape this
+ * plugin really produced.
+ */
+const HOST_FOREIGN_API = 'dsh-foreign'
+
+/**
  * Registry keys an adapter serving `providerId` must publish so that every
  * stamp its models carry resolves inside its own region (issue #75).
  *
@@ -614,12 +625,33 @@ function transcript<T>(context: Context): T {
  * or the destination changes: `baseUrl` comes from the model, not from the
  * message.
  *
- * Only `provider` is rewritten. `api` is left alone on purpose: a legacy
- * (`dsh-foreign`) message carries an api this plugin never sends, and claiming
- * `openai-completions` for it would assert a wire shape that message was never
- * built for. The `provider` mismatch is what decides the downgrade, and fixing
- * it is enough — `isSameModel` still requires the model id and api to match, so
- * a genuinely different model keeps degrading (covered by a test).
+ * `provider` alone is NOT enough, because the HOST drops the message to
+ * `api: 'dsh-foreign'` first. `dsh-llm-pi-ai`'s `replayedAssistant` rejects a
+ * replay whose recorded provider differs from `source.provider` and falls back
+ * to `foreignAssistant()`, which stamps `api: 'dsh-foreign'` and takes
+ * `provider` from `source.provider` — the ROUTE id. That is why the provider
+ * mismatch is not merely cosmetic: it also costs the message its native api, and
+ * `isSameModel` then fails on the SECOND comparison even after `provider` is
+ * repaired. Measured on a real 0.2.1-rc.2 global session, aligning `provider`
+ * only still flattened a 1514-character thinking block into 1514 characters of
+ * text; aligning both restored `thinking`.
+ *
+ * So `api` is repaired too, but ONLY from the one value that proves it is a
+ * host fallback and not this plugin's own wire format: `dsh-foreign`. Any other
+ * api is left exactly as it is.
+ *
+ * WHY THAT IS NOT FORGING A SIGNATURE. A `foreignAssistant()` message carries
+ * thinking blocks with NO `thinkingSignature` (`dsh-llm-pi-ai` builds them as
+ * `{type:'thinking', thinking}`), and pi-ai's request builder only emits
+ * `reasoning_content` when a signature exists
+ * (`api/openai-completions.js`, the `if (signature && isOpenAICompletionsReasoningField(...))`
+ * branch). The block is therefore OMITTED from the request, never replayed as
+ * signed reasoning — the same thing that happens today, minus the visible text.
+ * The message's own `api` field is not read by the request builder at all
+ * (grep: only `model.api` is), so this changes no wire shape.
+ *
+ * A genuinely different model still degrades: `isSameModel` continues to
+ * require the model id to match (covered by a test).
  *
  * Returns the same object when nothing changed, so the common case (an
  * already-normalized transcript) allocates nothing.
@@ -632,9 +664,16 @@ export function alignAssistantIdentities(context: Context, identity: string = WO
     if (typeof message !== 'object' || message === null) return message
     const record = message as unknown as Record<string, unknown>
     if (record['role'] !== 'assistant') return message
-    if (record['provider'] === identity) return message
+    const providerAligned = record['provider'] === identity
+    // Only the host's own fallback marker is repaired; every other api is the
+    // shape this plugin really sends and must be preserved verbatim.
+    const apiAligned = record['api'] !== HOST_FOREIGN_API
+    if (providerAligned && apiAligned) return message
     changed = true
-    return { ...record, provider: identity } as unknown as typeof message
+    const aligned = { ...record }
+    if (!providerAligned) aligned['provider'] = identity
+    if (!apiAligned) aligned['api'] = 'openai-completions'
+    return aligned as unknown as typeof message
   })
   return changed ? { ...context, messages: next } : context
 }
