@@ -22,7 +22,9 @@
 
 ### Docs
 
-- **三张 README 产品截图换成合成数据的界面复刻**。旧图带着真实账号余额与日期（令牌过期日、积分包到期日、测试时间戳），且按钮文案停在 5.5.0 之前（「一键签到所有账号」「一键测试所有账号」「刷新积分」）。新图由入库的三个可复现源文件渲染（`docs/assets/mock-usage-card.html` / `mock-account-pool.html` / `mock-composer-credits.html`，headless Chrome 截图），账号为「示例账号 A–F」、余额与日期全部虚构、底部标注「合成数据」；README 与 README.en.md 的 alt 文本同步（「一键测试」「合成数据」）。
+- **README 产品截图换成真机图并做隐私处理**。旧图停在 5.5.0 之前（「一键签到所有账号」「刷新积分」等已改名的按钮），且带着真实令牌过期日 / 积分包到期日；本版换成维护者实机截的四张：设置卡「模型」页（`dsh-connect-workbuddy-usage-card.png`，含倍率、图片与可关闭思考开关、`拒绝 off` 标记、活动标签）、账号池（`dsh-connect-workbuddy-account-pool.png`，含「只有可换号的失败才换」的新文案与八行成员表）、输入框积分面板（`dsh-connect-workbuddy-composer-credits.png`，一键测试按钮）与模型选择器（`dsh-connect-workbuddy-model-picker.png`，同一枚活动徽标画在模型名之后）。
+  - **隐私**：账号列每一行的名字格用不透明色块覆盖（不是可复原的马赛克），并逐行用「色块覆盖区内深色像素数 = 0」的脚本复核；积分、签到状态、排序位次与时间戳保留——它们不含身份。
+  - 模型选择器那张只含模型名、倍率与活动文案，没有账号信息。`screenshots.json` 与中英两份 README 的 alt 文本同步。
 
 ## 5.5.1 (2026-10-23)
 
