@@ -1930,6 +1930,13 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
      *
      * No region parameter: a live turn is not scoped to a credential region, and
      * `requestRegion` would 400 a perfectly valid read.
+     *
+     * A 404 is not an option here, and that is a second reason for the
+     * unconditional registration: the chip keeps showing the last document it
+     * read while a poll fails (it cannot tell "the route is gone" from "the
+     * request dropped"), so a route that vanished on a settings change would
+     * leave a ghost pill describing a turn that already ended. Answering an
+     * empty document keeps "off" inside the same code path as "no turns".
      */
     const disposeCliLive = ctx.webServer.register({
       kind: 'exact',

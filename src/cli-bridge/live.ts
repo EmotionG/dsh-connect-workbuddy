@@ -18,6 +18,15 @@
  * where two boards in one process are normal. The caller that owns the runtime
  * owns the board, and the route reads it through the same runtime reference.
  *
+ * THE COST OF THAT CHOICE, stated rather than left to be discovered: a turn that
+ * is already running when the settings change disappears from the readout. The
+ * runner keeps writing into the old board object through its own closure, so
+ * nothing crashes and nothing is corrupted — the pill simply stops mentioning a
+ * turn that is still going, and the tool card remains the record of it. The
+ * alternative (a module singleton) trades that for boards that outlive the
+ * runtime that drives them, which is worse: it would report turns for options
+ * that no longer apply, and it would keep a rebuild from ever starting clean.
+ *
  * WHY COUNTS AND NAMES, NEVER CONTENT. The turn's answer is delivered once, in
  * full, through the tool result. Streaming a partial copy into the composer would
  * be a second, worse copy of a deliverable rendered somewhere nobody asked for —

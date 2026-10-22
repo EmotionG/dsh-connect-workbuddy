@@ -114,6 +114,22 @@ async function until(predicate: () => boolean, label: string, timeoutMs = 3000):
   }
 }
 
+/**
+ * Same, but drains inside `act`.
+ *
+ * Needed when the wait is for a state update the component makes on its own
+ * (the failure-decay test waits for the pill to remove itself): polling with a
+ * bare `setTimeout` lets React commit outside `act` and prints a warning that
+ * would otherwise hide a real one.
+ */
+async function untilAct(predicate: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
+  const started = Date.now()
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}`)
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
+  }
+}
+
 describe('the pill', () => {
   it('renders nothing when no turn is running', async () => {
     stubFetch(() => ({ body: documentOf([]) }))
@@ -160,7 +176,11 @@ describe('the pill', () => {
     // not retroactively capture the interval the effect already armed with the
     // real `setInterval`, and the tick would simply never fire.
     vi.useFakeTimers()
-    const view = await show({ pollMs: 20, tickMs: 20 })
+    // The poll interval must be LONGER than the tick for this test to mean
+    // anything: the cache window follows the poll interval, so a 20ms poll would
+    // legitimately re-ask inside the 1.1s we advance and the stub (which
+    // recomputes `startedAt` per call) would reset the age.
+    const view = await show({ pollMs: 5000, tickMs: 1000 })
     // `settle()` is unavailable here (it drains with `setTimeout`, which is now
     // frozen); a zero-length async advance is what lets the read's promise chain
     // finish and commit the first document.
@@ -199,6 +219,49 @@ describe('the pill', () => {
     const view = await show({ pollMs: 20, tickMs: 20 })
     await view.settle()
     expect(view.text()).toBe('')
+  })
+
+  it('refuses a document with no usable serverTime instead of printing NaNs', async () => {
+    // This is the one that used to be a real defect: `serverTime` missing or a
+    // string made the clock offset NaN, and the pill rendered "NaNs" — a number
+    // that is wrong exactly where the user looks for reassurance.
+    stubFetch(() => ({ body: { turns: [turnOf()], serverTime: 'yesterday' } }))
+    const view = await show({ pollMs: 20, tickMs: 20 })
+    await view.settle()
+    expect(view.text()).toBe('')
+    expect(view.text()).not.toContain('NaN')
+  })
+
+  it('drops a turn whose numbers are missing rather than rendering NaN', async () => {
+    const broken = { ...turnOf(), startedAt: undefined } as unknown as LiveTurnView
+    stubFetch(() => ({ body: { turns: [broken, turnOf({ id: 't-2', toolCalls: 5 })], serverTime: Date.now() } }))
+    const view = await show({ pollMs: 20, tickMs: 20 })
+    await until(() => view.text().includes('5 tools'), 'the surviving turn')
+    // The broken row is gone, so no "+1" and no NaN.
+    expect(view.text()).not.toContain('NaN')
+    expect(view.text()).not.toContain('+1')
+  })
+
+  it('stops describing a turn once the route has failed repeatedly', async () => {
+    // One good document, then a route that has gone away. A pill that kept
+    // showing the last document would describe a finished turn forever, with a
+    // counter that kept growing.
+    let healthy = true
+    stubFetch(() => (healthy ? { body: documentOf([turnOf()]) } : { status: 500, body: { error: 'gone' } }))
+    const view = await show({ pollMs: 20, tickMs: 20 })
+    await until(() => view.text().includes('CodeBuddy'), 'the pill')
+    healthy = false
+    await untilAct(() => view.text() === '', 'the pill to retire itself')
+    expect(view.html()).toBe('')
+  })
+
+  it('puts the working directory in the tooltip, not the label', async () => {
+    stubFetch(() => ({ body: documentOf([turnOf({ workingDir: 'C:/work/my-project/' })]) }))
+    const view = await show({ pollMs: 20, tickMs: 20 })
+    await until(() => view.text().includes('CodeBuddy'), 'the pill')
+    expect(view.html()).toContain('my-project')
+    // The line stays narrow: the directory is only in the title.
+    expect(view.text()).not.toContain('my-project')
   })
 
   it('renders nothing when no fetch implementation is available', async () => {

@@ -335,6 +335,7 @@ So the plugin registers a **live pill** on `conversation.composer.dock` (the row
 - **The seconds tick locally, without extra requests.** The document is polled every 5s; the counter is advanced by a 1s local tick from `startedAt`. Concurrent sessions share **one** in-flight request (module cache + inflight dedupe), so N tabs do not become N polls.
 - **Clock skew is corrected against the host.** `startedAt` is the host's clock; a browser a minute behind would compute a negative age. The document ships `serverTime` and the client derives an offset from it — recomputed **only when a fresh document arrives**, because a cached one carries the old `serverTime` and re-measuring each poll would subtract the elapsed time again and freeze the counter.
 - **The tool count is an approximation.** It counts `tool_use` frames in the CLI's NDJSON; `phase` is `starting` / `running` / `finishing`, and `lastTool` is the most recent tool name. These are progress signals for a human, not a billing figure.
+- **It neither lies nor lingers.** A document whose `serverTime` is not a finite number is discarded whole (otherwise the label would print `NaNs`), and three consecutive failed polls (15s) clear the pill rather than leave a ghost describing a turn that ended. With several turns live it shows the newest and appends `+N`; the directory goes in the tooltip only, because this dock is one line.
 
 > The pill lives in the plugin's client entry (`dsh.client`), so changing it means **rebuilding `lib/client.js` and restarting the Host**, same as host-side code.
 

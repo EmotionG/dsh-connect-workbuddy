@@ -88,16 +88,53 @@ export function resetLiveCache(): void {
   inflight = undefined
 }
 
+/**
+ * Accept a document only if every number the pill does arithmetic on is a real
+ * number.
+ *
+ * The route is our own, so this is not defence against an attacker — it is
+ * defence against a HALF-AGREED wire: a field renamed on the host side, an
+ * `undefined` that `JSON.stringify` drops, or a future route that answers a
+ * different shape. Without the check `serverTime` becomes `NaN`, the clock
+ * offset becomes `NaN`, and the pill renders `NaNs` — a number that is wrong in
+ * the one place a user is looking for reassurance. Dropping the whole document
+ * degrades to "no turn", which is the honest answer when the wire is unreadable.
+ */
+function acceptDocument(value: unknown): LiveSnapshot | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const candidate = value as { turns?: unknown; serverTime?: unknown }
+  if (!Array.isArray(candidate.turns)) return undefined
+  if (typeof candidate.serverTime !== 'number' || !Number.isFinite(candidate.serverTime)) return undefined
+  // Per-turn: `startedAt` and the counters are what the label arithmetic reads.
+  // A turn missing them is dropped rather than rendered as `NaN`; the rest of
+  // the document stays usable.
+  const turns = candidate.turns.filter((turn): turn is LiveTurnView => {
+    if (typeof turn !== 'object' || turn === null) return false
+    const row = turn as Partial<LiveTurnView>
+    return (
+      typeof row.startedAt === 'number' &&
+      Number.isFinite(row.startedAt) &&
+      typeof row.toolCalls === 'number' &&
+      Number.isFinite(row.toolCalls)
+    )
+  })
+  return { turns, serverTime: candidate.serverTime }
+}
+
 /** Read the board, reusing a recent document or a request already in flight. */
-export async function readLive(fetchImpl: typeof fetch, now: number = Date.now()): Promise<LiveSnapshot | undefined> {
-  if (cached !== undefined && now - cached.at < CLI_LIVE_POLL_MS) return cached.document
+export async function readLive(
+  fetchImpl: typeof fetch,
+  now: number = Date.now(),
+  cacheMs: number = CLI_LIVE_POLL_MS,
+): Promise<LiveSnapshot | undefined> {
+  if (cached !== undefined && now - cached.at < cacheMs) return cached.document
   if (inflight !== undefined) return inflight
   inflight = (async (): Promise<LiveSnapshot | undefined> => {
     try {
       const response = await fetchImpl(WORKBUDDY_CLI_LIVE_PATH, { headers: { accept: 'application/json' } })
       if (!response.ok) return undefined
-      const document = (await response.json()) as LiveSnapshot
-      if (!Array.isArray(document.turns)) return undefined
+      const document = acceptDocument(await response.json())
+      if (document === undefined) return undefined
       cached = { at: Date.now(), document }
       return document
     } catch {
@@ -110,6 +147,18 @@ export async function readLive(fetchImpl: typeof fetch, now: number = Date.now()
   })()
   return inflight
 }
+
+/**
+ * How many consecutive failed polls before the pill stops claiming a turn.
+ *
+ * The comment above says the pill "keeps showing the last document until the
+ * next tick", which is right for one dropped request and wrong for a route that
+ * has started answering 500: the pill would then describe a turn forever, with
+ * an elapsed counter that keeps growing. Three intervals (15s) is long enough to
+ * ride out a reload and short enough that a dead route does not leave a ghost on
+ * the composer.
+ */
+export const CLI_LIVE_FAILURE_LIMIT = 3
 
 /**
  * The text of one pill.
@@ -162,13 +211,27 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
   // counter at whatever age the document had when it was fetched.
   const offsetRef = useRef(0)
   const offsetForRef = useRef<number | undefined>(undefined)
+  // Consecutive failed polls. Reset by any document that arrives; once it passes
+  // CLI_LIVE_FAILURE_LIMIT the pill stops describing a turn it can no longer
+  // confirm is still running.
+  const failuresRef = useRef(0)
 
   useEffect(() => {
     if (fetchImpl === undefined) return undefined
     let live = true
     const read = (): void => {
-      void readLive(fetchImpl).then(next => {
-        if (!live || next === undefined) return
+      // The cache window follows the component's own interval, not the module
+      // default: a caller that polls every 20ms (the tests) must not be served a
+      // five-second-old document, and a caller that polls slowly must not re-ask
+      // on every tick.
+      void readLive(fetchImpl, Date.now(), pollMs).then(next => {
+        if (!live) return
+        if (next === undefined) {
+          failuresRef.current += 1
+          if (failuresRef.current >= CLI_LIVE_FAILURE_LIMIT) setDocument(undefined)
+          return
+        }
+        failuresRef.current = 0
         if (next.serverTime !== offsetForRef.current) {
           offsetForRef.current = next.serverTime
           offsetRef.current = next.serverTime - Date.now()
@@ -200,6 +263,12 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
   const elapsedMs = Math.max(0, Date.now() + offsetRef.current - turn.startedAt)
   const label = liveLabel(turn, elapsedMs, t)
   const extra = turns.length > 1 ? ` +${String(turns.length - 1)}` : ''
+  // The board is host-wide, so several sessions share one document and the pill
+  // always describes the newest turn — possibly one started from another tab.
+  // The directory's last segment goes in the tooltip so a user with two sessions
+  // open can tell which project the line is about without widening the pill.
+  const dirTail = turn.workingDir.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
+  const title = dirTail === '' ? `${label}${extra}` : `${label}${extra} · ${dirTail}`
 
   return (
     <span
@@ -208,7 +277,7 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
       // screen-reader user mid-sentence.
       role="status"
       aria-label={t('cliLive.aria', { detail: label })}
-      title={`${label}${extra}`}
+      title={title}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
