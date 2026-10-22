@@ -415,6 +415,8 @@ export const en = {
   // The image tool is the ONE capability where the model spends on its own
   // (about 5.71 credits a picture, no per-call approval in the host). Opt-in
   // for that reason, so the copy says what it costs instead of only naming it.
+  'row.cliBridgeLabel': 'Let the local CodeBuddy CLI do the work',
+  'row.cliBridgeHint': 'Adds the codebuddy_ask tool and the /codebuddy command. Each call spends CodeBuddy quota (and, with injectResult on, one DSH turn). Off by default.',
   'row.imageToolLabel': 'Let the model draw images',
   'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image, with no per-call confirmation. Off means the tool is not registered at all.',
   'row.showCreditsCn': 'Show credits in the composer toolbar',
@@ -864,6 +866,8 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // 生图工具是本插件里唯一「由模型自己决定花钱」的能力（约 5.71 积分/张，
   // 宿主没有逐次确认的机制），所以默认关闭，文案也必须把单价说出来，
   // 而不是只给它一个名字。
+  'row.cliBridgeLabel': '允许调用本机 CodeBuddy CLI 干活',
+  'row.cliBridgeHint': '开启后多出 codebuddy_ask 工具与 /codebuddy 指令；每次调用花 CodeBuddy 配额（injectResult 开着时还会再花一次 DSH token）。默认关闭。',
   'row.imageToolLabel': '允许模型自主生图',
   'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——约 5.71 积分/张，没有逐次确认。关闭时该工具根本不会注册。',
   'row.showCreditsCn': '在输入框工具栏显示积分读数',

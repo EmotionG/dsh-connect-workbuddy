@@ -149,6 +149,19 @@ export interface WorkBuddyStatusRouteOptions {
    */
   imageToolEnabled?(region: WorkBuddyRegion): boolean
   /**
+   * Whether the OPTIONAL CodeBuddy CLI route is mounted (`codebuddy_ask` tool +
+   * `/codebuddy` command).
+   *
+   * GLOBAL rather than per region — one switch, one route — so it takes no
+   * argument. Optional, and absent reads as OFF: this switch authorizes a child
+   * process to edit files and spend CodeBuddy quota, so an older Host that
+   * cannot answer must not be read as consent. The card reads it off the Host's
+   * answer for the same measured reason as `imageToolEnabled`: the browser's
+   * settings mirror is stale for this namespace on the affected 0.1.7
+   * deployments, and a stale `true` here would claim a spending capability is on.
+   */
+  cliBridgeEnabled?(): boolean
+  /**
    * Send one real-volume request to each named model of a region and report what
    * came back.
    *
@@ -495,6 +508,20 @@ function safeMessage(error: unknown): string {
 /** A non-null, non-array object: the only shape the slot merge applies to. */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Merge a `cliBridge` patch into the committed settings object.
+ *
+ * ONE level on purpose: every field in that block is a scalar (a boolean, a cap,
+ * a path), so the only thing a deeper merge could produce is a half-written entry.
+ * Sibling keys survive — flipping the switch must not drop the user's tuned caps.
+ */
+export function nextCliBridgeSettings(current: unknown, patch: unknown): Record<string, unknown> {
+  const base = isPlainRecord(current) ? { ...current } : {}
+  if (!isPlainRecord(patch)) return base
+  for (const [key, value] of Object.entries(patch)) base[key] = value
+  return base
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -846,6 +873,10 @@ export async function workBuddyWebStatus(
   // `?? false`, unlike the two above: the image tool lets the MODEL spend,
   // so an older Host that cannot answer must not be read as consent.
   const imageToolEnabled = deps.imageToolEnabled?.(region) ?? false
+  // GLOBAL, read once per answer and repeated on each region: the card polls one
+  // region at a time, so the switch has to be present on whichever tab is open.
+  // `=== true` for the same reason as `imageToolEnabled`: absent is not consent.
+  const cliBridgeEnabled = deps.cliBridgeEnabled?.() === true
   const authStatus = await store.status()
   // Whether a saved per-region choice is in effect, on every branch: the card
   // needs it to show that clearing really did return the region to the app's
@@ -856,7 +887,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled }
   }
   let credential
   try {
@@ -889,6 +920,7 @@ export async function workBuddyWebStatus(
       showCreditsInMainUi,
       creditPosition,
       imageToolEnabled,
+      cliBridgeEnabled,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
       // sign-ins DO exist (the orphaned-saved-id case), the card already has
@@ -914,6 +946,7 @@ export async function workBuddyWebStatus(
     showCreditsInMainUi,
     creditPosition,
     imageToolEnabled,
+    cliBridgeEnabled,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:
     // `displayModels` is the saved/live directory and knows nothing about a
@@ -1666,7 +1699,12 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
             req.on('error', reject)
           })
           const field = body.field
-          if (field !== 'regions' && field !== 'accounts') return json(res, 400, { error: 'field must be regions or accounts' })
+          // `cliBridge` is a GLOBAL scalar bag, not a region map: it skips the
+          // region machinery (sibling slots, catalog seeding) and is merged one
+          // level through `nextCliBridgeSettings` below.
+          if (field !== 'regions' && field !== 'accounts' && field !== 'cliBridge') {
+            return json(res, 400, { error: 'field must be regions, accounts or cliBridge' })
+          }
           const rows = settings.describe()
           const row = rows.find((r: any) => String(r.ns).includes('workbuddy'))
           if (row === undefined) return json(res, 503, { error: 'workbuddy namespace missing from describe()' })
@@ -1680,6 +1718,14 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // merge never carries a function.
           const current = unwrapVolatileDeep(row.value?.[field] ?? {}) as Record<string, unknown>
           const incoming = (body.value ?? {}) as Record<string, unknown>
+          if (field === 'cliBridge') {
+            if (!isPlainRecord(incoming)) return json(res, 400, { error: 'cliBridge value must be an object' })
+            const mergedBridge = nextCliBridgeSettings(current, incoming)
+            await settings.mutate(row.ns, [{ op: 'set', path: [field], value: mergedBridge }], undefined)
+            // Answer the committed block, so the card can mirror the truth
+            // instead of re-deriving it from its (documented-stale) mirror.
+            return json(res, 200, { ok: true, value: mergedBridge })
+          }
           // Merge TWO levels, and the second level is what stops a save from
           // DELETING data.
           //

@@ -813,6 +813,17 @@ export type WorkBuddyWebUsage =
      * after a switch-off that never landed.
      */
     imageToolEnabled?: boolean
+    /**
+     * Whether the OPTIONAL CodeBuddy CLI route is mounted (tool `codebuddy_ask`
+     * + command `/codebuddy`).
+     *
+     * GLOBAL, not per region: the route has ONE switch for both regions, so the
+     * same value rides on every region's answer and the card reads it off the
+     * active tab. Absent reads as OFF — this switch authorizes a child process
+     * that edits files and spends CodeBuddy quota, so a Host that cannot answer
+     * must not be read as consent.
+     */
+    cliBridgeEnabled?: boolean
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     message?: string
@@ -859,6 +870,17 @@ export type WorkBuddyWebUsage =
      * after a switch-off that never landed.
      */
     imageToolEnabled?: boolean
+    /**
+     * Whether the OPTIONAL CodeBuddy CLI route is mounted (tool `codebuddy_ask`
+     * + command `/codebuddy`).
+     *
+     * GLOBAL, not per region: the route has ONE switch for both regions, so the
+     * same value rides on every region's answer and the card reads it off the
+     * active tab. Absent reads as OFF — this switch authorizes a child process
+     * that edits files and spends CodeBuddy quota, so a Host that cannot answer
+     * must not be read as consent.
+     */
+    cliBridgeEnabled?: boolean
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     source?: 'desktop' | 'dsh'

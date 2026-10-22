@@ -116,8 +116,8 @@ function fieldSnapshotOf(
  * the field's live value, preserving the other region.
  */
 async function saveViaHostEndpoint(
-  field: 'accounts' | 'regions',
-  region: WorkBuddyWebRegion,
+  field: 'accounts' | 'regions' | 'cliBridge',
+  region: WorkBuddyWebRegion | undefined,
   value: unknown,
 ): Promise<Record<string, unknown> | undefined> {
   let response: Response
@@ -125,7 +125,9 @@ async function saveViaHostEndpoint(
     response = await fetch('/plugins/dsh-connect-workbuddy/__save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ field, value: { [region]: value } }),
+      // A region field posts `{ <region>: value }`; the global `cliBridge` block
+      // posts itself, because it has no sibling regions to preserve.
+      body: JSON.stringify({ field, value: region === undefined ? value : { [region]: value } }),
     })
   } catch (error) {
     throw new WorkBuddySettingsWriteError(field, `Host save endpoint unreachable: ${String(error)}`)
@@ -141,6 +143,67 @@ async function saveViaHostEndpoint(
   // Older hosts answer `{ok:true}` alone, hence `undefined`.
   const answer = await response.json().catch(() => undefined) as { value?: Record<string, unknown> } | undefined
   return answer?.value
+}
+
+/**
+ * Read the committed CodeBuddy-CLI switch out of a settings snapshot.
+ *
+ * Only an explicit `true` is ON, matching the schema's `default(false)`: this
+ * switch authorizes a child process that edits files and spends CodeBuddy
+ * quota, so an absent value must never read as consent.
+ */
+export function cliBridgeEnabledOf(configured: unknown): boolean {
+  const bridge = (configured as { cliBridge?: unknown } | undefined)?.cliBridge
+  return typeof bridge === 'object' && bridge !== null
+    && (bridge as { enabled?: unknown }).enabled === true
+}
+
+/**
+ * Write the GLOBAL CodeBuddy-CLI switch, verifying it landed.
+ *
+ * Deliberately NOT a region field: one route, one budget, one switch. The two
+ * writers are the same as everywhere else — the plugin's Host endpoint first
+ * (authoritative merge, so the tuned caps beside `enabled` survive), the
+ * settings scope second — because this namespace's browser mirror is documented
+ * as stale on the affected 0.1.7 deployments, and a switch that merely *looks*
+ * flipped is exactly the "关闭不了" class of report.
+ *
+ * @param scope - the bound settings scope for this plugin's namespace.
+ * @param enabled - the desired state.
+ * @throws {WorkBuddySettingsWriteError} when neither writer persists the value.
+ */
+export async function writeCliBridgeEnabled(
+  scope: WorkBuddyAccountScope,
+  enabled: boolean,
+): Promise<void> {
+  let hostError: unknown
+  try {
+    const authoritative = await saveViaHostEndpoint('cliBridge', undefined, { enabled })
+    if (authoritative !== undefined) {
+      // Mirror what the Host stored, never a client-side re-merge.
+      try { await scope.set('cliBridge', authoritative) } catch { /* optional */ }
+    }
+    return
+  } catch (error) {
+    hostError = error
+  }
+  const stored = unwrapVolatileDeep(
+    (scope.getSnapshot().value as Record<string, unknown> | undefined)?.cliBridge,
+  )
+  const next = {
+    ...typeof stored === 'object' && stored !== null ? stored as Record<string, unknown> : {},
+    enabled,
+  }
+  let delivered = false
+  try {
+    delivered = (await scope.set('cliBridge', next)) !== false
+  } catch {
+    delivered = false
+  }
+  if (delivered && cliBridgeEnabledOf(scope.getSnapshot().value)) return
+  throw hostError instanceof Error
+    ? hostError
+    : new WorkBuddySettingsWriteError('cliBridge', 'neither the Host save endpoint nor the settings scope persisted the value')
 }
 
 /**

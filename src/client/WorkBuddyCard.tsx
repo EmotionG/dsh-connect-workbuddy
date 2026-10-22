@@ -56,7 +56,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { isFileContentionWriteError, writeAccountSlot, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
+import { cliBridgeEnabledOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -486,6 +486,14 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * other control, and both must stay serialized against the SAVE writers.
    */
   const [togglingCredits, setTogglingCredits] = useState<WorkBuddyWebRegion | undefined>(undefined)
+  /**
+   * The OPTIONAL CodeBuddy CLI route switch (global: one switch, one budget).
+   *
+   * `undefined` until the first Host answer arrives, so the box renders the
+   * committed value instead of guessing — the same rule as `creditsShownOn`.
+   */
+  const [cliBridgeOn, setCliBridgeOn] = useState<boolean | undefined>(undefined)
+  const [cliBridgeBusy, setCliBridgeBusy] = useState(false)
   /**
    * Probe results, keyed by region then model id.
    *
@@ -1002,6 +1010,41 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
     } finally {
       if (mounted.current) setTogglingCredits(undefined)
+    }
+  }
+
+  /**
+   * Whether the CLI route is mounted.
+   *
+   * Host answer first, settings mirror second, for the same measured reason as
+   * `imageToolOn`: this namespace's browser mirror goes stale on the affected
+   * deployments, and here a stale `true` would claim a spending capability is on.
+   */
+  const cliBridgeSwitchedOn = (): boolean => {
+    if (cliBridgeOn !== undefined) return cliBridgeOn
+    const fromHost = (statusByRegion[activeRegion] as { cliBridgeEnabled?: unknown } | undefined)?.cliBridgeEnabled
+    if (typeof fromHost === 'boolean') return fromHost
+    return cliBridgeEnabledOf(settingsScope?.getSnapshot().value)
+  }
+
+  /**
+   * Flip the global CLI-route switch.
+   *
+   * The Host rebuilds only this route on the change (`cliBridge` is volatile),
+   * so no provider stack is disposed and no in-flight request is interrupted.
+   * Re-reads the usage afterwards so the box shows the COMMITTED value.
+   */
+  const toggleCliBridge = async (enabled: boolean): Promise<void> => {
+    if (settingsScope === undefined) return
+    setCliBridgeBusy(true)
+    try {
+      await writeCliBridgeEnabled(settingsScope, enabled)
+      if (mounted.current) setCliBridgeOn(enabled)
+      await refreshUsage(activeRegion)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setCliBridgeBusy(false)
     }
   }
 
@@ -1658,8 +1701,36 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     )
     : null
 
+  /**
+   * The CLI-route switch.
+   *
+   * GLOBAL, so it is not gated on the active tab's provider being on — the route
+   * pulls its credential from whichever region still has a signed-in account.
+   * Its own class (not `.dsm-workbuddy-pref-check`) for the same reason the image
+   * box has one: the credit-switch suite's "exactly one switch" selector must
+   * keep resolving to the credit box alone.
+   */
+  const cliBridgePreference = (
+    <label className="dsm-workbuddy-pref" title={t('row.cliBridgeHint')}>
+      <input
+        type="checkbox"
+        className="dsm-workbuddy-cli-bridge-check"
+        checked={cliBridgeSwitchedOn()}
+        disabled={!canWrite || saving || poolBusy || cliBridgeBusy}
+        onChange={(event: { target: { checked: boolean } }) => {
+          void toggleCliBridge(event.target.checked)
+        }}
+      />
+      <span className="dsm-workbuddy-pref-copy">
+        <span className="dsm-workbuddy-pref-label">{t('row.cliBridgeLabel')}</span>
+        <span className="dsm-workbuddy-pref-hint">{t('row.cliBridgeHint')}</span>
+      </span>
+    </label>
+  )
+
   const creditPreferences = (
     <div className="dsm-workbuddy-prefs">
+      {cliBridgePreference}
       {imageToolPreference}
       <label
         className="dsm-workbuddy-pref"

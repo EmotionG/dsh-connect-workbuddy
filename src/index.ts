@@ -1439,6 +1439,16 @@ export function apply(ctx: Context, config: Config): void {
      */
     imageToolEnabled: region => regionStateOf(current(), region).imageToolEnabled === true,
     /**
+     * Whether the optional CodeBuddy CLI route is mounted (`codebuddy_ask` tool
+     * + `/codebuddy` command).
+     *
+     * GLOBAL, so it takes no region. `=== true` like `imageToolEnabled`, not
+     * `!== false`: switching this on lets a child process edit files and spend
+     * CodeBuddy quota, so an absent value must read as OFF rather than as
+     * consent. `cliBridge` is a volatile field, hence the unwrap.
+     */
+    cliBridgeEnabled: () => unwrapVolatile(current().cliBridge)?.enabled === true,
+    /**
      * WHERE the readout sits, resolved here rather than read from the browser
      * settings mirror, for the same measured reason as the flag above: on the
      * affected 0.1.7 deployments that mirror never picks up this plugin's

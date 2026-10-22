@@ -1689,3 +1689,34 @@ describe('client → host action contract', () => {
     }
   })
 })
+
+describe('the CodeBuddy-CLI switch rides on the status answer', () => {
+  /** A store that is signed out, which is the cheapest branch to build. */
+  const signedOut = () => ({
+    accounts: async () => [],
+    status: async () => ({ state: 'signed-out' as const }),
+    resolve: async () => { throw new Error('no account') },
+    selectionLost: async () => false,
+    hasExplicitSelection: () => false,
+  })
+
+  it('reports OFF when the Host cannot answer', async () => {
+    // Absent must read as OFF: this switch authorizes a child process that edits
+    // files and spends CodeBuddy quota, so silence is not consent.
+    const status = await workBuddyWebStatus(deps({ store: () => signedOut() as never }), 'cn')
+    expect((status as { cliBridgeEnabled?: boolean }).cliBridgeEnabled).toBe(false)
+  })
+
+  it('reports the committed switch', async () => {
+    const status = await workBuddyWebStatus(deps({ store: () => signedOut() as never, cliBridgeEnabled: () => true }), 'cn')
+    expect((status as { cliBridgeEnabled?: boolean }).cliBridgeEnabled).toBe(true)
+  })
+
+  it('is GLOBAL: both regions carry the same value', async () => {
+    const build = () => deps({ store: () => signedOut() as never, cliBridgeEnabled: () => true })
+    const cn = await workBuddyWebStatus(build(), 'cn')
+    const intl = await workBuddyWebStatus(build(), 'global')
+    expect((cn as { cliBridgeEnabled?: boolean }).cliBridgeEnabled).toBe(true)
+    expect((intl as { cliBridgeEnabled?: boolean }).cliBridgeEnabled).toBe(true)
+  })
+})
