@@ -17,13 +17,14 @@
  * (congested) is an order the eye already knows, so the severity of one row can
  * be compared with another at a glance, without reading a word.
  *
- * WHY PEOPLE. Load is a fact about how many people are ahead of you, so the
- * shape is people. The upstream app already uses an icon for its most severe
- * level and words for the rest, so the set here is deliberately SMALL — the
- * healthy default is not drawn at all, because a badge on every healthy row is
- * decoration rather than a warning.
+ * WHY THE PERSON IS DRAWN AND NOT TYPED. The picker shows the `🧍` emoji, so a
+ * line-drawn stick figure in the card would read as a DIFFERENT thing entirely
+ * — two symbols for one meaning. This person therefore has the emoji's own
+ * parts: yellow hair, a skin-toned face, a shirt, trousers and shoes. The
+ * colour ramp is applied to the CLOTHES only; the hair and the skin keep their
+ * own colours, so the figure stays the same person in every level.
  *
- * The shapes are drawn on a 16-unit grid and scaled by CSS, so one source
+ * The shapes are drawn on their own grid and scaled by CSS, so one source
  * serves the 12px model row and any larger size without a second asset.
  */
 import type { ReactElement } from 'react'
@@ -46,12 +47,15 @@ const TITLES_EN: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
   unavailable: 'Unavailable',
 }
 
-/** The color per level, as a CSS custom property so the theme can override it. */
+/**
+ * The CLOTHES colour per level, as a CSS custom property.
+ *
+ * These are the ramp: green → yellow → orange → red. The hair and the skin
+ * keep their own colours in every level, so a row is recognisably the same
+ * person in a different outfit — which is what makes the COUNT readable as
+ * "more people, not different people".
+ */
 const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
-  // Green = free right now, yellow = healthy, orange = a queue, red = jammed.
-  // The colour is a RAMP, not a set of unrelated hues: the eye reads the
-  // order green → yellow → orange → red without being taught it, so the
-  // severity of a row can be compared across rows at a glance.
   idle: 'var(--dsm-workbuddy-busy-idle, #3aa76d)',
   normal: 'var(--dsm-workbuddy-busy-normal, #d9b300)',
   busy: 'var(--dsm-workbuddy-busy-busy, #e08a1e)',
@@ -59,13 +63,7 @@ const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
   unavailable: 'var(--dsm-workbuddy-busy-unavailable, #8a8f98)',
 }
 
-/**
- * How many people each level draws.
- *
- * `undefined` means the level is not drawn at all. `unavailable` is not a
- * number: it is the one level where a count would lie, so it gets its own mark
- * (a crossed-out person) instead of a crowd.
- */
+/** How many people each level draws. */
 const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
   idle: 1,
   normal: 1,
@@ -73,40 +71,80 @@ const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
   congested: 3,
 }
 
-/** The icon for a level, or `undefined` when the level is not drawn. */
+/**
+ * The icon for a level, or `undefined` when the level is not drawn.
+ *
+ * Only `unknown` is left out: it is the plugin's own "the probe did not
+ * answer", and a badge that guesses is worse than no badge. Every level the
+ * upstream DID report is drawn — `idle` included, in green, because "the model
+ * is free right now" is useful information.
+ */
 export function busyIconOf(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
   if (level === undefined) return undefined
-  // Only `unknown` is left out: it is the plugin's own "the probe did not
-  // answer", and a badge that guesses is worse than no badge. Every level the
-  // upstream DID report is drawn — `idle` included, in green, because "the
-  // model is free right now" is useful information.
   if (level === 'unknown') return undefined
   return level as WorkBuddyBusyIcon
 }
 
 /**
- * One person, full body.
+ * One person, on the icon's own grid: 7.9 units wide, 19.3 units tall.
  *
- * The head is a circle of radius 1.7 centred at (2.2, 2.2) and the shoulders
- * start at y = 5.2: a GAP of 1.3 units between them. An earlier version put
- * them too close and the whole thing read as a smudge at the 12px the model row
- * actually uses — a person has to look like a person at 12px.
+ * The five parts are the emoji's own — hair, face, shirt, trousers, shoes —
+ * because a stick figure would not read as the same mark as the `🧍` the
+ * picker shows.
+ *
+ * NO FACE FEATURES. At the 12px the model row actually uses, an eye is 0.2px
+ * wide: drawing it produces a smudge, not a face. So the face is a plain
+ * skin-toned shape and the character is carried by the silhouette.
  */
-function person(x: number, key: string): ReactElement {
+function person(
+  x: number,
+  key: string,
+  shirt: string,
+  shirtEdge: string,
+  trousers: string,
+): ReactElement {
   return (
-    <g key={key} stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" transform={`translate(${x} 0)`}>
-      <circle cx="2.2" cy="2.2" r="1.7" />
-      <path d="M0 7.6c.2-1.5 1-2.4 2.2-2.4s2 .9 2.2 2.4" />
+    <g key={key} transform={`translate(${x} 0)`}>
+      {/* 头发：带一撮刘海 */}
+      <path
+        d="M2.7 3.1c0-1.6 1-2.6 2.5-2.6s2.5 1 2.5 2.6c0 .8-.2 1.4-.6 1.9-.2-1-.7-1.5-1.3-1.7-.5.6-1.3.8-2 .7-.7-.1-1.2-.6-1.3-1.4-.5.1-.8.2-.8.2z"
+        fill="#f0c04a"
+      />
+      {/* 脸：肤色，不画五官 */}
+      <path d="M3 3.4h3.4v2.1c0 1.15-.76 2-1.7 2s-1.7-.85-1.7-2z" fill="#ffd9a0" />
+      {/* 脖子 */}
+      <path d="M4.4 6.6h.6v.9h-.6z" fill="#f3c493" />
+      {/* 手臂：在上衣之外 */}
+      <path
+        d="M1.75 8.9c-.45.45-.65 1.25-.65 2.15v2.9c0 .4.3.7.7.7s.7-.3.7-.7v-2.8c0-.6.1-1 .25-1.35zM7.55 8.9c.45.45.65 1.25.65 2.15v2.9c0 .4-.3.7-.7.7s-.7-.3-.7-.7v-2.8c0-.6-.1-1-.25-1.35z"
+        fill="#ffd9a0"
+      />
+      {/* 上衣 */}
+      <path d="M2.8 7.7h3.7c.75 0 1.3.55 1.3 1.3v5.1H1.5V9c0-.75.55-1.3 1.3-1.3z" fill={shirt} />
+      {/* 领口 */}
+      <path d="M3.9 7.7l.75 1 .75-1" stroke={shirtEdge} strokeWidth=".45" fill="none" strokeLinejoin="round" />
+      {/* 裤子 */}
+      <path d="M1.9 14.1h2.05l-.3 4.3H1.6zM5.85 14.1h2.05l.3 4.3H5.5z" fill={trousers} />
+      {/* 鞋 */}
+      <path
+        d="M2.15 18.4h1.4v.9H1.7c-.3 0-.45-.3-.3-.6zM5.85 18.4h1.4l.55.55c.2.2 0 .35-.3.35H5.85z"
+        fill="#2f3136"
+      />
     </g>
   )
+}
+
+/** The shaded edge of the clothes, one step darker than the clothes. */
+function shadeOf(color: string): string {
+  return `color-mix(in srgb, ${color} 78%, #000)`
 }
 
 /**
  * The load-level icon for one model row.
  *
  * Returns `null` for a level that is not drawn — including `undefined`, which
- * means "not measured", and `normal` / `unknown`, which must never be turned
- * into a claim the upstream did not make.
+ * means "not measured", and `unknown`, which must never be turned into a
+ * claim the upstream did not make.
  */
 export function busyIcon(
   level: WorkBuddyBusyLevel | undefined,
@@ -127,31 +165,33 @@ export function busyIcon(
         title={title}
         style={{ '--dsm-workbuddy-busy-color': color } as Record<string, string>}
       >
-        <svg viewBox="0 0 7.8 7.8" width="12" height="12" aria-hidden="true" focusable="false">
-          <g stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none">
-            <circle cx="3" cy="2.4" r="1.8" />
-            <path d="M0.6 8c.2-1.5 1.1-2.4 2.4-2.4s2.2.9 2.4 2.4" />
-            <path d="M0 8.6 6.2 2" strokeWidth="1.3" />
+        <svg viewBox="0 0 19.3 19.3" width={12} height={12} aria-hidden="true" focusable="false">
+          <g opacity=".5">
+            {person(0, 'p', '#8a8f98', '#6f747c', '#6f747c')}
           </g>
+          {/* The bar is drawn ACROSS the figure, not over it: a line through the
+              middle of a 12px person hides the very thing it is annotating. */}
+          <path d="M0.6 19.4 19.4 0.6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
         </svg>
       </span>
     )
   }
 
   const count = PEOPLE[icon] ?? 1
-  // The people are laid out side by side, each 3.6 units apart — TIGHT, so the
-  // crowd reads as ONE group rather than as separate figures. (The picker
-  // cannot do this: its name is a plain string and the gap between emoji is the
-  // FONT's business. Here the gap is ours to choose.)
-  const width = (count - 1) * 3.6 + 4.4
+  // The people stand shoulder to shoulder — 9.6 units apart, about half a body
+  // width — so a crowd reads as ONE group. The HEIGHT is fixed and the width
+  // grows, so the icon is never squashed: the count stays legible at the 12px
+  // the model row actually uses.
+  const width = (count - 1) * 9.6 + 7.9
   return (
     <span
       className={`dsm-workbuddy-busy dsm-workbuddy-busy-${icon}`}
       title={title}
       style={{ '--dsm-workbuddy-busy-color': color } as Record<string, string>}
     >
-      <svg viewBox={`0 0 ${width} 7.8`} width={12} height={12} aria-hidden="true" focusable="false">
-        {Array.from({ length: count }, (_, index) => person(index * 3.6, `p${index}`))}
+      <svg viewBox={`0 0 ${width} 19.3`} width={12} height={12} aria-hidden="true" focusable="false">
+        {Array.from({ length: count }, (_, index) =>
+          person(index * 9.6, `p${index}`, color, shadeOf(color), shadeOf(color)))}
       </svg>
     </span>
   )

@@ -129,6 +129,22 @@ describe('the load-level icon in the card', () => {
     expect(congested?.getAttribute('style')).toContain('#d93a2b')
   })
 
+  it('draws the emoji-like PERSON, not a stick figure', async () => {
+    // The picker shows the `🧍` emoji. If the card drew a line figure, the
+    // same meaning would have two different symbols, and the two places would
+    // stop looking like the same thing. So the card's person keeps the emoji's
+    // own parts: hair, face, shirt, trousers, shoes.
+    const m = await render({ 'model-a': 'normal' })
+    const svg = icons(m.container)[0]?.querySelector('svg')
+    const html = svg?.innerHTML ?? ''
+    // The five parts, by their own colours.
+    expect(html).toContain('#f0c04a')  // 头发
+    expect(html).toContain('#ffd9a0')  // 脸 + 手臂
+    expect(html).toContain('#2f3136')  // 鞋
+    // And it is NOT a line drawing: no strokes forming a circle-and-arc.
+    expect(html).not.toContain('<circle')
+  })
+
   it('keeps the word reachable, in the tooltip', async () => {
     const m = await render({ 'model-a': 'congested' })
     // The picture saves room; the title keeps the level readable. The wording
