@@ -376,6 +376,17 @@ export function OAuthSignIn({ t, region, onAdded }: OAuthSignInProps): ReactElem
   const titleKey = region === 'cn' ? 'row.oauthTitle' : 'row.oauthTitleGlobal'
   const startKey = region === 'cn' ? 'row.oauthStart' : 'row.oauthStartGlobal'
 
+  /*
+   * The title is this section's ACCESSIBLE NAME, not a visible line.
+   *
+   * It used to be printed above the button, which said the same thing twice in
+   * one row of pixels (「扫码添加账号」 over 「扫码登录」; the two differ in
+   * spelling, not in meaning) and cost a line of height for every bar. A
+   * section that contains exactly one button does not need a caption naming
+   * that button — the button IS the label. `aria-label` keeps the name for a
+   * screen reader, where a lone 「扫码登录」 has no section to sit in.
+   */
+
   const finishText = phase.kind === 'finished'
     ? phase.message === 'added'
       ? t('row.oauthDone', { accountName: phase.accountName === '' || phase.accountName === undefined ? t('row.accountUnnamed') : phase.accountName })
@@ -393,7 +404,6 @@ export function OAuthSignIn({ t, region, onAdded }: OAuthSignInProps): ReactElem
         message={t('row.oauthSyncing')}
         hint={t('row.veilHintList')}
       />
-      <p className="dsm-workbuddy-bar-label">{t(titleKey)}</p>
       {phase.kind === 'finished'
         ? <p className={`dsm-workbuddy-bar-status ${phase.message === 'added' ? 'dsm-workbuddy-bar-ok' : 'dsm-workbuddy-bar-error'}`}>{finishText}</p>
         : phase.kind === 'waiting'

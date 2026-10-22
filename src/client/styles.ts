@@ -365,21 +365,26 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-current-badge{margin-left:auto;padding:2px 10px;border-radius:999px;background:var(--dsw-alias-state-success-primary,#22c55e);border:1px solid rgba(34,197,94,.55);color:#fff;font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
 /* Sits under the header block, before the batch buttons: account discovery is
    the first step of using the pool, so it reads above the actions it enables. */
-/* Manual-mode account picker: shares the settings row layout (.pool-set), and
-   only the select itself needs a hint that it is a PICKER of accounts rather
-   than of models — the two sit near each other and used to be indistinguishable
-   to a selector query as well as to the eye. */
+/* THE HEAD SLOT — one place that answers "who is serving?".
+ *
+ * With the pool off it holds the account picker, with the pool on the badge.
+ * Both are pushed right by the same rule so the header does not jump between
+ * the two states. The picker used to live in a settings row of its own further
+ * down the page, which meant the same account name appeared in the title row,
+ * in that row, and again in the member table. */
+.dsm-workbuddy-pool-head-pick{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px}
+.dsm-workbuddy-pool-head-pick-label{color:var(--dsw-alias-label-secondary,#c6c9d0);white-space:nowrap}
 .dsm-workbuddy-pool-account-select{min-width:200px}
 .dsm-workbuddy-pool-title{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-pool-badge{flex:none;padding:2px 9px;border-radius:999px;font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-brand-primary,#5686fe);background:rgba(86,134,254,.12);border:1px solid rgba(86,134,254,.32)}
-/* One row, two clusters: LEFT acts on the accounts you checked, RIGHT re-reads
-   which accounts exist. Before this the rescan button was on its own row pushed
-   right while the batch buttons were on the next row pushed left — two
-   alignments two lines apart, with nothing explaining the split. */
-.dsm-workbuddy-pool-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:12px}
+/* No top rule: this bar now hangs directly under 「本池包含的账号 / 已选 N / M /
+   全选 / 全不选」 and acts on exactly that set, so a separator here would cut the
+   buttons away from the count that explains them. The divider that matters is
+   the one the member block has against 「更多设置」 below. */
+.dsm-workbuddy-pool-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dsm-workbuddy-pool-actions-group{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.dsm-workbuddy-pool-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#999)}
-.dsm-workbuddy-pool-note{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-label-tertiary,#999)}
+.dsm-workbuddy-pool-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+.dsm-workbuddy-pool-note{margin:0;font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-pool-warn{margin:0;padding:9px 11px;border-radius:9px;font-size:12px;line-height:17px;color:var(--dsw-alias-state-warn-primary,#f59e0b);background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.3)}
 /* Ghost members (issue #60): the warning plus one removable chip per id. The
    chips are what make the warning actionable — a ghost has no row in the table
@@ -439,7 +444,7 @@ export const WORKBUDDY_CARD_CSS = `
    its built-in keyboard and screen-reader behaviour. The summary is a full-width
    row because a 12px grey label on its own is a small click target, and this is
    the one place a confused user is meant to click. */
-.dsm-workbuddy-pool-order-rules{border:1px solid var(--dsw-alias-border-l1,#2c2d31);border-radius:10px;background:var(--dsw-alias-bg-layer-2,#232529);margin:0 0 10px;overflow:hidden}
+.dsm-workbuddy-pool-order-rules{border:1px solid var(--dsw-alias-border-l1,#2c2d31);border-radius:10px;background:var(--dsw-alias-bg-layer-2,#232529);overflow:hidden}
 .dsm-workbuddy-pool-order-rules-summary{padding:8px 12px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-secondary,#c6c9d0);font-size:12px;font-weight:600;line-height:18px}
 .dsm-workbuddy-pool-order-rules-summary:hover{color:var(--dsw-alias-label-primary,#e6e6e6)}
 .dsm-workbuddy-pool-order-rules-summary:focus-visible{outline:2px solid rgba(86,134,254,.55);outline-offset:-2px}
@@ -593,17 +598,57 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-check input:disabled{cursor:default;opacity:.5}
 .dsm-workbuddy-pool-checked{color:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-pool-unknown{color:var(--dsw-alias-label-dimmed,#9aa0a6)}
-.dsm-workbuddy-pool-member{color:var(--dsw-alias-brand-primary,#5686fe)}
 .dsm-workbuddy-pool-not-member{color:var(--dsw-alias-label-dimmed,#9aa0a6)}
-.dsm-workbuddy-pool-settings-wrap{display:flex;flex-direction:column;gap:10px}
+/* A section break, not just a gap: below this line the page stops showing what
+   the pool IS and starts showing the knobs that change it. Without the rule the
+   heading floated under the table with nothing marking the change of subject. */
+.dsm-workbuddy-pool-settings-wrap{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:14px}
 .dsm-workbuddy-pool-dirty{font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .dsm-workbuddy-pool-settings{display:flex;flex-direction:column;gap:1px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;overflow:hidden;background:var(--dsw-alias-bg-layer-2,#24262c)}
-/* QR sign-in + export/import, hosted inside the pool settings block.
-   The block's own bordered rows belong to the SAVED preferences, so these
-   get their own container: same rhythm (12px 14px) so the two read as one
-   group, but a dashed edge marking them as immediate actions rather than
-   drafts the Save button below would commit. */
-.dsm-workbuddy-pool-tools{display:flex;flex-direction:column;gap:2px;border:1px dashed var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;padding:4px 10px}
+/* THE MODE BAR — the page's master control, directly under the title.
+ *
+ * It reuses the .dsm-workbuddy-pool-settings class for the bordered, stacked
+ * look, and on purpose: the component tests locate 「启用账号池」 as the first
+ * checkbox inside that class, and a user who has learned "settings live in a
+ * bordered block" should not have to learn a second shape for the most
+ * important one.
+ *
+ * What it adds is a brand-tinted edge and background, so it reads as "this
+ * decides what the rest of the page means" instead of as one more settings
+ * card — the switch used to sit at the BOTTOM, 400px below this point.
+ */
+.dsm-workbuddy-pool-modebar{padding:12px 14px;gap:8px;border-color:rgba(86,134,254,.36);background:linear-gradient(180deg,rgba(86,134,254,.10),rgba(86,134,254,.02)),var(--dsw-alias-bg-layer-2,#24262c)}
+.dsm-workbuddy-pool-modebar-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.dsm-workbuddy-pool-modebar-label{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#e6e6e6)}
+/* The mode in words. A switch's position is a 20px shape to decode; this says
+   which of the two modes is in force, and therefore how to read the table. */
+.dsm-workbuddy-pool-modebar-state{flex:none;padding:1px 9px;border-radius:999px;font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-brand-primary,#5686fe);background:rgba(86,134,254,.14);border:1px solid rgba(86,134,254,.3)}
+.dsm-workbuddy-pool-modebar .dsm-workbuddy-pool-dirty{margin-left:auto}
+.dsm-workbuddy-pool-modebar .dsm-workbuddy-pool-note{line-height:18px;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+/* Orthogonal concepts in one sentence when they collide ("in use" vs "in the
+   pool"). A left rule marks it as an aside about the row above, not a warning. */
+.dsm-workbuddy-pool-serving-note{padding-left:10px;border-left:2px solid rgba(86,134,254,.5);color:var(--dsw-alias-label-secondary,#c6c9d0)}
+/* Subheading for "the rest of the settings": one step DOWN from the page title,
+   so the panel has one title instead of two equally loud ones. */
+.dsm-workbuddy-pool-card-head{display:flex;align-items:center;gap:8px}
+.dsm-workbuddy-pool-card-title{margin:0;font-size:13px;font-weight:600;color:var(--dsw-alias-label-secondary,#c6c9d0)}
+/* QR sign-in + export/import, ABOVE the settings block.
+   One toolbar row, not a column of two: with the captions gone (the buttons
+   name themselves) there is nothing left to stack, and a row is where a user
+   looks for instant actions. The dashed edge still separates them from the
+   saved preferences below — that contrast is now the whole point, since the
+   heading under this row is the one that says 「点保存才生效」.
+   Left-aligned, not right: 扫码登录 is the primary action and it should read
+   first, in the same left-hand column as 一键签到 above and 「更多设置」 below.
+   Pushed to the right edge the three buttons looked like the tail of the row
+   above rather than the start of this one. */
+.dsm-workbuddy-pool-tools{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:8px;border:1px dashed var(--dsw-alias-border-l2,#3a3d45);border-radius:12px;padding:6px 10px}
+/* A bar inside the toolbar is a flex item, not a full-width row: it keeps only
+   its own content width, and the toolbar decides where the group sits. */
+.dsm-workbuddy-pool-tools .dsm-workbuddy-bar{flex:0 1 auto;min-width:0;margin:0}
+/* Status text may wrap here instead of truncating: a toolbar row is short, and
+   「已导出」「等待扫码」 are the whole message — an ellipsis would eat it. */
+.dsm-workbuddy-pool-tools .dsm-workbuddy-bar-status{white-space:normal}
 .dsm-workbuddy-pool-set{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:12px 14px;border-top:1px solid var(--dsw-alias-border-l1,#2c2d31)}
 .dsm-workbuddy-pool-set:first-child{border-top:0}
 .dsm-workbuddy-pool-set-copy{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
@@ -613,7 +658,12 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool-num{width:74px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-primary,#e6e6e6);font:inherit;font-size:13px;text-align:center;font-variant-numeric:tabular-nums}
 .dsm-workbuddy-pool-select{max-width:260px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-primary,#e6e6e6);font:inherit;font-size:13px;cursor:pointer}
 .dsm-workbuddy-pool-select:disabled,.dsm-workbuddy-pool-num:disabled{opacity:.5;cursor:default}
-.dsm-workbuddy-pool-save-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:12px}
+/* The commit row: pinned to the bottom of the viewport while the panel is on
+ * screen. The panel is taller than a screen, and the two buttons that make any
+ * edit real used to sit at its very bottom — off-screen at the moment the user
+ * finished editing, and invisible entirely in a screenshot. Opaque, because
+ * content scrolls under it. */
+.dsm-workbuddy-pool-save-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid var(--dsw-alias-border-l2,#36373b);padding-top:12px;position:sticky;bottom:0;z-index:2;padding-bottom:8px;background:var(--dsw-alias-bg-layer-3,#2a2c33)}
 .dsm-workbuddy-pool-save-buttons{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:none}
 .dsm-workbuddy-pool-conflict{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:11px 13px;border-radius:10px;background:rgba(245,158,11,.08);border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b)}
 .dsm-workbuddy-pool-pending{flex:none;align-self:center;font-size:12px;line-height:17px;color:var(--dsw-alias-state-warn-primary,#f59e0b)}
@@ -655,13 +705,16 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pool .sw input:disabled+.sw-track{opacity:.4}
 .dsm-workbuddy-pool .sw input:disabled{cursor:default}
 /* Account action bars: QR sign-in and export/import.
-   One row each — label, live status, actions — instead of a padded block
-   per feature. The bar is the resting height; only an open dialog (below)
-   grows vertically, so the card does not scroll past a wall of chrome to
-   reach the buttons. Status text shares the row rather than claiming its own,
-   and is what truncates first when the card is narrow. */
+   One row each — live status, actions — instead of a padded block per feature.
+   There is no caption: each bar holds buttons that name themselves, so a
+   heading above them would repeat the button in a smaller font (「扫码添加账号」
+   over 「扫码登录」). The section keeps an aria-label for the same reason a
+   caption existed, so the name is still available to a screen reader.
+   The bar is the resting height; only an open dialog (below) grows vertically,
+   so the card does not scroll past a wall of chrome to reach the buttons.
+   Status text shares the row rather than claiming its own, and is what
+   truncates first when the card is narrow. */
 .dsm-workbuddy-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0;padding:0}
-.dsm-workbuddy-bar-label{flex:none;margin:0;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#c6c9d0)}
 .dsm-workbuddy-bar-status{flex:1 1 auto;min-width:0;margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary,#e8e9ed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-workbuddy-bar-hint{color:var(--dsw-alias-label-tertiary,#999)}
 .dsm-workbuddy-bar-actions{display:flex;gap:8px;flex:none;margin-left:auto}

@@ -220,11 +220,13 @@ export function AccountTransfer({ t, region, accounts, onChanged }: AccountTrans
       : ''
 
   return (
+    // No visible caption: the two buttons are named 「导出账号」/「导入账号」, so a
+    // heading reading 「导出 / 导入账号」 above them was the same sentence twice.
+    // The title survives as the section's accessible name only.
     <section className="dsm-workbuddy-bar" aria-label={t('row.transferTitle')}>
       {/* The hint is passed only when there IS a veil: `exactOptionalPropertyTypes`
           treats an explicit `undefined` as a different type from an absent prop. */}
       <BusyOverlay visible={busy} message={veilMessage} {...busy ? { hint: t('row.veilHintList') } : {}} />
-      <p className="dsm-workbuddy-bar-label">{t('row.transferTitle')}</p>
       {phase.kind === 'done'
         ? <p className="dsm-workbuddy-bar-status dsm-workbuddy-bar-ok">{phase.message}</p>
         : phase.kind === 'error'
