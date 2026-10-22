@@ -368,8 +368,10 @@ describe('runOneTurn protocol', () => {
 
 describe('runAgent credential walk', () => {
   it('moves to the next account ONLY on a recognised credential refusal', async () => {
-    const first = fakeChild(1)
-    const second = fakeChild(2)
+    // Realistic pids, NOT 1/2: `killTree` feeds this pid to `process.kill(-pid)` as a real
+    // process-group id, so a fabricated low pid escapes the mock and signals the actual OS.
+    const first = fakeChild(51_001)
+    const second = fakeChild(51_002)
     spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
     const other: BridgeCredential = { token: 'token-zzzzzzzzzzzz', source: 'global/two', region: 'global', expired: false }
 
@@ -391,7 +393,7 @@ describe('runAgent credential walk', () => {
   })
 
   it('does NOT burn another account on a timeout or a crash', async () => {
-    const first = fakeChild(1)
+    const first = fakeChild(51_001)
     useChild(first)
     /** Spawns of the CLI itself, ignoring the Windows `taskkill` used to clean up. */
     const cliSpawns = (): number =>
@@ -409,7 +411,7 @@ describe('runAgent credential walk', () => {
   })
 
   it('does not retry the LAST account either, so a 401 with one account fails fast', async () => {
-    const only = fakeChild(1)
+    const only = fakeChild(51_001)
     useChild(only)
     const running = runAgent(turnOptions(entry), [credential], () => {})
     only.emitFrame({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['401 Authentication required'] })
@@ -421,6 +423,28 @@ describe('runAgent credential walk', () => {
   it('refuses to walk when there is no credential at all', async () => {
     await expect(runAgent(turnOptions(entry), [], () => {})).rejects.toThrow(/no credential worked/)
     expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('never turns a child pid of 1 into a signal for every process of the user', async () => {
+    // Regression, with a real blast radius: a fake (or already-reaped) child can report
+    // `pid: 1`, and `process.kill(-1, 'SIGTERM')` does not fail for it — it signals EVERY
+    // process this user may signal. On a desktop that is the whole login session: Finder,
+    // Dock, the user's chat apps, and every running DSH host all died, then DSH relaunched
+    // and looked like it was "restarting itself". The guard must degrade to the single-child
+    // kill instead of aiming at a non-positive process group.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const only = fakeChild(1)
+      useChild(only)
+      await expect(
+        runAgent(turnOptions(entry, { timeoutMs: 30 }), [credential], () => {}),
+      ).rejects.toThrow(/exceeded its/)
+      const targets = killSpy.mock.calls.map(([target]) => target)
+      expect(targets.filter(target => typeof target === 'number' && target < 0)).toEqual([])
+      expect(only.killed).toBe(true)
+    } finally {
+      killSpy.mockRestore()
+    }
   })
 })
 

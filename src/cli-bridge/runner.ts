@@ -308,10 +308,24 @@ function blocksOf(frame: CliFrame): readonly ContentBlock[] {
   return []
 }
 
+/** Whether `pid` may be used as a process-GROUP id for `process.kill(-pid, …)`. */
+function usableGroupPid(pid: number | undefined): pid is number {
+  // `process.kill(-pid)` never means "signal child pid": it means "signal process GROUP pid".
+  // Two values are not merely wrong but catastrophic, because they stop naming a child tree
+  // and start naming everything around us:
+  //   -pid === 0  -> the CALLER's own process group (the host that spawned us)
+  //   -pid === -1 -> every process this user may signal; on a desktop host that is the whole
+  //                  login session (Finder, Dock, the user's chat apps, DSH itself)
+  // A mocked, stubbed, or already-reaped child can hand us either value (a unit test that
+  // fabricates `pid: 1` to distinguish two fake children used to SIGTERM the entire Mac),
+  // so only a real group-leader id may take the group-kill path.
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 1
+}
+
 /** Kill a child AND everything it spawned (git, npm, a test runner). */
 function killTree(child: { pid?: number | undefined; kill: (signal?: NodeJS.Signals) => boolean }): void {
   const pid = child.pid
-  if (pid === undefined) {
+  if (!usableGroupPid(pid)) {
     try {
       child.kill()
     } catch {
