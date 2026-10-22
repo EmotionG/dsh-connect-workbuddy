@@ -89,10 +89,20 @@ describe('busyLabel / busyDisplaySuffix', () => {
     expect(busyLabel('congested', 'en')).toBe('Extremely congested')
   })
 
-  it('draws nothing for the healthy default or for an unknown level', () => {
+  it('draws the healthy default as ONE person, and nothing for an unknown level', () => {
+    // `normal` is drawn — one person is the healthy case and the row should
+    // say so. `unknown` (the plugin's own "the probe did not answer") must
+    // never become a claim.
+    expect(busyDisplaySuffix('normal')).toBe(' 🧍')
+    expect(busyDisplaySuffix('unknown')).toBe('')
+  })
+
+  it('draws nothing for a level that is not worth drawing', () => {
+    // The WORD for `normal` is still undefined — it is the healthy case, and a
+    // word that says "正常" on every row is noise. The ICON for it is one
+    // person, which is the same information in a form that does not shout.
     expect(busyLabel('normal')).toBeUndefined()
     expect(busyLabel('unknown')).toBeUndefined()
-    expect(busyDisplaySuffix('normal')).toBe('')
     expect(busyDisplaySuffix('unknown')).toBe('')
     expect(busyDisplaySuffix(undefined)).toBe('')
   })

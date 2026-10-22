@@ -27,14 +27,14 @@ import type { WorkBuddyBusyIcon, WorkBuddyBusyLevel } from '../busy.ts'
 
 /** The word for a level, in the card's language, for the tooltip. */
 const TITLES_ZH: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
-  idle: '空闲',
+  normal: '正常',
   busy: '轻微拥堵',
   congested: '极度拥堵',
   unavailable: '不可用',
 }
 
 const TITLES_EN: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
-  idle: 'Idle',
+  normal: 'Normal',
   busy: 'Slightly congested',
   congested: 'Extremely congested',
   unavailable: 'Unavailable',
@@ -42,7 +42,7 @@ const TITLES_EN: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
 
 /** The color per level, as a CSS custom property so the theme can override it. */
 const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
-  idle: 'var(--dsm-workbuddy-busy-idle, #9aa0a6)',
+  normal: 'var(--dsm-workbuddy-busy-normal, #9aa0a6)',
   busy: 'var(--dsm-workbuddy-busy-busy, #d99a00)',
   congested: 'var(--dsm-workbuddy-busy-congested, #e2571f)',
   unavailable: 'var(--dsm-workbuddy-busy-unavailable, #8a8f98)',
@@ -56,7 +56,7 @@ const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
  * (a crossed-out person) instead of a crowd.
  */
 const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
-  idle: 1,
+  normal: 1,
   busy: 2,
   congested: 3,
 }
@@ -64,25 +64,27 @@ const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
 /** The icon for a level, or `undefined` when the level is not drawn. */
 export function busyIconOf(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
   if (level === undefined) return undefined
-  if (level === 'normal' || level === 'unknown') return undefined
+  // `normal` IS drawn — as ONE person, the healthy case. `idle` (the upstream's
+  // "nobody is here" wording) and `unknown` (the plugin's "we were told
+  // nothing") are left out: a badge that says nothing is noise, and a badge
+  // that guesses is worse than no badge.
+  if (level === 'idle' || level === 'unknown') return undefined
   return level as WorkBuddyBusyIcon
 }
 
 /**
- * One person, on the icon's own grid. The same shape for every count.
+ * One person, full body.
  *
- * The geometry is deliberately spread out: the head is a circle of radius 1.9
- * centred at (2.6, 2.6), and the shoulders start at y = 6.6 — a GAP of 2.1
- * units between them. An earlier version put the shoulders at y = 6.8 with the
- * head centred at y = 3.4, so head and body touched and the whole thing read as
- * a smudge at the 12px the model row actually uses. A person has to look like a
- * person at 12px, and that means the head has to be a separate mark.
+ * The head is a circle of radius 1.7 centred at (2.2, 2.2) and the shoulders
+ * start at y = 5.2: a GAP of 1.3 units between them. An earlier version put
+ * them too close and the whole thing read as a smudge at the 12px the model row
+ * actually uses — a person has to look like a person at 12px.
  */
 function person(x: number, key: string): ReactElement {
   return (
-    <g key={key} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" fill="none" transform={`translate(${x} 0)`}>
-      <circle cx="2.6" cy="2.6" r="1.9" />
-      <path d="M0.2 9.9c.2-2.1 1.2-3.3 2.4-3.3s2.2 1.2 2.4 3.3" />
+    <g key={key} stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" transform={`translate(${x} 0)`}>
+      <circle cx="2.2" cy="2.2" r="1.7" />
+      <path d="M0 7.6c.2-1.5 1-2.4 2.2-2.4s2 .9 2.2 2.4" />
     </g>
   )
 }
@@ -113,11 +115,11 @@ export function busyIcon(
         title={title}
         style={{ '--dsm-workbuddy-busy-color': color } as Record<string, string>}
       >
-        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
-          <g stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" fill="none">
-            <circle cx="8" cy="5.2" r="2.3" />
-            <path d="M3.6 13.4c.4-2.5 2-3.8 4.4-3.8s4 1.3 4.4 3.8" />
-            <path d="M1.8 14 14.2 1.6" strokeWidth="1.5" />
+        <svg viewBox="0 0 7.8 7.8" width="12" height="12" aria-hidden="true" focusable="false">
+          <g stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none">
+            <circle cx="3" cy="2.4" r="1.8" />
+            <path d="M0.6 8c.2-1.5 1.1-2.4 2.4-2.4s2.2.9 2.4 2.4" />
+            <path d="M0 8.6 6.2 2" strokeWidth="1.3" />
           </g>
         </svg>
       </span>
@@ -125,19 +127,19 @@ export function busyIcon(
   }
 
   const count = PEOPLE[icon] ?? 1
-  // The people are laid out side by side, each 6.2 units apart, so a bigger
-  // crowd is a WIDER icon rather than a smaller person: the count stays legible
-  // at the 12px the model row actually uses. The HEIGHT stays fixed at 10 units,
-  // so the icon is never squashed — it only grows to the right.
-  const width = (count - 1) * 6.2 + 5.2
+  // The people are laid out side by side, each 3.6 units apart — TIGHT, so the
+  // crowd reads as ONE group rather than as separate figures. (The picker
+  // cannot do this: its name is a plain string and the gap between emoji is the
+  // FONT's business. Here the gap is ours to choose.)
+  const width = (count - 1) * 3.6 + 4.4
   return (
     <span
       className={`dsm-workbuddy-busy dsm-workbuddy-busy-${icon}`}
       title={title}
       style={{ '--dsm-workbuddy-busy-color': color } as Record<string, string>}
     >
-      <svg viewBox={`0 0 ${width} 10.2`} width={12} height={12} aria-hidden="true" focusable="false">
-        {Array.from({ length: count }, (_, index) => person(index * 6.2, `p${index}`))}
+      <svg viewBox={`0 0 ${width} 7.8`} width={12} height={12} aria-hidden="true" focusable="false">
+        {Array.from({ length: count }, (_, index) => person(index * 3.6, `p${index}`))}
       </svg>
     </span>
   )

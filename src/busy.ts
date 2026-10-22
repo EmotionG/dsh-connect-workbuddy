@@ -145,20 +145,25 @@ export function busyLabel(level: WorkBuddyBusyLevel, locale: 'zh' | 'en' = 'zh')
  * (free), one person with someone behind them (a queue), two people pressed
  * together (congested), and a crossed-out person (unavailable).
  */
-export type WorkBuddyBusyIcon = 'idle' | 'busy' | 'congested' | 'unavailable'
+export type WorkBuddyBusyIcon = 'normal' | 'busy' | 'congested' | 'unavailable'
 
 /** The levels that have an icon at all. */
-export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['idle', 'busy', 'congested', 'unavailable']
+export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['normal', 'busy', 'congested', 'unavailable']
 
 /**
  * The icon for a level, or `undefined` when the level has none.
  *
- * `normal` and `unknown` deliberately return `undefined`: "we were told
- * nothing" must not be drawn, and neither must the healthy default.
+ * `idle` and `unknown` deliberately return `undefined`: `idle` is the
+ * upstream's own "nobody is here" wording, and `unknown` is "we were told
+ * nothing" — neither may be drawn as a claim.
  */
 export function busyIcon(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
   if (level === undefined) return undefined
-  if (level === 'normal' || level === 'unknown') return undefined
+  // `normal` IS drawn — as ONE person, the healthy case. Only `idle` (the
+  // upstream's own "nobody is here" wording) and `unknown` (the plugin's own
+  // "we were told nothing") are left out: a badge that says nothing is noise,
+  // and a badge that guesses is worse than no badge.
+  if (level === 'idle' || level === 'unknown') return undefined
   return level as WorkBuddyBusyIcon
 }
 
@@ -183,8 +188,13 @@ export function busyIcon(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIc
 export function busySymbol(level: WorkBuddyBusyLevel | undefined): string {
   switch (level) {
     // The same person repeated: ONE shape, and the COUNT carries the meaning.
+    // `🧍` is a full-body figure. The spacing between the glyphs is the
+    // FONT's business, not ours — the picker renders the name as a plain
+    // string, so there is no way to tighten it from here. That is why the card
+    // draws its own SVG, where the gap IS ours to choose.
     case 'congested': return '🧍🧍🧍'
     case 'busy': return '🧍🧍'
+    case 'normal': return '🧍'
     case 'unavailable': return '🚫'
     default: return ''
   }
@@ -221,8 +231,16 @@ export function busyDisplaySuffix(level: WorkBuddyBusyLevel | undefined, locale:
   return ` ${symbol}`
 }
 
-/** The levels that change a model-picking decision; see {@link busyDisplaySuffix}. */
+/**
+ * The levels that change a model-picking decision; see {@link busyDisplaySuffix}.
+ *
+ * `normal` is IN: one person is the healthy case and the row should say so.
+ * `idle` is out — it is the upstream's own "nobody is here" wording, and a
+ * badge that says nothing is noise. `unknown` is out for a second reason: the
+ * plugin must not invent a claim the upstream never made.
+ */
 const DRAWN_IN_PICKER: ReadonlySet<WorkBuddyBusyLevel> = new Set<WorkBuddyBusyLevel>([
+  'normal',
   'busy',
   'congested',
   'unavailable',

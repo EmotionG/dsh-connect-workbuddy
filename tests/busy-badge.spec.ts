@@ -58,14 +58,19 @@ describe('the load badge as a character (the DSH model picker)', () => {
     // The picker renders `name` verbatim: no image slot, no markup. A word made
     // the row read as a sentence; a character reads as a badge.
     // ONE shape, repeated: the COUNT is what says "congested".
+    // ONE shape, repeated: the COUNT says how congested it is.
     expect(busySymbol('congested')).toBe('🧍🧍🧍')
     expect(busySymbol('busy')).toBe('🧍🧍')
+    // The healthy case is drawn too — one person, saying "free".
+    expect(busySymbol('normal')).toBe('🧍')
     expect(busySymbol('unavailable')).toBe('🚫')
   })
 
   it('draws nothing for a level that is not worth drawing', () => {
+    // `idle` is the upstream's "nobody is here" wording and `unknown` is
+    // "we were told nothing" — neither may become a claim. `normal` IS drawn
+    // (one person), because the healthy case is worth saying.
     expect(busySymbol('idle')).toBe('')
-    expect(busySymbol('normal')).toBe('')
     expect(busySymbol('unknown')).toBe('')
     expect(busySymbol(undefined)).toBe('')
   })
@@ -73,24 +78,26 @@ describe('the load badge as a character (the DSH model picker)', () => {
   it('appends the character to the RIGHT of the name', () => {
     expect(busyDisplaySuffix('congested')).toBe(' 🧍🧍🧍')
     expect(busyDisplaySuffix('busy')).toBe(' 🧍🧍')
+    expect(busyDisplaySuffix('normal')).toBe(' 🧍')
     expect(busyDisplaySuffix('idle')).toBe('')
-    expect(busyDisplaySuffix('normal')).toBe('')
+    expect(busyDisplaySuffix('unknown')).toBe('')
     expect(busyDisplaySuffix(undefined)).toBe('')
   })
 })
 
 describe('the load badge as an icon (the card)', () => {
-  it('has an icon for every level that changes a decision', () => {
-    expect(busyIcon('idle')).toBe('idle')
+  it('has an icon for every level that is drawn', () => {
+    expect(busyIcon('normal')).toBe('normal')
     expect(busyIcon('busy')).toBe('busy')
     expect(busyIcon('congested')).toBe('congested')
     expect(busyIcon('unavailable')).toBe('unavailable')
   })
 
-  it('has NO icon for the healthy default or for "we were told nothing"', () => {
-    // A badge on every healthy row is decoration, not a warning — and an
-    // unknown level must never be turned into a claim the upstream did not make.
-    expect(busyIcon('normal')).toBeUndefined()
+  it('has NO icon for "nobody is here" or for "we were told nothing"', () => {
+    // `idle` says nothing, and `unknown` is the plugin's own "the probe did
+    // not answer" — neither may be turned into a claim the upstream did not
+    // make.
+    expect(busyIcon('idle')).toBeUndefined()
     expect(busyIcon('unknown')).toBeUndefined()
     expect(busyIcon(undefined)).toBeUndefined()
   })

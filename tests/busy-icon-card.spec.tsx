@@ -106,6 +106,15 @@ describe('the load-level icon in the card', () => {
     expect(peopleIn(congested)).toBe(3)
   })
 
+  it('draws ONE person for the healthy case, and NONE for idle', async () => {
+    // The healthy case IS drawn — one person says "free" without shouting.
+    // `idle` (the upstream's "nobody is here") draws nothing at all.
+    const m = await render({ 'model-a': 'normal' })
+    const drawn = icons(m.container)
+    expect(drawn).toHaveLength(1)
+    expect(drawn[0]?.querySelectorAll('g')).toHaveLength(1)
+  })
+
   it('keeps the word reachable, in the tooltip', async () => {
     const m = await render({ 'model-a': 'congested' })
     // The picture saves room; the title keeps the level readable. The wording
