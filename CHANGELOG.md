@@ -11,6 +11,7 @@
   - **修法**：`src/promo.ts` 新增 `WorkBuddyPromoDiscount` 与 `parseDiscount()`，读 `discount.discountedCredits`（`"0.06x"` 这种**把单位粘在值里**的字符串，`Number("0.06x")` 是 `NaN`，必须剥掉末尾 `x` 再转）+ `displayMode`；`factor` 只在字符串读不出时兜底，两者不一致时**字符串胜**——它才是用户实际被扣的那个数。
   - **何时生效**：新增 `selectPromoMultiplier()`，只让**此刻正在运行**的促销打折。夜间折扣在上游是**两条条目**：一条带折扣 + 夜间时段，另一条是白天的常驻徽标（同款徽标、互补时段、无折扣）。白天那条只配画徽标、**不许改价**，否则卡片会把夜间价挂一整天。绝对有效期（`validFrom`/`validUntil`）也一并管住，活动过期即恢复原价。
   - **两处渲染**：卡片模型行（`WorkBuddyCard.tsx` 的 `effectiveRate()`）与宿主模型选择器的标签（`WorkBuddyModelLabel.tsx`，同时显示 `· x0.06`）都用同一套判定；选择器原来根本不显示倍率，现在补上了——那一屏正是「现在到底多少钱」最该看到的地方。
+  - **README**（中英各一句）：模型名里的倍率是**实付价**——活动时段显示折后价，窗口关闭自动回原价，不需要重启。
   - **测试**：新增 `tests/issue120-promo-discount.spec.ts`（10 条）——`"0.06x"` / 裸数字 / `"0x"`（免费不等于缺失）/ `factor` 兜底 / 非有限值与非负值拒绝 / 未知 `displayMode` 忽略 / **白天常驻条目不降价** / 无折扣条目返回 `undefined`（保留目录价）/ 过期恢复 / 多条同时打折取最高优先级。
 
 - **企业版（`type: ultimate`）账号读企业计费表，姓名显示真名（#124）**
