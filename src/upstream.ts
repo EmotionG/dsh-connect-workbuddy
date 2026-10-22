@@ -419,6 +419,16 @@ const GLOBAL_CONFIG_PATH = '/v3/config'
  * host- and identity-insensitive on the CN side (measured 2026-10-21 on all
  * three CN hosts, under both the CLI and the app user agent: byte-identical),
  * so it is asked as the chat channel's own identity.
+ *
+ * IT DOES NOT EXIST ON THE GLOBAL GATEWAY. Measured 2026-10-22: this exact POST
+ * against `www.workbuddy.ai` answers 404 `Route Not Found` (as do the four
+ * neighbouring spellings tried under both POST and GET), while the same
+ * credential reads that gateway's `/v3/config` normally and finds no load field
+ * on any model. {@link WorkBuddyUpstreamClient.fetchModelBusy} is therefore
+ * expected to THROW for that region — `withBusyLevels` in `src/index.ts` catches
+ * it and ships the roster without levels. Kept as-is rather than region-gated:
+ * the day upstream adds it, this needs no change, and the cost today is one
+ * 404 per refresh that never blocks anything.
  */
 const MODEL_BUSY_PATH = '/v2/chat/busy'
 

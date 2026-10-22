@@ -21,6 +21,22 @@
  * `/v3/config`, this endpoint is not channel-sensitive, so the plugin asks it as
  * the CLI agent it already is on the chat path — no product identity needed.
  *
+ * THE GLOBAL GATEWAY DOES NOT HAVE IT (measured 2026-10-22, and the reason the
+ * README says "CN only"). `www.workbuddy.ai` answers that same POST with
+ * `404 {"error_msg":"404 Route Not Found"}`, and so do `/v3/chat/busy`,
+ * `/v2/models/busy`, `/v2/chat/model/busy` and `/v1/chat/busy` under both POST
+ * and GET — twelve path/method pairs, twelve 404s. The credential is fine: the
+ * SAME token reads that gateway's `/v3/config` (200, 28 models), and none of
+ * those models carries a field whose name mentions busy / load / queue / wait /
+ * level / pressure. So this is not a wrong path, a wrong identity or a
+ * permission problem — upstream never published the fact for that region. The
+ * probe therefore fails there on every refresh; it is caught (see
+ * `withBusyLevels` in `src/index.ts`), logged once, and the roster ships with
+ * no levels, which the card renders as no badge. Deliberately NOT "fixed" by
+ * inferring a level from latency or credits: a made-up load badge is worse than
+ * no badge, and the plugin's whole rule here is to never state a fact the
+ * upstream did not state.
+ *
  * THE LEVELS ARE THE APP'S OWN ENUM, and anything outside it is `unknown`:
  * `idle` / `normal` / `busy` / `congested` / `unavailable`. The app's own words
  * (from its `im-channels` bundle, `chatInput.modelSelector.busy.*`) are
