@@ -77,7 +77,7 @@
  * asserts the report cannot leak a fixture's text.
  */
 
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveDshHome, withFileLock } from './host-peers.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
@@ -391,6 +391,41 @@ export function bodyReportDirectory(env: NodeJS.ProcessEnv = process.env): strin
 }
 
 /**
+ * Byte cap for ONE region file (issue #118).
+ *
+ * An append that would push the file past this rolls it to `<region>.jsonl.1`
+ * (replacing any previous roll) and starts a fresh file, so a session left with
+ * the env var on can no longer grow a file without bound — the reporter's
+ * 508 MB `global.jsonl` is the shape this prevents. One roll is kept rather
+ * than none because the diagnostic's value is in comparing two captures, and a
+ * capture that vanishes the moment it fills up is worse than one that keeps
+ * its immediate predecessor.
+ *
+ * The cap is generous on purpose: a real session's line is a few kilobytes, so
+ * 32 MB is thousands of requests — far past the point where anyone is still
+ * reading the file.
+ */
+export const BODY_REPORT_MAX_BYTES = 32 * 1024 * 1024
+
+/**
+ * How many bytes from the END of the file {@link attachUsage} reads when it
+ * looks for the line it wrote (issue #118).
+ *
+ * The old implementation read the WHOLE file, split it, rewrote the WHOLE file —
+ * so every streamed answer cost ~3× the file size in heap (the string, the line
+ * array, the re-joined string), which is what OOMed the host at ~500 MB. The
+ * usage callback fires seconds after its own append, so its line is always
+ * near the tail; a bounded tail read makes the cost O(window) instead of
+ * O(file). A line older than the window is simply left un-annotated — the
+ * annotation is best-effort by design (see the header of {@link attachUsage}).
+ *
+ * Exported because the boundary behaviour is exactly what a regression would
+ * break first, and a test that pins it must be able to size a file against it
+ * without reaching into the module.
+ */
+export const USAGE_ATTACH_TAIL_BYTES = 1024 * 1024
+
+/**
  * Append one composition to `<dir>/<region>.jsonl`.
  *
  * One file per region is the whole point: the reporter captures a session, then
@@ -400,13 +435,23 @@ export function bodyReportDirectory(env: NodeJS.ProcessEnv = process.env): strin
  *
  * Read-modify-write is avoided on purpose — a long session would rewrite a
  * growing file on every step. The lock keeps two concurrent requests from
- * interleaving a line.
+ * interleaving a line, and the size check inside the SAME lock keeps two
+ * concurrent appends from both deciding "no roll needed" and then writing past
+ * the cap together.
  */
 export async function appendBodyReport(directory: string, report: WorkBuddyBodyReport): Promise<void> {
   const file = join(directory, `${report.region}.jsonl`)
   await mkdir(directory, { recursive: true })
   const line = `${JSON.stringify(report)}\n`
-  await withFileLock(file, () => appendFile(file, line, 'utf8'))
+  await withFileLock(file, async () => {
+    const size = await stat(file).then(entry => entry.size).catch(() => 0)
+    if (size > 0 && size + Buffer.byteLength(line, 'utf8') > BODY_REPORT_MAX_BYTES) {
+      const rolled = `${file}.1`
+      await rm(rolled, { force: true })
+      await rename(file, rolled)
+    }
+    await appendFile(file, line, 'utf8')
+  })
 }
 
 /**
@@ -447,17 +492,6 @@ export async function recordBodyReport(
 }
 
 /**
- * How many trailing lines are searched for the line this handle wrote.
- *
- * One would be enough for a single-threaded request, but a turn can have several
- * requests in flight (parallel tool steps) and their lines interleave, so the
- * target is not necessarily last. A small bounded window keeps the read cheap on
- * a file that grows to tens of megabytes, while still finding a line that landed
- * a couple of appends ago.
- */
-const USAGE_ATTACH_WINDOW = 32
-
-/**
  * Return a callback that rewrites its own line with the upstream's counts.
  *
  * Matched by `at` + `region` + `bodyBytes` + `messageCount`, all four being
@@ -465,6 +499,24 @@ const USAGE_ATTACH_WINDOW = 32
  * timestamped in the same millisecond, and `bodyBytes` tells apart the two
  * different bodies a failover or a retry can produce. A line that is already
  * annotated is left alone, so a second call cannot double-apply.
+ *
+ * The rewrite touches ONLY the tail window (issue #118): the file is opened
+ * `r+`, the last {@link USAGE_ATTACH_TAIL_BYTES} are read, the window is split
+ * into lines, the target line is replaced, and the new window is written back
+ * at the SAME offset with the file truncated to the new end. Nothing before the
+ * window is ever read or written, so a 500 MB file costs one megabyte of heap
+ * here instead of three copies of itself.
+ *
+ * Two consequences of the bounded window, both deliberate:
+ *
+ *   - a line pushed out of the window by later appends is left un-annotated.
+ *     The annotation is a convenience for the #59 diff, never a correctness
+ *     requirement — the sent side is already on disk;
+ *   - the window must start on a line boundary, so the read takes ONE byte of
+ *     lookback before it: when that byte is a newline the window already starts
+ *     on a boundary and its first line is complete (kept in search and rewrite);
+ *     otherwise the first partial line is dropped from the SEARCH and preserved
+ *     byte-for-byte by starting the write at the first complete line's offset.
  */
 function attachUsage(
   directory: string,
@@ -489,31 +541,69 @@ function attachUsage(
     void (async () => {
       try {
         await withFileLock(file, async () => {
-          const text = await readFile(file, 'utf8')
-          const lines = text.split('\n')
-          // The final element after a trailing newline is '' — ignored below.
-          for (let index = lines.length - 1; index >= 0 && index >= lines.length - USAGE_ATTACH_WINDOW; index -= 1) {
-            const line = lines[index]
-            if (line === undefined || line === '') continue
-            let parsed: unknown
-            try {
-              parsed = JSON.parse(line)
-            } catch {
-              continue
+          const handle = await open(file, 'r+')
+          try {
+            const { size } = await handle.stat()
+            if (size === 0) return
+            const windowBytes = Math.min(size, USAGE_ATTACH_TAIL_BYTES)
+            const windowStart = size - windowBytes
+            // One byte of LOOKBACK: whether the window starts on a line boundary
+            // decides whether its first line is complete (searchable and
+            // rewritable) or a tail fragment of an earlier line (neither).
+            // Guessing wrong in either direction is a data-loss bug — dropping
+            // a complete line from the rewrite deletes it from the file.
+            const readStart = windowStart === 0 ? 0 : windowStart - 1
+            const readLength = size - readStart
+            const buffer = Buffer.allocUnsafe(readLength)
+            const { bytesRead } = await handle.read(buffer, 0, readLength, readStart)
+            if (bytesRead === 0) return
+            const raw = buffer.toString('utf8', 0, bytesRead)
+            let contentStart: number
+            let text: string
+            if (readStart === 0) {
+              contentStart = 0
+              text = raw
+            } else if (raw.startsWith('\n')) {
+              // The lookback byte IS the previous line's terminator, so the
+              // window begins exactly on a line boundary: the first line is
+              // complete and must stay in both the search and the rewrite.
+              contentStart = readStart + 1
+              text = raw.slice(1)
+            } else {
+              const firstNewline = raw.indexOf('\n')
+              if (firstNewline === -1) return // one giant line; nothing to do
+              contentStart = readStart + firstNewline + 1
+              text = raw.slice(firstNewline + 1)
             }
-            if (!isRecord(parsed)) continue
-            if (parsed['at'] !== report.at) continue
-            if (parsed['region'] !== report.region) continue
-            if (parsed['bodyBytes'] !== report.bodyBytes) continue
-            if (parsed['messageCount'] !== report.messageCount) continue
-            // Already annotated: leave it alone. This is the guard that makes
-            // "first measurement wins" hold when a SECOND handle exists for the
-            // same body (a failover retry starts a fresh stream); `done` above
-            // only saves a disk read within one handle's lifetime.
-            if (parsed['promptTokens'] !== undefined) return
-            lines[index] = JSON.stringify({ ...parsed, ...usage })
-            await writeFile(file, lines.join('\n'), 'utf8')
-            return
+            const lines = text.split('\n')
+            // The final element after a trailing newline is '' — ignored below.
+            for (let index = lines.length - 1; index >= 0; index -= 1) {
+              const line = lines[index]
+              if (line === undefined || line === '') continue
+              let parsed: unknown
+              try {
+                parsed = JSON.parse(line)
+              } catch {
+                continue
+              }
+              if (!isRecord(parsed)) continue
+              if (parsed['at'] !== report.at) continue
+              if (parsed['region'] !== report.region) continue
+              if (parsed['bodyBytes'] !== report.bodyBytes) continue
+              if (parsed['messageCount'] !== report.messageCount) continue
+              // Already annotated: leave it alone. This is the guard that makes
+              // "first measurement wins" hold when a SECOND handle exists for
+              // the same body (a failover retry starts a fresh stream); `done`
+              // above only saves a disk read within one handle's lifetime.
+              if (parsed['promptTokens'] !== undefined) return
+              lines[index] = JSON.stringify({ ...parsed, ...usage })
+              const rewritten = lines.join('\n')
+              await handle.write(rewritten, contentStart, 'utf8')
+              await handle.truncate(contentStart + Buffer.byteLength(rewritten, 'utf8'))
+              return
+            }
+          } finally {
+            await handle.close()
           }
         })
       } catch (error: unknown) {
