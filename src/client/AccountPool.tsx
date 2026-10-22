@@ -741,6 +741,12 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
               appendLog(t('row.poolLogCheckinAlready', {
                 accountName: row.accountName === '' ? t('row.accountUnnamed') : row.accountName,
               }), 'info')
+            } else if (row.status === 'skipped') {
+              // An enterprise account has no consumer check-in (issue #124).
+              // Neutral wording: nothing is wrong with the account.
+              appendLog(t('row.poolLogCheckinSkipped', {
+                accountName: row.accountName === '' ? t('row.accountUnnamed') : row.accountName,
+              }), 'info')
             } else {
               appendLog(t('row.poolLogCheckinFailed', {
                 accountName: row.accountName === '' ? t('row.accountUnnamed') : row.accountName,

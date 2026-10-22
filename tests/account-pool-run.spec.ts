@@ -84,6 +84,35 @@ describe('checkinAllAccounts', () => {
     expect(rows[0]?.streakDays).toBe(7)
   })
 
+  it('skips an enterprise account without spending a request on it (issue #124)', async () => {
+    // The enterprise gateway has no consumer check-in: it answers 10001 for
+    // every member. Spending two requests to learn a predictable refusal, and
+    // then showing it as a failure in a column that never applies, is worse
+    // than saying "not offered here".
+    const deps = runner()
+    const rows = await checkinAllAccounts([
+      { accountId: 'a', accountName: 'Alpha' },
+      { accountId: 'b', accountName: 'Beta', enterprise: true },
+      { accountId: 'c', accountName: 'Gamma' },
+    ], deps)
+    expect(rows.map(row => row.status)).toEqual(['claimed', 'skipped', 'claimed'])
+    // Nothing was asked about b — not even its credential.
+    expect(deps.calls.filter(call => call.endsWith(':b'))).toEqual([])
+    expect(rows[1]?.message).toContain('enterprise')
+  })
+
+  it('does not charge the batch gap for a skipped row', async () => {
+    // The gap spaces REQUESTS; a row that issues none must not delay the next.
+    let waits = 0
+    const deps = { ...runner(), wait: async () => { waits += 1 } }
+    await checkinAllAccounts([
+      { accountId: 'b', accountName: 'Beta', enterprise: true },
+      { accountId: 'a', accountName: 'Alpha' },
+      { accountId: 'c', accountName: 'Gamma' },
+    ], deps)
+    expect(waits).toBe(1)
+  })
+
   it('does NOT send a claim for an account already checked in today', async () => {
     // Idempotence is the point: a second press must not re-claim, and the row
     // must say why rather than reporting a failure.

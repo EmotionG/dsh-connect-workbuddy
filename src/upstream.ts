@@ -2194,6 +2194,28 @@ async function readEnvelope(response: Response): Promise<Envelope> {
 }
 
 /**
+ * Parse the enterprise endpoint's `cycleResetTime` ("2026-11-01 00:00:00").
+ *
+ * The value carries NO timezone marker, and the official client renders it as
+ * local wall-clock time (it is what the user sees in "resets on 11/01 00:00"),
+ * so it is read as LOCAL time rather than as UTC. `Date.parse` on that shape is
+ * implementation-defined, which is exactly why it is assembled by hand.
+ */
+function parseEnterpriseInstant(value: string): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim())
+  if (match === null) {
+    const fallback = Date.parse(value)
+    return Number.isNaN(fallback) ? undefined : fallback
+  }
+  const [, y, mo, d, h, mi, se] = match
+  const parsed = new Date(
+    Number(y), Number(mo) - 1, Number(d),
+    Number(h), Number(mi), Number(se ?? '0'),
+  ).getTime()
+  return Number.isNaN(parsed) ? undefined : parsed
+}
+
+/**
  * Fail an envelope whose business code is non-zero, classified like HTTP errors.
  *
  * A JSON body on a 401/403 is still a credential refusal: the edge answered in
@@ -2971,12 +2993,99 @@ export class WorkBuddyUpstreamClient {
   }
 
   /**
+   * The ENTERPRISE credit table (issue #124).
+   *
+   * `/v2/billing/meter/get-user-resource` answers an enterprise member with
+   * HTTP 200 and an empty `Accounts` list — a legally-shaped "you have no
+   * credits" that is simply false, because the member's credits live under the
+   * enterprise account. The official client branches on the account's
+   * `type: "ultimate"` and calls `/billing/meter/get-enterprise-user-usage`
+   * instead (no `/v2` prefix), which returns:
+   *
+   *   { credit: 1234, limitNum: 5000, cycleResetTime: "2026-11-01 00:00:00" }
+   *
+   * What REMAINS is `limitNum - credit`. `credit` there is the amount SPENT,
+   * not the amount left — reading it as a balance inverts the answer, which is
+   * worse than the zero it replaces.
+   *
+   * @returns the credits, or `undefined` when this response carried no
+   *          readable balance (the caller turns that into an error rather than
+   *          reporting zero).
+   */
+  private async fetchEnterpriseCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits | undefined> {
+    const response = await fetch(`${billingBase(credential)}/billing/meter/get-enterprise-user-usage`, {
+      method: 'POST',
+      headers: billingHeaders(credential),
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    })
+    const envelope = await readEnvelope(response)
+    if (!response.ok || envelope.code !== 0) throw envelopeError(response.status, envelope)
+    const wrapper = typeof envelope.data === 'object' && envelope.data !== null
+      ? envelope.data as Record<string, unknown>
+      : {}
+    // The payload has been seen both at the top level and under `Data`, so both
+    // are accepted; whichever carries the two numbers wins.
+    const inner = typeof wrapper['Data'] === 'object' && wrapper['Data'] !== null
+      ? wrapper['Data'] as Record<string, unknown>
+      : wrapper
+    const limit = typeof inner['limitNum'] === 'number' && Number.isFinite(inner['limitNum'])
+      ? inner['limitNum']
+      : undefined
+    const used = typeof inner['credit'] === 'number' && Number.isFinite(inner['credit'])
+      ? inner['credit']
+      : undefined
+    // Without BOTH numbers there is no balance to report. Returning `total: 0`
+    // here would reproduce the exact symptom this branch exists to fix.
+    if (limit === undefined || used === undefined) return undefined
+    const remain = Math.max(0, limit - used)
+    const refreshAtMs = typeof inner['cycleResetTime'] === 'string'
+      ? parseEnterpriseInstant(inner['cycleResetTime'])
+      : undefined
+    return {
+      total: remain,
+      packages: [{
+        packageName: '企业积分',
+        remain,
+        size: limit,
+        monthly: true,
+        ...refreshAtMs === undefined ? {} : { refreshAtMs },
+      }],
+      expiringSoon: 0,
+    }
+  }
+
+  /**
    * POST the billing endpoint for the remaining credit, keeping every package
    * separate: the card groups monthly-cycle packages itself and lists the
    * nearest-expiring one-off packages, so aggregation here would lose the
    * dates it needs.
    */
   async fetchCredits(credential: WorkBuddyCredential): Promise<WorkBuddyCredits> {
+    // ENTERPRISE ACCOUNTS READ A DIFFERENT ENDPOINT (issue #124).
+    //
+    // The personal endpoint answers 200 with a legally-shaped empty list for an
+    // enterprise member, so the card showed `total 0` on an account that had
+    // credits — the plugin was asking the wrong table, not getting a refusal.
+    // The enterprise table is `/billing/meter/get-enterprise-user-usage`
+    // (no `/v2` prefix) and returns `{credit, limitNum, cycleResetTime}`: what
+    // REMAINS is `limitNum - credit`, and it resets when the cycle rolls.
+    //
+    // Which branch to take is decided by `enterpriseId` ALONE, never by the
+    // personal answer: an enterprise account whose personal response happened
+    // to be non-empty must not be read through the personal table either, and
+    // `status.active` is `false` for every enterprise member (measured), so it
+    // cannot serve as a discriminator.
+    if (credential.enterpriseId !== undefined && credential.enterpriseId !== '') {
+      const enterprise = await this.fetchEnterpriseCredits(credential)
+      if (enterprise !== undefined) return enterprise
+      // Fall through to the personal table only when the enterprise endpoint
+      // gave us nothing usable. Returning an empty answer there is NOT an
+      // option: `total: 0` on a funded account is the exact symptom #124
+      // reports, so an unreadable enterprise response is reported as a
+      // failure, not as a balance.
+      throw new Error('workbuddy upstream enterprise credit: no readable balance in the response')
+    }
     const now = new Date()
     const format = (date: Date): string => [
       date.getFullYear().toString().padStart(4, '0'),

@@ -2674,6 +2674,9 @@ export function apply(ctx: Context, config: Config): void {
     return accounts.map(account => ({
       accountId: account.id,
       accountName: account.accountName,
+      // Enterprise members have no consumer check-in (issue #124); the runner
+      // skips them instead of spending a request on a refusal it can predict.
+      ...account.enterprise === true ? { enterprise: true } : {},
     }))
   }
 

@@ -46,6 +46,21 @@ export interface WorkBuddyCredential {
   uid: string
   enterpriseId?: string
   nickname?: string
+  /**
+   * The account's DISPLAY name, when the app publishes one (issue #124).
+   *
+   * For an enterprise member `nickname` is the LOGIN ALIAS, not a person's
+   * name — a card showing it looks like it is managing somebody else's
+   * account. The official client prefers this field, then the enterprise user
+   * name, and only then the alias.
+   *
+   * Read from the desktop auth document when present. It is NOT always there
+   * (the app writes only what it has), which is why the read order has three
+   * steps rather than two.
+   */
+  displayName?: string
+  /** The enterprise-side user name (`enterpriseUserName`), when published. */
+  enterpriseUserName?: string
   uin?: string
   /** Which auth file this came from; refreshes are always `dsh`. */
   source: 'desktop' | 'dsh'
@@ -192,6 +207,62 @@ export interface WorkBuddyStoreOptions {
 }
 
 /** One selectable local account, token-free. */
+/**
+ * The name to SHOW for a credential (issue #124).
+ *
+ * The order matters and is not arbitrary: on an enterprise credential
+ * `nickname` is the LOGIN ALIAS, so putting it first made the card look like it
+ * was managing a stranger's account. The official client prefers the display
+ * name, then the enterprise-side user name, and only then the alias.
+ *
+ * Blank spellings are skipped rather than preferred: the app writes `"   "` in
+ * places, and rendering whitespace where a name belongs is worse than falling
+ * through to the alias.
+ *
+ * Exported because the same order has to hold in the store's account list, the
+ * pool rows and the composer panel — three sites that must not drift.
+ */
+export function preferredAccountName(fields: {
+  displayName?: string
+  enterpriseUserName?: string
+  nickname?: string
+}): string {
+  for (const candidate of [fields.displayName, fields.enterpriseUserName, fields.nickname]) {
+    if (candidate !== undefined && candidate.trim() !== '') return candidate
+  }
+  return ''
+}
+
+/**
+ * Carry display names forward across a re-read of the same account.
+ *
+ * The desktop auth document is the only source for these fields and it does
+ * not always publish them: a refresh that rewrites the document can drop
+ * `displayName` while keeping the same sign-in. Replacing the whole record
+ * would then silently fall back to the alias — the exact symptom #124 reports,
+ * coming back on its own. So an absent field yields to the previous value and a
+ * PRESENT one wins (it is the newer reading).
+ */
+export function mergeCredentialDisplayNames<T extends {
+  displayName?: string
+  enterpriseUserName?: string
+  nickname?: string
+}>(previous: T | undefined, next: T): T {
+  if (previous === undefined) return next
+  return {
+    ...next,
+    ...next.displayName === undefined && previous.displayName !== undefined
+      ? { displayName: previous.displayName }
+      : {},
+    ...next.enterpriseUserName === undefined && previous.enterpriseUserName !== undefined
+      ? { enterpriseUserName: previous.enterpriseUserName }
+      : {},
+    ...next.nickname === undefined && previous.nickname !== undefined
+      ? { nickname: previous.nickname }
+      : {},
+  }
+}
+
 export interface WorkBuddyAccountChoice {
   /** Stable id derived from `uin` (or `uid` when uin is absent). */
   id: string
@@ -209,6 +280,15 @@ export interface WorkBuddyAccountChoice {
   /** The auth file this account was read from; newest is preferred. */
   filePath: string
   selected: boolean
+  /**
+   * This account belongs to an enterprise (issue #124).
+   *
+   * Present only when `enterpriseId` is set. The credits come from the
+   * enterprise table and the consumer daily check-in does not exist for it, so
+   * callers branch on this FACT rather than on `status.active` (which reads
+   * `false` for every enterprise member).
+   */
+  enterprise?: boolean
 }
 
 /** Legacy single-copy basename (pre-dual-provider); kept as migration source. */
@@ -294,6 +374,8 @@ function vaultDocument(credential: WorkBuddyCredential, accountId: string, refre
       uid: credential.uid,
       ...credential.enterpriseId === undefined ? {} : { enterpriseId: credential.enterpriseId },
       ...credential.nickname === undefined ? {} : { nickname: credential.nickname },
+      ...credential.displayName === undefined ? {} : { displayName: credential.displayName },
+      ...credential.enterpriseUserName === undefined ? {} : { enterpriseUserName: credential.enterpriseUserName },
       ...credential.uin === undefined ? {} : { uin: credential.uin },
     },
   }
@@ -681,6 +763,8 @@ export function parseWorkBuddyAuth(
   const lastRefreshAtMs = typeof auth['lastRefreshTime'] === 'number' ? expiryToMs(auth['lastRefreshTime']) : undefined
   const enterpriseId = optionalCredentialField(identity['enterpriseId'], atRestKey)
   const nickname = optionalCredentialField(identity['nickname'], atRestKey)
+  const displayName = optionalCredentialField(identity['displayName'], atRestKey)
+  const enterpriseUserName = optionalCredentialField(identity['enterpriseUserName'], atRestKey)
   const uin = optionalCredentialField(identity['uin'], atRestKey)
   const credential: WorkBuddyCredential = {
     accessToken,
@@ -691,6 +775,8 @@ export function parseWorkBuddyAuth(
     uid: optionalCredentialField(identity['uid'], atRestKey) ?? '',
     ...enterpriseId === undefined ? {} : { enterpriseId },
     ...nickname === undefined ? {} : { nickname },
+    ...displayName === undefined ? {} : { displayName },
+    ...enterpriseUserName === undefined ? {} : { enterpriseUserName },
     ...uin === undefined ? {} : { uin },
     ...lastRefreshAtMs === undefined ? {} : { lastRefreshAtMs },
     source: 'desktop',
@@ -1374,7 +1460,13 @@ export class WorkBuddyCredentialStore {
       }
       // The live file outranks backups; between two backups the freshest
       // issuance time wins (see {@link isFresher}).
-      if (isFresher(credential, existing)) byId.set(id, credential)
+      //
+      // Display names are carried forward from whichever copy is discarded: the
+      // app does not always re-write `displayName` / `enterpriseUserName`, and
+      // dropping them here would silently fall back to the login alias — the
+      // exact symptom issue #124 reports, returning on its own.
+      if (isFresher(credential, existing)) byId.set(id, mergeCredentialDisplayNames(existing, credential))
+      else byId.set(id, mergeCredentialDisplayNames(credential, existing))
     }
     for (const own of await this.readOwns()) {
       if (!this.matchesRegion(own.domain)) continue
@@ -1513,8 +1605,15 @@ export class WorkBuddyCredentialStore {
         // fallback to `uin`/`uid`: those are opaque identifiers, and showing one
         // as a "name" put a bare number in front of the user where a name
         // belonged. Presentation layers render their own placeholder for ''.
-        accountName: credential.nickname ?? '',
+        // Preferred order (issue #124): a real display name, then the
+        // enterprise-side name, then the login alias. For an enterprise member
+        // the ALIAS is not a person's name, and showing it made the card look
+        // like it was managing somebody else's account.
+        accountName: preferredAccountName(credential),
         domain: credential.domain,
+        ...credential.enterpriseId === undefined || credential.enterpriseId === ''
+          ? {}
+          : { enterprise: true },
         source: credential.source,
         tokenExpiresAtMs: credential.expiresAtMs,
         filePath: credential.filePath,

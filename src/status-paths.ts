@@ -945,6 +945,15 @@ export interface WorkBuddyWebAccount {
   source: 'desktop' | 'dsh'
   tokenExpiresAtMs: number
   selected: boolean
+  /**
+   * This account belongs to an enterprise (issue #124).
+   *
+   * Its credits come from the enterprise table and its check-in is refused by
+   * the upstream (`10001`), so the card must not offer the action for it. The
+   * field is a FACT about the credential (`enterpriseId` is present), not a
+   * guess from `status.active`: that reads `false` for every enterprise member.
+   */
+  enterprise?: boolean
 }
 
 /**
@@ -1535,7 +1544,12 @@ export interface WorkBuddyWebPool {
 export interface WorkBuddyWebPoolCheckinRow {
   accountId: string
   accountName: string
-  status: 'claimed' | 'already' | 'failed'
+  /**
+   * `'skipped'` means the account has no consumer check-in to claim — an
+   * enterprise member (issue #124). It is NOT a failure: nothing is wrong with
+   * the account, the action simply does not exist for it.
+   */
+  status: 'claimed' | 'already' | 'failed' | 'skipped'
   credit?: number
   streakDays?: number
   message?: string

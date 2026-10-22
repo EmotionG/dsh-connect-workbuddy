@@ -28,7 +28,7 @@ import type { WorkBuddyCheckinStatus } from './upstream.ts'
 export interface WorkBuddyPoolCheckinRow {
   accountId: string
   accountName: string
-  status: 'claimed' | 'already' | 'failed'
+  status: 'claimed' | 'already' | 'failed' | 'skipped'
   /** Credits gained, when the upstream stated a figure. */
   credit?: number
   /** Streak length after the claim, when the upstream stated one. */
@@ -48,6 +48,16 @@ export interface WorkBuddyPoolTestRow {
 export interface WorkBuddyPoolTarget {
   accountId: string
   accountName: string
+  /**
+   * The account belongs to an enterprise (issue #124).
+   *
+   * The enterprise gateway does not run the consumer check-in: it answers
+   * `10001` for every enterprise member, so a batch that includes one would
+   * spend two requests per run to learn the same refusal and then list it as a
+   * failure in a column that never applies to it. The runner skips it and says
+   * so, rather than reporting a broken account.
+   */
+  enterprise?: boolean
 }
 
 /** What the batch runner needs from the Host, injected so it stays testable. */
@@ -97,8 +107,24 @@ export async function checkinAllAccounts(
 ): Promise<WorkBuddyPoolCheckinRow[]> {
   void nowMs
   const rows: WorkBuddyPoolCheckinRow[] = []
-  for (const [index, target] of targets.entries()) {
-    if (index > 0) await (deps.wait ?? defaultWait)(POOL_BATCH_GAP_MS)
+  let issued = 0
+  for (const target of targets) {
+    // An enterprise account has no consumer check-in to claim (see
+    // `WorkBuddyPoolTarget.enterprise`). Reported as `skipped`, not `failed`:
+    // nothing is wrong with the account.
+    if (target.enterprise === true) {
+      rows.push({
+        accountId: target.accountId,
+        accountName: target.accountName,
+        status: 'skipped',
+        message: 'enterprise accounts have no daily check-in',
+      })
+      continue
+    }
+    // The gap is between REQUESTS, not between rows: a skipped row costs
+    // nothing, so it must not delay the next one.
+    if (issued > 0) await (deps.wait ?? defaultWait)(POOL_BATCH_GAP_MS)
+    issued += 1
     rows.push(await checkinOne(target, deps))
   }
   return rows
