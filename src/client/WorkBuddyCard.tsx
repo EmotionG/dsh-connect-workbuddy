@@ -2178,7 +2178,12 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                   <span className="dsm-workbuddy-model-name">
                                     {model.name}
                                     {model.creditMultiplier === undefined ? null
-                                      : <span className="dsm-workbuddy-model-name-rate">({model.creditMultiplier.toFixed(2)}x)</span>}
+                                      // The SAME token the picker shows: the label slot
+                                      // appends `x0.00` to the model name (see
+                                      // `adapter.ts`), and a card saying `(0.00x)` would
+                                      // make one number look like two. The 7px gap above
+                                      // already separates it from the name, so no dot.
+                                      : <span className="dsm-workbuddy-model-name-rate">x{model.creditMultiplier.toFixed(2)}</span>}
                                   </span>
                                   {/* The upstream's own promotion badge, when one
                                       holds for this model right now. It sits NEXT

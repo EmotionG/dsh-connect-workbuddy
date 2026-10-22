@@ -303,7 +303,7 @@ describe('the readout renders as preference lines, not as the pool heading\'s ex
   const renderCapabilities = async () => {
     const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
     const cnTab = m.container.querySelectorAll('.dsm-workbuddy-tab')[0]
-    if (cnTab !== null && !cnTab.classList.contains('dsm-workbuddy-tab-active')) {
+    if (cnTab !== undefined && !cnTab.classList.contains('dsm-workbuddy-tab-active')) {
       await m.click(cnTab)
     }
     return m
