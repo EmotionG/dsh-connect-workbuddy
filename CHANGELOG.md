@@ -23,6 +23,7 @@
 ## 5.3.0 (2026-10-22)
 
 > 新增能力属 **minor**，本次定版 **5.3.0**。**默认关闭，关闭时插件行为与 5.2.3 完全一致**：不多一个工具、不多一条指令、不多一个请求，provider 路由、模型、凭据与计费一律未变。
+> **实时胶囊是唯一的例外**：它的只读路由 `/plugins/dsh-connect-workbuddy/cli-live` 与客户端组件**无条件注册**（否则客户端无法把「没有回合」和「没有这条路由」区分开），所以开关关着时每个打开的页面仍会每 5 秒问一次这条本地路由——它不碰上游、不花额度，代价是一个空数组的 JSON。
 >
 > 这一版是 PR #104 按维护者 13 条评审逐条重做的结果，**不是原样重提**。改动分三类：把「原版会真的伤到用户」的地方修掉、把原版站不住的论证改掉、把 runner 这条从未被测过的路径补上测试。
 
@@ -34,7 +35,9 @@
   - **凭据复用**：`CODEBUDDY_AUTH_TOKEN` → 插件已维护的 vault，**不需要再登录一次**。区域优先于新鲜度，`regionOrder` 默认 `cn,global`。
   - **非破坏性装配**：`cliBridge.enabled` 默认 `false`；`tools` / `commands` 用 `ctx.inject([...])`（**不是** apply 期 `ctx.get()` 采样）等待宿主服务。
   - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
+<<<<<<< HEAD
   - **开关在卡片里，不用手改 YAML**：账号卡片的偏好区新增一个**全局**勾选「允许调用本机 CodeBuddy CLI 干活」，默认关闭。勾上后 `/codebuddy` 与 `codebuddy_ask` 一起出现，取消后一起消失；**关着时两个入口根本不注册**，不是注册后藏起来。写的是顶层 `cliBridge.enabled`（全局，与 cn/global 分区无关），只重建这一条路由，不 dispose provider 栈、不打断在飞请求。读取走 Host 的已提交值而不是浏览器镜像——后者在本命名空间会 stale，一个「看起来开了」的假值在这里等于谎报消费能力。
+  - **跑的时候看得见（实时胶囊）**：`conversation.composer.dock` 上挂一颗 `CodeBuddy · 7 tools · 42s · last: Bash`，数据来自插件自己的只读路由 `/plugins/dsh-connect-workbuddy/cli-live`（序列化宿主侧的 live board）。宿主工具调用是一次性的，`execute()` 不返回界面就什么都不知道——这颗胶囊补的就是那几分钟的空白。5 秒轮询、秒数由 1 秒本地 tick 推、多会话共享一个在途请求；没有回合时渲染 `null`，那一行不动。路由**无条件注册**（开关关着也在），客户端才能把「没有回合」与「没有这条路由」分开。
 
 ### Fixes（相对 PR #104 初版）
 
@@ -59,6 +62,7 @@
 - **同一类缺陷还有三处（一并补上）：pnpm / yarn / fnm 在 Windows 上的默认位置。** 清单原来只写 POSIX 路径（`~/.local/share/pnpm/global/5`、`~/.config/yarn/global`、`~/.fnm/node-versions`），而这三家在 Windows 上分别落在 `%LOCALAPPDATA%\pnpm\global\5`、`%LOCALAPPDATA%\Yarn\Data\global`、`%APPDATA%\fnm\node-versions`；pnpm 在 macOS 上还有 `~/Library/pnpm/global/5`。这些路径按各自工具文档的默认值补 —— 判错只多一次 `existsSync`，判漏就是「CLI not found」。**本机只能实测 npm 那条**（`%APPDATA%\npm\node_modules\@tencent-ai\codebuddy-code` 确认存在），其余三条没有对应的全局安装可验证。
 - **配额拒绝时会泄漏临时目录。** `resolveWorkingDir()` 在 `allow_unattended` 下**先**创建 scratch 目录，`gate.tryEnter()` 在它之后；被拒时直接 `return`，那个目录就留在 OS temp 里 —— 配额耗尽后反复重试，每次留一个空目录。实测本机 temp 里已经堆了 **9 个**。修法：拒绝分支里同样 `removeScratch`。测试是**先证明它会红**才留下的：把修复临时摘掉跑一次，报 `expected [ 'dsh-codebuddy-scratch-fVf7kZ' ] to deeply equal []`。
 - **`isReviewInvocation` 的注释过期。** 它还写着「empty line」，而 `--edit` 单独出现也会走评审分支。一行注释的事，但下一个读代码的人会按注释理解行为。
+- **胶囊的秒数会冻住（新增功能里的缺陷，被新测试当场逮到）。** 时钟偏移原本在**每次轮询返回**时重算（`offsetRef.current = next.serverTime - Date.now()`），但 `readLive` 会把同一份文档缓存到下一个轮询周期，而那份文档带的是**旧的** `serverTime` —— 于是每次命中缓存都把已经过去的时间从偏移里再减一遍，`Date.now() + offset - startedAt` 恒等于文档刚取到时的年龄，计数器永远显示同一个秒数（实测：过了 1.1 秒仍然显示 `0s`）。修法：只在 `serverTime` 变化（即真的拿到新文档）时重算偏移。测试是**先证明它会红**才留下的：把守卫临时改成恒真，报 `expected 'CodeBuddy · 3 tools · 0s · last: Read' to contain '1s'`。
 
 - **`killTree()` 不再把 `pid ≤ 1` 当进程组 —— 这条测试曾经会把评审者的整个登录会话打死。** 原来只挡 `pid === undefined`，而 `process.kill(-pid)` 拿到的 `pid` 一旦是 `1`（测试里为了区分两个假子进程写的 `fakeChild(1)`）就退化成 `kill(-1)`：不是杀子进程树，而是**给当前用户能 signal 的所有进程发 SIGTERM**，一秒后还升级成 SIGKILL。实测（macOS）跑 `vitest run tests/cli-bridge-runner.spec.ts` 会让 launchd 记录 `node[<pid>]` 向 Finder / Dock / WindowManager / ControlCenter / 用户正开着的微信 / DSH 宿主同时发 SIGTERM；DSH 的 renderer 作为受害者退出后又被 `DesktopFatalRecovery` relaunch，用户视角就是「DSH 反复重启，还把微信一起关了」。现在 group-kill 只对 `Number.isInteger(pid) && pid > 1` 开放，其余退化成单进程 `child.kill()`；测试里的假 pid 从 `1/2` 改成 `51_001/51_002`，并新增回归用例（spy `process.kill`，断言永不出现非正数信号目标）。
 
@@ -97,6 +101,8 @@
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
 - 重做版补的 8 条：`cliEntryCandidates()` 的四条布局断言（Windows 的 npm 前缀下直接是 `node_modules`、**没有 `lib` 层**；POSIX 前缀仍拼 `lib/node_modules`；pnpm / yarn 的全局仓本身就是模块根；同一个目录只被探测一次）；Windows 上 pnpm / yarn / fnm 三个仓库位置一条（fnm 那条要真造一个版本目录，否则「按版本展开」根本没被执行）；`parseCommandInput` 的 `--edit` 一条（带正文 → `acceptEdits` 且正文剥掉前缀）；配额拒绝后临时目录不残留一条；以及一条**反向约束**：指令的 hint 里不得出现默认权限模式跑不起来的示例。
+- 全量：**116 文件 / 1933 条通过（另 2 条跳过）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功。
+- **实时胶囊的测试（新增）**：`tests/cli-bridge-live.spec.ts`（12 条）锁宿主侧 live board —— 开/退休告、失败回合也退休、指令与工具两个入口的标签、`elapsedMs` 由宿主时钟算、无 board 时不告警、以及「目录校验拒绝的调用**不得**留下胶囊」（公告发生在所有前置条件之后，所以没开始的工作不会闪一下）；`tests/cli-bridge-live-pill.spec.tsx`（11 条）锁客户端 —— 空闲渲染 `null`、标签含工具数与秒数、`starting`/`finishing` 不显示秒、`+N`、**秒数在两次轮询之间本地前进且请求数不变**、宿主时钟偏移校正、路由失败/畸形文档/没有 `fetch` 都不抛、以及 `readLive` 的并发合并与缓存过期。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
 - 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
 

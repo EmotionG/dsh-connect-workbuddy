@@ -564,3 +564,75 @@ describe('cliEntryCandidates', () => {
     }
   })
 })
+
+describe('live progress reporting', () => {
+  it('reports every assistant block, counting tools and characters', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const seen: Array<{ toolCalls: number; lastTool: string; chars: number }> = []
+    const running = runAgent(turnOptions(entry, {
+      onProgress: progress => { seen.push({ ...progress }) },
+    }), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'let me look' },
+          { type: 'tool_use', name: 'Grep', id: 't1' },
+        ],
+      },
+    })
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'Read', id: 't2' },
+          { type: 'text', text: ' and then' },
+        ],
+      },
+    })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 3, result: 'done' })
+    await running
+
+    // One call per block that changed a number, in frame order. The text block
+    // reports the tool count SO FAR, which is what makes the pill's two numbers
+    // consistent with each other at every moment.
+    expect(seen).toEqual([
+      { toolCalls: 0, lastTool: '', chars: 11 },
+      { toolCalls: 1, lastTool: 'Grep', chars: 11 },
+      { toolCalls: 2, lastTool: 'Read', chars: 11 },
+      { toolCalls: 2, lastTool: 'Read', chars: 20 },
+    ])
+  })
+
+  it('never reports the text itself', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const payloads: string[] = []
+    const running = runAgent(turnOptions(entry, {
+      onProgress: progress => { payloads.push(JSON.stringify(progress)) },
+    }), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'SECRET-ANSWER' }] } })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'SECRET-ANSWER' })
+    await running
+
+    // The pill is a COUNT, never a copy: shipping the text here would put a
+    // second, growing copy of the answer in a place nobody asked for.
+    expect(payloads.join('')).not.toContain('SECRET-ANSWER')
+  })
+
+  it('reports nothing when no callback is supplied', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitFrame({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Grep', id: 't1' }] } })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'ok' })
+    // The point is that this resolves rather than throwing on an absent callback.
+    await expect(running).resolves.toMatchObject({ ok: true })
+  })
+})

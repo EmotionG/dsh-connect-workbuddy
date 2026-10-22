@@ -27,6 +27,8 @@
  */
 import { mountCodebuddyCommand } from './command.ts'
 import type { BridgeCredentialRegion } from './credentials.ts'
+import { createLiveBoard } from './live.ts'
+import type { LiveBoard } from './live.ts'
 import type { BridgeCommandsService, BridgeLog, BridgeToolsService } from './services.ts'
 import { gateFor } from './tool.ts'
 import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
@@ -174,6 +176,16 @@ export function normalizeCliBridgeOptions(
 export interface CliBridgeRuntime {
   options: BridgeOptions
   deps: AskDeps
+  /**
+   * The live-turn board the composer readout polls.
+   *
+   * Owned by the runtime so it is rebuilt with it: a settings change replaces the
+   * runtime, and a board carried over would keep describing turns whose options
+   * no longer apply. It is NOT part of `deps` for the same reason the gate is
+   * built here — both surfaces must announce into the same board, and there must
+   * be exactly one.
+   */
+  live: LiveBoard
 }
 
 /**
@@ -189,9 +201,10 @@ export function createCliBridgeRuntime(
 ): CliBridgeRuntime | undefined {
   const options = normalizeCliBridgeOptions(settings, message => log(message))
   if (!options.enabled) return undefined
+  const live = createLiveBoard()
   // One gate for both surfaces: the budget must not depend on which entrance the
   // call arrived through.
-  return { options, deps: { options, regions, log, gate: gateFor(options) } }
+  return { options, deps: { options, regions, log, gate: gateFor(options), live }, live }
 }
 
 /** Mount `codebuddy_ask` on a tools service, returning its disposer. */

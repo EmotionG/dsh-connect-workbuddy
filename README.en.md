@@ -288,7 +288,7 @@ dsh plugin --profile web exec dsh-connect-workbuddy status
 
 ## CLI route (optional): let CodeBuddy do the work
 
-> Off by default (`cliBridge.enabled: false`). While it is off, the plugin behaves **exactly** as before: no extra tool, no extra command, no extra request.
+> Off by default (`cliBridge.enabled: false`). While it is off, no tool and no command is registered, and the provider route is untouched. **The one exception** is the live pill described below: its read-only route and client component are registered unconditionally (the client needs them to tell "no turn" from "no route"), so an open page still asks that local route every 5 seconds — it never touches the upstream and spends nothing, and answers with an empty array.
 
 This route uses CodeBuddy as a **tool** rather than as a model provider: the plugin exposes a `codebuddy_ask` tool and a `/codebuddy` command, and a local, already signed-in CodeBuddy CLI runs one real turn in its own process — reading files, running `git`, editing code — then hands the conclusion back.
 
@@ -324,6 +324,19 @@ Every other key has a default. See the table below. Changing them does not need 
 An **empty** `/codebuddy` means "review the uncommitted changes in this workspace" (that invocation is forced to the read-only `dontAsk` permission mode and is told to run `git diff` itself and report only what it actually saw); **text after it** is sent through verbatim; **a leading `--edit`** grants write permission for that one turn (`acceptEdits`, e.g. `/codebuddy --edit fix this null deref`) without changing the default. `--edit` on its own means "review and fix what you find".
 
 When the turn finishes, the conclusion is **injected back into the session model** (`cliBridge.injectResult`, on by default): an idle session is woken for a new turn, a running one gets it queued for its next step. **That step really spends DSH tokens** — set `injectResult` to `false` to leave the model untouched, and the `/codebuddy` result is then shown to you only. The injected text starts with `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]` so neither you nor the model mistakes it for a human message.
+
+### While it runs: the pill under the composer
+
+A Host tool call is **one-shot**: the interface learns nothing until `execute()` returns. The minutes in between — reading files, running `git`, retrying — used to be a blank spinner, and a user could not tell "still working" from "hung".
+
+So the plugin registers a **live pill** on `conversation.composer.dock` (the row under the composer, next to the credit readout): `CodeBuddy · 7 tools · 42s · last: Bash`. It is fed by the plugin's own read-only route, `/plugins/dsh-connect-workbuddy/cli-live`, which serializes the host-side live board (`src/cli-bridge/live.ts`).
+
+- **It appears only while a turn is live.** With nothing running the component renders `null`, so the row is untouched — and the route is registered **unconditionally** (even with the switch off) so the client can tell "no turn" from "no route" without knowing the switch's state.
+- **The seconds tick locally, without extra requests.** The document is polled every 5s; the counter is advanced by a 1s local tick from `startedAt`. Concurrent sessions share **one** in-flight request (module cache + inflight dedupe), so N tabs do not become N polls.
+- **Clock skew is corrected against the host.** `startedAt` is the host's clock; a browser a minute behind would compute a negative age. The document ships `serverTime` and the client derives an offset from it — recomputed **only when a fresh document arrives**, because a cached one carries the old `serverTime` and re-measuring each poll would subtract the elapsed time again and freeze the counter.
+- **The tool count is an approximation.** It counts `tool_use` frames in the CLI's NDJSON; `phase` is `starting` / `running` / `finishing`, and `lastTool` is the most recent tool name. These are progress signals for a human, not a billing figure.
+
+> The pill lives in the plugin's client entry (`dsh.client`), so changing it means **rebuilding `lib/client.js` and restarting the Host**, same as host-side code.
 
 ### Permissions: read-only by default
 

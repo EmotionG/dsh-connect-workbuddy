@@ -484,6 +484,17 @@ export const en = {
   'sidebar.lastRefresh': 'Last refreshed {time}',
   'sidebar.refreshFailed': 'Refresh failed',
   'sidebar.signedOut': 'Not signed in',
+  // The live CodeBuddy turn readout. Kept terse: it sits in the composer's
+  // ambient dock next to the shell's own round/token pills, where a sentence
+  // would wrap and push the composer.
+  'cliLive.running': 'CodeBuddy',
+  'cliLive.toolCalls': '{count} tools',
+  'cliLive.elapsed': '{seconds}s',
+  'cliLive.starting': 'starting…',
+  'cliLive.finishing': 'finishing…',
+  'cliLive.lastTool': 'last: {tool}',
+  'cliLive.chars': '{count} chars',
+  'cliLive.aria': 'A CodeBuddy turn is running: {detail}',
 } as const
 
 export type WorkBuddySettingsKey = keyof typeof en
@@ -923,4 +934,12 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'sidebar.lastRefresh': '最近刷新 {time}',
   'sidebar.refreshFailed': '刷新失败',
   'sidebar.signedOut': '未登录',
+  'cliLive.running': 'CodeBuddy',
+  'cliLive.toolCalls': '{count} 次工具',
+  'cliLive.elapsed': '{seconds} 秒',
+  'cliLive.starting': '启动中…',
+  'cliLive.finishing': '收尾中…',
+  'cliLive.lastTool': '最近：{tool}',
+  'cliLive.chars': '{count} 字',
+  'cliLive.aria': '有一个 CodeBuddy 回合正在跑：{detail}',
 }

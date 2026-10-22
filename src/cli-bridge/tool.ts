@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { resolveCredentials, type BridgeCredentialRegion } from './credentials.ts'
 import { TurnGate, type GateLimits } from './gate.ts'
+import type { LiveBoard, LiveEntrance, LiveTurn } from './live.ts'
 import { runAgent } from './runner.ts'
 import type { BridgeLog, BridgeToolExecution, BridgeToolsService } from './services.ts'
 
@@ -370,6 +371,14 @@ export interface AskDeps {
   log: BridgeLog
   /** Shared by the tool and the command, so their budgets cannot drift apart. */
   gate?: TurnGate
+  /**
+   * Where live turns are announced for the composer readout.
+   *
+   * Optional so every existing caller (and every test that builds a `deps` by
+   * hand) keeps working with no board at all — a turn then simply runs
+   * unobserved, which is the pre-feature behaviour rather than an error.
+   */
+  live?: LiveBoard
 }
 
 /** The gate this call must pass, built once per normalized option set. */
@@ -395,13 +404,128 @@ function sessionKeyOf(execution: BridgeToolExecution | undefined, fallback: stri
  * same validation — a command that re-implemented this would drift from the tool
  * the first time either side gained a knob.
  */
+/**
+ * Everything `runAsk` decided before the turn started.
+ *
+ * Passed as one object rather than as eight parameters so the live-turn branch
+ * and the plain branch cannot drift apart: there is exactly one place that knows
+ * what a turn was asked for.
+ */
+interface TurnRunContext {
+  startedAt: number
+  dir: WorkingDirChoice
+  message: string
+  effort: string
+  mode: string
+  modelArg: string
+  effectiveMode: string
+  /** The budget slot this turn holds; released by the caller, never here. */
+  entry: { release(): void }
+  liveTurn?: LiveTurn
+}
+
+/** The part of a turn that runs once the budget and the directory are settled. */
+async function runAskTurn(
+  args: Record<string, unknown>,
+  execution: BridgeToolExecution | undefined,
+  deps: AskDeps,
+  context: TurnRunContext,
+): Promise<AskResult> {
+  const { startedAt, dir, message, effort, modelArg, effectiveMode, liveTurn } = context
+  const { options, regions, log } = deps
+
+  let credentials
+  try {
+    credentials = await resolveCredentials(regions, options.regionOrder, log)
+  } catch (error) {
+    return result({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+
+  const sessionIdArg = typeof args['session_id'] === 'string' ? args['session_id'].trim() : ''
+  const signal = execution?.signal
+
+  if (liveTurn !== undefined) liveTurn.phase = 'running'
+
+  const outcome = await runAgent(
+    {
+      prompt: message,
+      cwd: dir.dir,
+      binary: options.binary,
+      model: modelArg !== '' ? modelArg : options.model,
+      permissionMode: effectiveMode,
+      effort: effort !== '' ? effort : options.effort,
+      appendSystemPrompt: options.appendSystemPrompt,
+      maxTurns: clampInt(args['max_turns'], options.maxTurns, MAX_TURNS_CAP),
+      timeoutMs: clampInt(args['timeout_secs'], options.timeoutSecs, TIMEOUT_SECS_CAP) * 1000,
+      ...(sessionIdArg !== '' ? { sessionId: sessionIdArg } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      ...(liveTurn === undefined
+        ? {}
+        : {
+            onProgress: (progress: { toolCalls: number; lastTool: string; chars: number }) => {
+              // Written in place: the board serializes this object on the route's
+              // own thread, and copying it per frame would allocate for no reason.
+              liveTurn.toolCalls = progress.toolCalls
+              liveTurn.lastTool = progress.lastTool
+              liveTurn.chars = progress.chars
+            },
+          }),
+    },
+    credentials,
+    log,
+  )
+
+  // The CLI has answered; what is left is truncation and rendering, which is fast
+  // but not instant on a 400 KB reply. Saying `finishing` keeps the chip honest
+  // about the difference between "still working" and "about to disappear".
+  if (liveTurn !== undefined) {
+    liveTurn.phase = 'finishing'
+    if (outcome.sessionId !== undefined) liveTurn.sessionId = outcome.sessionId
+  }
+
+  let reply = outcome.text
+  let truncated = false
+  if (reply.length > options.maxReplyChars) {
+    const omitted = reply.length - options.maxReplyChars
+    reply =
+      `${reply.slice(0, options.maxReplyChars)}\n\n` +
+      `[truncated by dsh-connect-workbuddy: ${String(omitted)} more characters. ` +
+      'Have CodeBuddy write the full text to a file and read it back.]'
+    truncated = true
+  }
+
+  const tools = [...outcome.toolCounts.entries()]
+    .slice(0, TOOLS_CAP)
+    .map(([name, count]) => ({ name, count }))
+
+  return result({
+    ok: outcome.ok,
+    reply,
+    session_id: outcome.sessionId ?? '',
+    tools,
+    denied_tools: [...outcome.deniedTools],
+    tool_calls: [...outcome.toolCounts.values()].reduce((sum, count) => sum + count, 0),
+    num_turns: outcome.numTurns ?? 0,
+    tokens_in: outcome.usage?.input_tokens ?? 0,
+    tokens_out: outcome.usage?.output_tokens ?? 0,
+    cache_read_tokens: outcome.usage?.cache_read_input_tokens ?? 0,
+    credential_region: outcome.credential.region,
+    working_dir: dir.dir,
+    unattended: dir.unattended,
+    elapsed_ms: Date.now() - startedAt,
+    truncated,
+    error: outcome.error ?? '',
+  })
+}
+
 export async function runAsk(
   args: Record<string, unknown>,
   execution: BridgeToolExecution | undefined,
   deps: AskDeps,
+  entrance: LiveEntrance = 'tool',
 ): Promise<AskResult> {
   const startedAt = Date.now()
-  const { options, regions, log } = deps
+  const { options, log } = deps
 
   const mode = typeof args['permission_mode'] === 'string' ? args['permission_mode'].trim() : ''
   if (mode !== '' && !(PERMISSION_MODES as readonly string[]).includes(mode)) {
@@ -436,70 +560,42 @@ export async function runAsk(
   }
 
   try {
-    let credentials
-    try {
-      credentials = await resolveCredentials(regions, options.regionOrder, log)
-    } catch (error) {
-      return result({ ok: false, error: error instanceof Error ? error.message : String(error) })
-    }
-
+    // Announced BEFORE the credential lookup: resolving across several regions
+    // can take seconds, and a chip that only appears at spawn makes that window
+    // look like the click was ignored. `phase` is what distinguishes the two.
     const modelArg = typeof args['model'] === 'string' ? args['model'].trim() : ''
-    const sessionIdArg = typeof args['session_id'] === 'string' ? args['session_id'].trim() : ''
-    const signal = execution?.signal
-
-    const outcome = await runAgent(
-      {
-        prompt: message,
-        cwd: dir.dir,
-        binary: options.binary,
-        model: modelArg !== '' ? modelArg : options.model,
-        permissionMode: mode !== '' ? mode : options.permissionMode,
-        effort: effort !== '' ? effort : options.effort,
-        appendSystemPrompt: options.appendSystemPrompt,
-        maxTurns: clampInt(args['max_turns'], options.maxTurns, MAX_TURNS_CAP),
-        timeoutMs: clampInt(args['timeout_secs'], options.timeoutSecs, TIMEOUT_SECS_CAP) * 1000,
-        ...(sessionIdArg !== '' ? { sessionId: sessionIdArg } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-      },
-      credentials,
-      log,
-    )
-
-    let reply = outcome.text
-    let truncated = false
-    if (reply.length > options.maxReplyChars) {
-      const omitted = reply.length - options.maxReplyChars
-      reply =
-        `${reply.slice(0, options.maxReplyChars)}\n\n` +
-        `[truncated by dsh-connect-workbuddy: ${String(omitted)} more characters. ` +
-        'Have CodeBuddy write the full text to a file and read it back.]'
-      truncated = true
-    }
-
-    const tools = [...outcome.toolCounts.entries()]
-      .slice(0, TOOLS_CAP)
-      .map(([name, count]) => ({ name, count }))
-
-    return result({
-      ok: outcome.ok,
-      reply,
-      session_id: outcome.sessionId ?? '',
-      tools,
-      denied_tools: [...outcome.deniedTools],
-      tool_calls: [...outcome.toolCounts.values()].reduce((sum, count) => sum + count, 0),
-      num_turns: outcome.numTurns ?? 0,
-      tokens_in: outcome.usage?.input_tokens ?? 0,
-      tokens_out: outcome.usage?.output_tokens ?? 0,
-      cache_read_tokens: outcome.usage?.cache_read_input_tokens ?? 0,
-      credential_region: outcome.credential.region,
-      working_dir: dir.dir,
+    const effectiveMode = mode !== '' ? mode : options.permissionMode
+    const liveTurn: LiveTurn | undefined = deps.live?.begin({
+      entrance,
+      workingDir: dir.dir,
       unattended: dir.unattended,
-      elapsed_ms: Date.now() - startedAt,
-      truncated,
-      error: outcome.error ?? '',
+      permissionMode: effectiveMode,
+      model: modelArg !== '' ? modelArg : options.model,
+      ...(execution?.agent?.id !== undefined ? { sessionId: execution.agent.id } : {}),
     })
-  } catch (error) {
-    return result({ ok: false, error: error instanceof Error ? error.message : String(error), elapsed_ms: Date.now() - startedAt })
+    try {
+      return await runAskTurn(args, execution, deps, {
+        startedAt,
+        dir,
+        message,
+        effort,
+        mode,
+        modelArg,
+        effectiveMode,
+        entry,
+        ...(liveTurn === undefined ? {} : { liveTurn }),
+      })
+    } catch (error) {
+      // A thrown turn is reported as a failed RESULT, not as a rejection: the
+      // tool contract is that the model reads why it failed and can retry, and a
+      // rejected `execute` would surface as a crashed tool call instead.
+      return result({ ok: false, error: error instanceof Error ? error.message : String(error), elapsed_ms: Date.now() - startedAt })
+    } finally {
+      // Retiring the turn is the LAST thing that happens, whatever path was
+      // taken: a chip left behind by a thrown turn would sit on the composer
+      // forever, describing work that already finished.
+      if (liveTurn !== undefined) deps.live?.end(liveTurn)
+    }
   } finally {
     entry.release()
     // A scratch directory is this turn's alone and holds nothing worth keeping.

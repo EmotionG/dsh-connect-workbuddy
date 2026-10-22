@@ -1472,6 +1472,16 @@ export function apply(ctx: Context, config: Config): void {
     // issuance time; only ever consulted after a rejection.
     accountUsable: accountUsabilityProbe,
     /**
+     * The CLI route's live turns, for the composer readout.
+     *
+     * Read through `cliRuntime` rather than captured once: the runtime is rebuilt
+     * whenever `cliBridge` settings change, and the board belongs to the runtime.
+     * A captured board would keep answering for a runtime nothing drives any
+     * more. Switched off means `undefined`, which the route reports as an empty
+     * document.
+     */
+    cliLive: () => cliRuntime?.live.snapshot() ?? { turns: [], serverTime: Date.now() },
+    /**
      * Why each of the region's accounts cannot serve right now, for the composer
      * panel's table.
      *

@@ -37,6 +37,7 @@ import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
 import { WorkBuddyModelLabel } from './WorkBuddyModelLabel.tsx'
+import { CodebuddyLive } from './CodebuddyLive.tsx'
 import { selectQuotaNoticeClaim, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
@@ -249,6 +250,35 @@ export function apply(ctx: WorkBuddyClientContext): void {
     }
 
     /**
+     * The live CodeBuddy turn pill, in the same ambient dock as the readout.
+     *
+     * `order` 11 puts it immediately after the credit readout (10) and still
+     * right of the shell's own pills (0): the two numbers a user glances at while
+     * a turn runs sit together. The component renders `null` whenever no turn is
+     * live, which is the normal case — the bridge is off by default — so an
+     * unused seat costs one poll interval and nothing on screen.
+     */
+    const registerCliLive = (): (() => void) | undefined => {
+      try {
+        return ctx.slots.inject('conversation.composer.dock' as never, () => (ctx.slots as unknown as {
+          register(
+            options: { name: string; id: string; order: number; locale: string; inject: () => { t: (key: WorkBuddySettingsKey, params?: Record<string, unknown>) => string } },
+            component: unknown,
+          ): () => void
+        }).register({
+          name: 'conversation.composer.dock',
+          id: 'dsh-connect-workbuddy-cli-live',
+          order: 11,
+          locale: namespace,
+          inject: () => ({ t }),
+        }, CodebuddyLive))
+      } catch (error: unknown) {
+        console.error('[dsh-connect-workbuddy] cli live slot failed to register (host provider unaffected):', error)
+        return undefined
+      }
+    }
+
+    /**
      * The frame-wide quota notice, DECLINED so the host keeps its own Toast
      * (issue #63 follow-up, the maintainer's call on a screenshot).
      *
@@ -327,6 +357,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
       ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.row.config', `${key}#${key}`)),
       registerComposerCredits(),
       registerStatsCredits(),
+      registerCliLive(),
       registerQuotaNotice(),
       registerModelLabel(),
     ].filter((disposer): disposer is () => void => disposer !== undefined)

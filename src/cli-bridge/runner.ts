@@ -108,6 +108,30 @@ export interface TurnOptions {
   /** Continue the most recent session for this working directory. */
   continueSession?: boolean
   signal?: AbortSignal
+  /**
+   * Called as the CLI's frames arrive, so the composer can say what is happening
+   * while it is happening.
+   *
+   * A callback rather than an event emitter on purpose: the only consumer is the
+   * live board (./live.ts), which merges the payload into one mutable object. The
+   * runner therefore stays a pure function of its options — it owns no state a
+   * later call could inherit, and the tests can pass nothing at all.
+   *
+   * It is called for EVERY frame that changes one of these numbers, i.e. once per
+   * assistant block. That is a handful of calls per turn, not per token, and each
+   * one is an `Object.assign`.
+   */
+  onProgress?: (progress: TurnProgress) => void
+}
+
+/** What one live update carries. Counts and names only — never the text. */
+export interface TurnProgress {
+  /** Tool calls seen so far in this turn, across every CLI session it used. */
+  toolCalls: number
+  /** The most recent tool the CLI asked for; `''` before the first one. */
+  lastTool: string
+  /** Assistant characters accumulated so far. A count, never the characters. */
+  chars: number
 }
 
 /** What the CLI actually did, after one turn that reached a `result` frame. */
@@ -452,6 +476,11 @@ function runOneTurn(options: TurnOptions, token: string): Promise<TurnOutcome> {
     const assistantText: string[] = []
     let assistantChars = 0
     const toolCounts = new Map<string, number>()
+    // Running totals for the live board. Kept alongside `toolCounts` rather than
+    // recomputed from it: the board is updated per frame, and summing the map on
+    // every update would make the cost of a turn quadratic in its tool calls.
+    let liveToolCalls = 0
+    let lastToolName = ''
     const deniedTools: string[] = []
     let stderr = ''
     let buffer = ''
@@ -623,8 +652,12 @@ function runOneTurn(options: TurnOptions, token: string): Promise<TurnOutcome> {
                 return
               }
               assistantText.push(block.text)
+              options.onProgress?.({ toolCalls: liveToolCalls, lastTool: lastToolName, chars: assistantChars })
             } else if (block.type === 'tool_use' && typeof block.name === 'string') {
               toolCounts.set(block.name, (toolCounts.get(block.name) ?? 0) + 1)
+              liveToolCalls += 1
+              lastToolName = block.name
+              options.onProgress?.({ toolCalls: liveToolCalls, lastTool: lastToolName, chars: assistantChars })
             }
           }
         }

@@ -240,6 +240,7 @@ export function mountCodebuddyCommand(commands: BridgeCommandsService | undefine
               ...(invocation.signal !== undefined ? { signal: invocation.signal } : {}),
             },
             deps,
+            'command',
           )
           log(`command /${COMMAND_NAME} finished in ${String(Date.now() - startedAt)}ms (ok=${String(value.ok)})`)
 
