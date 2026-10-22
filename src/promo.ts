@@ -175,11 +175,30 @@ export interface WorkBuddyPromoDiscount {
    */
   multiplier?: number
   /**
-   * The upstream's display instruction. `'replace'` means "show this instead of
-   * the normal multiplier"; anything else is not yet observed, so it is not
-   * acted on.
+   * The upstream's display instruction — how the discounted figure relates to
+   * the catalog one. BOTH spellings below are observed on the live CN feed
+   * (2026-10-23, eight entries dumped from `/v3/config`):
+   *
+   *   `'replace'`      — show the discounted figure INSTEAD of the normal one.
+   *                      Used by `hy3-free-trial-202608` (`"0x"`).
+   *   `'strikethrough'` — the upstream's own client strike out the normal price
+   *                      and print the discounted one. Used by
+   *                      `glm-52-night-discount-202607` (`"0.50x"`),
+   *                      `hy4-night-discount-daytime-badge-202609` (`"0.00x"`)
+   *                      and `step-5-discount-daytime-badge-202610`.
+   *
+   * An earlier version accepted only `'replace'`, which silently dropped every
+   * real CN discount except the hy3 trial — the price never moved while the
+   * badge was lit (issue #120, second report). Both modes mean "the discounted
+   * figure is what you pay"; they differ only in whether the old figure is also
+   * shown on screen, which this plugin does not do either way (one number per
+   * row), so both are honoured identically here.
+   *
+   * `undefined` means the entry carries a discount the upstream did not label.
+   * That is NOT acted on: the field's absence says nothing about how to read
+   * the figure, and guessing "replace" would change a price on a guess.
    */
-  displayMode?: 'replace'
+  displayMode?: 'replace' | 'strikethrough'
 }
 
 /** The upstream's explanatory copy for the badge. */
@@ -358,7 +377,9 @@ function parseDiscount(value: unknown): WorkBuddyPromoDiscount | undefined {
   // The string wins: it is the figure the user is charged. `factor` only fills
   // in when the string is absent or unreadable.
   const multiplier = fromString ?? fromFactor
-  const displayMode = raw['displayMode'] === 'replace' ? 'replace' as const : undefined
+  const displayMode = raw['displayMode'] === 'replace' || raw['displayMode'] === 'strikethrough'
+    ? raw['displayMode'] as 'replace' | 'strikethrough'
+    : undefined
   if (multiplier === undefined && displayMode === undefined) return undefined
   return {
     ...multiplier === undefined ? {} : { multiplier },
@@ -648,7 +669,10 @@ export function selectPromoMultiplier(
   for (const promo of sorted) {
     const discount = promo.discount
     if (discount === undefined || discount.multiplier === undefined) continue
-    if (discount.displayMode !== 'replace') continue
+    // Both observed modes mean "the discounted figure is the price" (see
+    // `WorkBuddyPromoDiscount.displayMode`). An unlabelled discount is skipped:
+    // its absence says nothing about how to read the figure.
+    if (discount.displayMode !== 'replace' && discount.displayMode !== 'strikethrough') continue
     // Rule 1: the DISCOUNT runs on the daily window, so a standing badge
     // outside it must not discount anything.
     if (!promoActiveAt(promo, nowMs)) continue

@@ -20,7 +20,7 @@
  *      catalog price alone rather than inventing a cheaper one.
  */
 import { describe, expect, it } from 'vitest'
-import { parseWorkBuddyPromos, selectPromoMultiplier } from '../src/promo.ts'
+import { parseWorkBuddyPromos, selectPromoBadge, selectPromoMultiplier } from '../src/promo.ts'
 
 /** A night-discount pair, shaped like the CN feed observed on 2026-10-21. */
 const nightWithDiscount = {
@@ -50,6 +50,48 @@ const daytimeStanding = {
   schedule: {
     timezone: 'Asia/Shanghai',
     daily: [{ start: '07:50', end: '23:00' }],
+  },
+}
+
+/**
+ * The REAL CN night discount, dumped from `/v3/config` on 2026-10-23.
+ *
+ * It uses `displayMode: "strikethrough"`, not `"replace"` — the earlier fixture
+ * (and the earlier code) assumed `replace` was the only spelling, which dropped
+ * every real discount in the feed except the hy3 trial.
+ */
+const realGlmNight = {
+  id: 'glm-52-night-discount-202607',
+  kind: 'discount',
+  enabled: true,
+  priority: 200,
+  modelIds: ['glm-5.2'],
+  badge: { label: '夜间折扣' },
+  discount: { discountedCredits: '0.50x', displayMode: 'strikethrough', factor: 0.5 },
+  schedule: {
+    timezone: 'Asia/Shanghai',
+    daily: [{ start: '23:00', end: '7:50' }],
+  },
+}
+
+/**
+ * The REAL deepseek entry: badge, near-all-day window, and **no discount**.
+ *
+ * This is why `DeepSeek-V4.1-Flash` shows a 「夜间折扣」 badge but keeps its
+ * `x0.11` price: the upstream never published a discounted figure for it, only
+ * the badge. That is correct behaviour, not a bug — and it must stay that way
+ * rather than inventing a price.
+ */
+const realDeepseekBadgeOnly = {
+  id: 'ds-discount-daytime-badge-202608',
+  kind: 'discount',
+  enabled: true,
+  priority: 200,
+  modelIds: ['deepseek-v4.1-flash'],
+  badge: { label: '夜间折扣' },
+  schedule: {
+    timezone: 'Asia/Shanghai',
+    daily: [{ start: '0:00', end: '23:59' }],
   },
 }
 
@@ -85,9 +127,12 @@ describe('the discount is parsed off the same document as the badge (issue #120)
   })
 
   it('ignores a displayMode it does not know', () => {
-    const [promo] = parseWorkBuddyPromos([{ ...nightWithDiscount, id: 'e', discount: { discountedCredits: '0.06x', displayMode: 'strikethrough' } }], [])
-    expect(promo?.discount?.multiplier).toBe(0.06)
-    expect(promo?.discount?.displayMode).toBeUndefined()
+    // Both OBSERVED spellings (`replace`, `strikethrough`) are honoured; an
+    // invented third one is not, and the multiplier is still parsed so a
+    // corrected label later needs no re-parse.
+    const [unknown] = parseWorkBuddyPromos([{ ...nightWithDiscount, id: 'e', discount: { discountedCredits: '0.06x', displayMode: 'badge-only' } }], [])
+    expect(unknown?.discount?.multiplier).toBe(0.06)
+    expect(unknown?.discount?.displayMode).toBeUndefined()
   })
 })
 
@@ -123,5 +168,43 @@ describe('when the discounted price applies (issue #120)', () => {
       { ...nightWithDiscount, id: 'high', priority: 900, discount: { discountedCredits: '0.06x', displayMode: 'replace' } },
     ], [])
     expect(selectPromoMultiplier(two, atNight)).toBe(0.06)
+  })
+})
+
+describe('the real CN feed\'s spelling of displayMode (issue #120, second report)', () => {
+  it('honours "strikethrough", the mode every real CN discount uses', () => {
+    // Dumped from /v3/config on 2026-10-23: glm-5.2 (0.50x), hy4 (0.00x) and
+    // step-5 all say "strikethrough". Accepting only "replace" meant the price
+    // never moved while the badge was lit.
+    const promos = parseWorkBuddyPromos([realGlmNight], [])
+    expect(promos[0]?.discount?.displayMode).toBe('strikethrough')
+    expect(promos[0]?.discount?.multiplier).toBe(0.5)
+    expect(selectPromoMultiplier(promos, atNight)).toBe(0.5)
+  })
+
+  it('applies a free (0.00x) strikethrough discount as zero, not as "absent"', () => {
+    const promos = parseWorkBuddyPromos([{
+      ...realGlmNight,
+      id: 'hy4',
+      discount: { discountedCredits: '0.00x', displayMode: 'strikethrough', factor: 0 },
+    }], [])
+    expect(selectPromoMultiplier(promos, atNight)).toBe(0)
+  })
+
+  it('does NOT move the price for a badge-only entry (the deepseek case)', () => {
+    // The badge is lit (its window is 0:00–23:59) but the upstream published no
+    // discounted figure, so the catalog price stands. Inventing one here would
+    // charge the user a number the upstream never stated.
+    const promos = parseWorkBuddyPromos([realDeepseekBadgeOnly], [])
+    expect(selectPromoBadge(promos, atNight)).toBeDefined()
+    expect(selectPromoMultiplier(promos, atNight)).toBeUndefined()
+  })
+
+  it('still ignores a discount with no displayMode at all', () => {
+    const promos = parseWorkBuddyPromos([{
+      ...realGlmNight,
+      discount: { discountedCredits: '0.50x' },
+    }], [])
+    expect(selectPromoMultiplier(promos, atNight)).toBeUndefined()
   })
 })

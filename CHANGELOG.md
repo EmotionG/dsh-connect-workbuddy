@@ -1,5 +1,27 @@
 # Changelog
 
+## 5.6.2 (2026-10-23)
+
+> 补丁版本：修 5.6.0/5.6.1 里「折后价读不出来」的原因。**请求路径、provider 路由、计费与凭据一律未变。**
+
+### Fixes
+
+- **真实促销的 `displayMode` 是 `strikethrough`，只认 `replace` 等于把折扣全丢了（#120，第二次报告）**
+  - **症状**：徽标亮着，价格不动。模型行显示 `DeepSeek-V4.1-Flash · x0.11` 配「夜间折扣」。
+  - **查证方式**：直接把国内区 `/v3/config` 的 8 条 `modelPromotions` 原文 dump 出来逐条比对，而不是继续照着此前文档里的样例推断（样例只出现过 `replace`）。
+  - **真实数据**（2026-10-23 实测，8 条）：
+    | id | 标签 | `discount` | `displayMode` |
+    | --- | --- | --- | --- |
+    | `glm-52-night-discount-202607` | 夜间折扣 | `"0.50x"` | **`strikethrough`** |
+    | `hy4-night-discount-daytime-badge-202609` | 夜间免费 | `"0.00x"` | **`strikethrough`** |
+    | `step-5-discount-daytime-badge-202610` | 独家限免 | `"0.00x"` | **`strikethrough`** |
+    | `hy3-free-trial-202608` | 限时免费 | `"0x"` | `replace` |
+    | `glm-52-…-daytime-badge`、`hy4-…-badge`、`ds-discount-daytime-badge-202608`、`space-bunny-discount-202610` | — | 无 | — |
+  - **根因**：原实现把 `displayMode` 硬写成 `'replace'`（唯一的样例来源），解析时把 `strikethrough` 当成未知值丢弃，判定时也只放行 `replace`。于是**八条里三条带价格的折扣一条都不生效**，只有 hy3 的 `replace` 能过。
+  - **修法**：两种观测到的拼写都认。语义上它们都是「折后价才是实付价」，区别只在客户端是否同时把原价划掉——本插件每行只画一个数字，所以两者等价处理。**仍不认没标 `displayMode` 的 `discount`**：字段缺失不说明该怎么读那个数，猜成 `replace` 就是凭猜改价。
+  - **顺带确认不是 bug 的一条**：`ds-discount-daytime-badge-202608`（`deepseek-v4.1-flash` / `deepseek-v4-pro`）的 `discount` 就是 **`null`**，时段 `0:00→23:59` 几乎全天。所以这两个模型「徽标亮着但价格是目录价」是**上游没给折后价**，不是插件漏读。这条单独写了测试钉住：没有数字就**不能**编一个。
+  - **测试**：`tests/issue120-promo-discount.spec.ts` 增至 14 条，新增四条用的是**真实原文**（不是样例形状）——`strikethrough` 生效（`0.50x` → 0.50）、`0.00x` 免费算作 0 而不是「没有」、**only-badge 条目（deepseek 那条）徽标有、价格不动**、仍拒绝没有 `displayMode` 的折扣。原「未知 displayMode」那条改成用一个真正不存在的值，避免把已观测值钉成未知。
+
 ## 5.6.1 (2026-10-23)
 
 > 补丁版本：修 5.6.0 自己引入的一处显示回退。**请求路径、provider 路由、计费与凭据一律未变。**
