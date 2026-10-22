@@ -14,6 +14,22 @@
  * (`cliBridge.enabled` defaults to false), so the empty state is `null`: the row
  * is untouched until there is something true to say.
  *
+ * WHY IT ONLY DESCRIBES THIS SESSION'S TURN. The board is host-wide: one route
+ * answers for every session in the process, so an unfiltered pill would show the
+ * turn another tab started — a line about a directory the user is not looking at,
+ * sitting under the composer they are typing in. The seat is declared
+ * `scope: 'session'` (`conversation.composer.dock`), so the framework hands the
+ * registration its `sessionId`; the pill keeps the rows that belong to it.
+ *
+ * WHY NOT THE PROVIDER GATE THE CREDIT READOUT USES. `ComposerCredits` renders
+ * only while the session's model is a WorkBuddy provider, because it reports that
+ * provider's quota. This pill reports a spawned CLI process, and the CLI route is
+ * deliberately model-independent: the whole point is that it works from any
+ * session, including one running DeepSeek. Gating it on the provider would hide
+ * the readout exactly when the feature is being used the way it was designed.
+ * `cliBridge.enabled` needs no gate either — with the bridge off no turn can
+ * begin, so the board is empty and the pill renders nothing.
+ *
  * WHY POLLING, AND WHY THE INTERVAL IS 5s. The Host has no push channel to a
  * session component, so a poll is the only option. Five seconds is the slowest
  * cadence at which a turn that just started still feels immediate; the elapsed
@@ -182,10 +198,32 @@ export function liveLabel(
 
 export interface CodebuddyLiveProps {
   t: (key: WorkBuddySettingsKey, params?: Record<string, unknown>) => string
+  /**
+   * The session this pill sits in, injected by the session-scoped seat.
+   *
+   * `undefined` (a host that does not pass it, or a test that mounts the
+   * component directly) disables the filter rather than blanking the pill: the
+   * readout is diagnostic, and losing it entirely is worse than showing a turn
+   * from a neighbouring tab.
+   */
+  sessionId?: string
   /** Test seams; the slot injects neither. */
   fetchImpl?: typeof fetch
   pollMs?: number
   tickMs?: number
+}
+
+/**
+ * Keep the rows this pill is allowed to describe.
+ *
+ * A row with an empty `sessionId` is one the host could not attribute (the tool
+ * ran without an agent on the execution object). Hiding those would make the pill
+ * silently useless on such a host, so they are kept: an unattributed row is
+ * evidence of real work, and the alternative is a readout that never appears.
+ */
+export function turnsForSession(turns: LiveTurnView[], sessionId: string | undefined): LiveTurnView[] {
+  if (sessionId === undefined || sessionId === '') return turns
+  return turns.filter(turn => turn.sessionId === '' || turn.sessionId === sessionId)
 }
 
 /**
@@ -247,7 +285,7 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
     }
   }, [fetchImpl, pollMs])
 
-  const turns = document?.turns ?? []
+  const turns = turnsForSession(document?.turns ?? [], props.sessionId)
   const active = turns.length > 0
 
   useEffect(() => {
@@ -263,10 +301,11 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
   const elapsedMs = Math.max(0, Date.now() + offsetRef.current - turn.startedAt)
   const label = liveLabel(turn, elapsedMs, t)
   const extra = turns.length > 1 ? ` +${String(turns.length - 1)}` : ''
-  // The board is host-wide, so several sessions share one document and the pill
-  // always describes the newest turn — possibly one started from another tab.
-  // The directory's last segment goes in the tooltip so a user with two sessions
-  // open can tell which project the line is about without widening the pill.
+  // Several turns can be live in ONE session (the model may call the tool twice,
+  // or a command and a tool overlap), and the pill names the newest. The
+  // directory's last segment goes in the tooltip so a user running two workspaces
+  // from one session can tell which project the line is about without widening
+  // the pill.
   const dirTail = turn.workingDir.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() ?? ''
   const title = dirTail === '' ? `${label}${extra}` : `${label}${extra} · ${dirTail}`
 

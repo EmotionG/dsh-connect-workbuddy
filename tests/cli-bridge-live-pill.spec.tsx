@@ -169,6 +169,50 @@ describe('the pill', () => {
     expect(view.text()).toContain('+2')
   })
 
+  it('describes only the turn this session started', async () => {
+    // The board is host-wide. Without the filter, a pill under session A's
+    // composer would describe session B's turn — a line about a directory the
+    // reader is not in, with a counter that keeps moving.
+    stubFetch(() => ({
+      body: documentOf([
+        turnOf({ id: 'other', sessionId: 's-other', toolCalls: 9, lastTool: 'Bash' }),
+        turnOf({ id: 'mine', sessionId: 's-1', toolCalls: 2, lastTool: 'Read' }),
+      ]),
+    }))
+    const view = await show({ pollMs: 20, tickMs: 20, sessionId: 's-1' })
+    await until(() => view.text().includes('2 tools'), 'this session\'s turn')
+    expect(view.text()).toContain('last: Read')
+    // The other session's row is gone, so it cannot leak into the count either.
+    expect(view.text()).not.toContain('9 tools')
+    expect(view.text()).not.toContain('+1')
+  })
+
+  it('renders nothing when the only live turn belongs to another session', async () => {
+    stubFetch(() => ({ body: documentOf([turnOf({ sessionId: 's-other' })]) }))
+    const view = await show({ pollMs: 20, tickMs: 20, sessionId: 's-1' })
+    await view.settle()
+    expect(view.html()).toBe('')
+  })
+
+  it('keeps a row the host could not attribute rather than hiding real work', async () => {
+    // `sessionId: ''` means the tool ran without an agent on the execution
+    // object. Hiding those would make the pill silently useless on such a host;
+    // an unattributed row is still evidence that something is running.
+    stubFetch(() => ({ body: documentOf([turnOf({ sessionId: '' })]) }))
+    const view = await show({ pollMs: 20, tickMs: 20, sessionId: 's-1' })
+    await until(() => view.text().includes('CodeBuddy'), 'the unattributed turn')
+    expect(view.text()).toContain('3 tools')
+  })
+
+  it('shows every turn when the seat does not say which session it is', async () => {
+    // A host that does not pass the session id must degrade to the old
+    // behaviour, not to a permanently empty dock.
+    stubFetch(() => ({ body: documentOf([turnOf({ sessionId: 's-other' })]) }))
+    const view = await show({ pollMs: 20, tickMs: 20 })
+    await until(() => view.text().includes('CodeBuddy'), 'the unfiltered turn')
+    expect(view.text()).toContain('3 tools')
+  })
+
   it('advances the elapsed counter between polls without asking again', async () => {
     expect(CLI_LIVE_POLL_MS).toBeGreaterThan(1000)
     const calls = stubFetch(() => ({ body: documentOf([turnOf({ startedAt: Date.now() - 200 })]) }))

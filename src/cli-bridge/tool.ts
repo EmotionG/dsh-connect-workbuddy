@@ -480,7 +480,14 @@ async function runAskTurn(
   // about the difference between "still working" and "about to disappear".
   if (liveTurn !== undefined) {
     liveTurn.phase = 'finishing'
-    if (outcome.sessionId !== undefined) liveTurn.sessionId = outcome.sessionId
+    // NOT `liveTurn.sessionId = outcome.sessionId`. Those are two different ids:
+    // the board's `sessionId` is the DSH session this turn belongs to (taken from
+    // `execution.agent.id` when the row was opened, and what the composer pill
+    // filters on), while `outcome.sessionId` is the CLI's OWN session uuid, which
+    // is reported in the tool result as `session_id`. Overwriting one with the
+    // other used to make every finished turn look like it belonged to a session
+    // that does not exist, so the pill dropped its own row the moment the turn
+    // started finishing.
   }
 
   let reply = outcome.text

@@ -37,6 +37,10 @@ vi.mock('node:os', async importOriginal => {
 // test pick up the fake `spawn`.
 import { cliEntryCandidates, isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
 import type { BridgeCredential, TurnOptions } from '../src/cli-bridge/runner.ts'
+import { createLiveBoard } from '../src/cli-bridge/live.ts'
+import type { LiveTurn } from '../src/cli-bridge/live.ts'
+import { runAsk } from '../src/cli-bridge/tool.ts'
+import type { BridgeOptions } from '../src/cli-bridge/tool.ts'
 
 /** One fake child process, with the pieces `runner.ts` touches. */
 interface FakeChild {
@@ -634,5 +638,93 @@ describe('live progress reporting', () => {
     child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'ok' })
     // The point is that this resolves rather than throwing on an absent callback.
     await expect(running).resolves.toMatchObject({ ok: true })
+  })
+})
+
+/**
+ * The board row is the composer pill's only source, so the ID it carries decides
+ * whether the pill shows the turn at all: the browser keeps the rows whose
+ * `sessionId` equals the session the pill is mounted in.
+ *
+ * There are TWO ids in play and they are not interchangeable — the DSH session
+ * the turn was called from (`execution.agent.id`, what the pill filters on) and
+ * the CLI's own session uuid (reported to the caller as `session_id`). The first
+ * draft wrote the second over the first at "finishing" time, which made the pill
+ * drop its own row for the last seconds of every turn. This locks the separation.
+ */
+describe('the live board row identity', () => {
+  const baseOptions: BridgeOptions = {
+    enabled: true,
+    binary: '',
+    model: '',
+    permissionMode: 'dontAsk',
+    effort: '',
+    maxTurns: 3,
+    timeoutSecs: 30,
+    regionOrder: [],
+    workingDir: '',
+    allowedDirs: [],
+    appendSystemPrompt: '',
+    allowUnattended: false,
+    maxReplyChars: 1_000,
+    injectResult: false,
+    maxTurnsPerSessionHour: 0,
+    maxTurnsPerHour: 0,
+  }
+
+  it('keeps the DSH session id after the CLI reports its own session uuid', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const board = createLiveBoard()
+    const opened: LiveTurn[] = []
+    const begin = board.begin
+    board.begin = input => {
+      const turn = begin(input)
+      opened.push(turn)
+      return turn
+    }
+
+    const previous = process.env['CODEBUDDY_AUTH_TOKEN']
+    process.env['CODEBUDDY_AUTH_TOKEN'] = 'token-abcdef123456'
+    try {
+      const running = runAsk(
+        { message: 'do the thing', working_dir: dir },
+        { agent: { id: 'session-dsh' } },
+        {
+          options: { ...baseOptions, binary: entry, allowedDirs: [dir] },
+          regions: [],
+          log: () => {},
+          live: board,
+          // The gate has its own suite; here it must simply not refuse.
+          gate: { tryEnter: () => ({ ok: true, release: () => {} }) } as never,
+        },
+      )
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalled()
+      })
+      initFrames(child)
+      child.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } })
+      child.emitFrame({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        num_turns: 1,
+        result: 'done',
+        session_id: 'cli-session-uuid',
+      })
+      const outcome = await running
+
+      expect(outcome.ok).toBe(true)
+      // The caller still gets the CLI's uuid, which is what resumes the CLI session.
+      expect(outcome.session_id).toBe('cli-session-uuid')
+      // The board row keeps the DSH id — the only value the pill can match.
+      expect(opened).toHaveLength(1)
+      expect(opened[0]?.sessionId).toBe('session-dsh')
+      // And the row is retired, so the pill stops claiming a turn.
+      expect(board.size()).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env['CODEBUDDY_AUTH_TOKEN']
+      else process.env['CODEBUDDY_AUTH_TOKEN'] = previous
+    }
   })
 })
