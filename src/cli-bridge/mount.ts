@@ -31,7 +31,7 @@ import { createLiveBoard } from './live.ts'
 import type { LiveBoard } from './live.ts'
 import type { BridgeCommandsService, BridgeLog, BridgeToolsService } from './services.ts'
 import { gateFor } from './tool.ts'
-import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
+import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, SESSION_CONTINUITY_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
 import type { AskDeps, BridgeOptions } from './tool.ts'
 
 /**
@@ -55,6 +55,7 @@ export interface CliBridgeSettings {
   allowUnattended?: boolean
   maxReplyChars?: number
   injectResult?: boolean
+  sessionContinuity?: string
   maxTurnsPerSessionHour?: number
   maxTurnsPerHour?: number
 }
@@ -85,6 +86,11 @@ export const CLI_BRIDGE_DEFAULTS = {
   allowUnattended: false,
   maxReplyChars: 60_000,
   injectResult: true,
+  // `auto`: a second `/codebuddy` in the same session continues the first one's
+  // conversation instead of re-exploring the workspace. Measured to work through
+  // `--session-id <existing>`. `off` restores one-shot calls for anyone who wants
+  // each turn to be independent.
+  sessionContinuity: 'auto',
   // Bounded by default: an unbounded default is how one curious model turns a
   // feature into a bill. 0 would mean "no limit" if a user insists.
   maxTurnsPerSessionHour: 6,
@@ -147,6 +153,16 @@ export function normalizeCliBridgeOptions(
   }
 
   const regionOrder = text(raw.regionOrder, CLI_BRIDGE_DEFAULTS.regionOrder)
+  const sessionContinuity = text(raw.sessionContinuity, CLI_BRIDGE_DEFAULTS.sessionContinuity)
+  const safeSessionContinuity = (SESSION_CONTINUITY_MODES as readonly string[]).includes(sessionContinuity)
+    ? (sessionContinuity as (typeof SESSION_CONTINUITY_MODES)[number])
+    : CLI_BRIDGE_DEFAULTS.sessionContinuity
+  if (safeSessionContinuity !== sessionContinuity) {
+    reject(
+      `sessionContinuity "${sessionContinuity}" 不是合法值，已回退到 ${CLI_BRIDGE_DEFAULTS.sessionContinuity}；` +
+        `合法值：${SESSION_CONTINUITY_MODES.join(', ')}`,
+    )
+  }
   return {
     enabled: raw.enabled === true,
     binary: text(raw.binary, CLI_BRIDGE_DEFAULTS.binary),
@@ -162,6 +178,7 @@ export function normalizeCliBridgeOptions(
     allowUnattended: raw.allowUnattended === true,
     maxReplyChars: clampInt(raw.maxReplyChars, CLI_BRIDGE_DEFAULTS.maxReplyChars, MAX_REPLY_CHARS_CAP),
     injectResult: raw.injectResult !== false,
+    sessionContinuity: safeSessionContinuity,
     maxTurnsPerSessionHour: clampQuota(raw.maxTurnsPerSessionHour, CLI_BRIDGE_DEFAULTS.maxTurnsPerSessionHour),
     maxTurnsPerHour: clampQuota(raw.maxTurnsPerHour, CLI_BRIDGE_DEFAULTS.maxTurnsPerHour),
   }

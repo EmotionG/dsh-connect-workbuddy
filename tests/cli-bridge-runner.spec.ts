@@ -39,7 +39,7 @@ import { cliEntryCandidates, isSyntheticDenyReason, looksLikeAuthFailure, runAge
 import type { BridgeCredential, TurnOptions } from '../src/cli-bridge/runner.ts'
 import { createLiveBoard } from '../src/cli-bridge/live.ts'
 import type { LiveTurn } from '../src/cli-bridge/live.ts'
-import { runAsk } from '../src/cli-bridge/tool.ts'
+import { forgetCliSession, runAsk } from '../src/cli-bridge/tool.ts'
 import type { BridgeOptions } from '../src/cli-bridge/tool.ts'
 
 /** One fake child process, with the pieces `runner.ts` touches. */
@@ -668,6 +668,7 @@ describe('the live board row identity', () => {
     allowUnattended: false,
     maxReplyChars: 1_000,
     injectResult: false,
+    sessionContinuity: 'off',
     maxTurnsPerSessionHour: 0,
     maxTurnsPerHour: 0,
   }
@@ -726,5 +727,154 @@ describe('the live board row identity', () => {
       if (previous === undefined) delete process.env['CODEBUDDY_AUTH_TOKEN']
       else process.env['CODEBUDDY_AUTH_TOKEN'] = previous
     }
+  })
+})
+
+/**
+ * Automatic session continuation (`cliBridge.sessionContinuity`).
+ *
+ * MEASURED BEFORE IT WAS WIRED, not assumed: against the installed CLI,
+ * `--session-id <existing>` really does resume the conversation (a number sent in
+ * turn 1 came back from turn 2, same id echoed both times), and an UNKNOWN id is
+ * NOT an error — the CLI silently opens a fresh session under it. That second
+ * fact is why a stale entry here costs one new conversation instead of a
+ * corrupted one, and it is also why these tests assert the ARGUMENT rather than
+ * pretending to assert the model's memory.
+ *
+ * The rule being locked: an explicit `session_id` argument always wins, because a
+ * caller may be deliberately branching; otherwise `auto` reuses what this DSH
+ * session ran last, and `off` reuses nothing.
+ */
+describe('automatic session continuation', () => {
+  const autoOptions: BridgeOptions = {
+    enabled: true,
+    binary: '',
+    model: '',
+    permissionMode: 'dontAsk',
+    effort: '',
+    maxTurns: 3,
+    timeoutSecs: 30,
+    regionOrder: [],
+    workingDir: '',
+    allowedDirs: [],
+    appendSystemPrompt: '',
+    allowUnattended: false,
+    maxReplyChars: 1_000,
+    injectResult: false,
+    sessionContinuity: 'auto',
+    maxTurnsPerSessionHour: 0,
+    maxTurnsPerHour: 0,
+  }
+
+  let previousToken: string | undefined
+
+  beforeEach(() => {
+    // Recording is unconditional (the setting decides what is READ, not kept), so
+    // a key shared with an earlier test would otherwise start this suite already
+    // pointing at a conversation.
+    forgetCliSession('session-cont')
+    previousToken = process.env['CODEBUDDY_AUTH_TOKEN']
+    process.env['CODEBUDDY_AUTH_TOKEN'] = 'token-abcdef123456'
+  })
+
+  afterEach(() => {
+    if (previousToken === undefined) delete process.env['CODEBUDDY_AUTH_TOKEN']
+    else process.env['CODEBUDDY_AUTH_TOKEN'] = previousToken
+  })
+
+  /** The argv of every real spawn (the Windows taskkill helper excluded). */
+  function spawnedArgs(): string[][] {
+    return spawnMock.mock.calls
+      .filter(call => !String(call[0]).endsWith('taskkill'))
+      .map(call => (Array.isArray(call[1]) ? (call[1] as string[]) : []))
+  }
+
+  /** Run one bridged turn against `child`, which reports `cliSessionId`. */
+  async function runTurn(
+    child: FakeChild,
+    args: Record<string, unknown>,
+    options: BridgeOptions,
+    cliSessionId: string,
+    agentId = 'session-cont',
+  ): Promise<Awaited<ReturnType<typeof runAsk>>> {
+    const running = runAsk(args, { agent: { id: agentId } }, {
+      options: { ...options, binary: entry, allowedDirs: [dir] },
+      regions: [],
+      log: () => {},
+      gate: { tryEnter: () => ({ ok: true, release: () => {} }) } as never,
+    })
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled())
+    initFrames(child)
+    child.emitFrame({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      num_turns: 1,
+      result: 'done',
+      session_id: cliSessionId,
+    })
+    return await running
+  }
+
+  it('threads the previous CLI session into the next call in the same DSH session', async () => {
+    const first = fakeChild(5001)
+    const second = fakeChild(5002)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    const one = await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1')
+    expect(one.ok).toBe(true)
+    expect(one.session_id).toBe('cli-uuid-1')
+
+    const two = await runTurn(second, { message: 'second', working_dir: dir }, autoOptions, 'cli-uuid-2')
+    expect(two.ok).toBe(true)
+
+    const args = spawnedArgs()
+    expect(args).toHaveLength(2)
+    // Turn one had nothing to continue, so it must NOT pass an id at all.
+    expect(args[0]).not.toContain('--session-id')
+    // Turn two continues the uuid turn one reported.
+    expect(args[1]).toContain('--session-id')
+    expect(args[1]?.[args[1].indexOf('--session-id') + 1]).toBe('cli-uuid-1')
+  })
+
+  it('lets an explicit session_id override the remembered one', async () => {
+    const first = fakeChild(5011)
+    const second = fakeChild(5012)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1')
+    await runTurn(
+      second,
+      { message: 'second', working_dir: dir, session_id: 'explicit-id' },
+      autoOptions,
+      'cli-uuid-2',
+    )
+
+    const args = spawnedArgs()
+    expect(args[1]?.[args[1].indexOf('--session-id') + 1]).toBe('explicit-id')
+  })
+
+  it('starts fresh every time when sessionContinuity is off', async () => {
+    const first = fakeChild(5021)
+    const second = fakeChild(5022)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    const off: BridgeOptions = { ...autoOptions, sessionContinuity: 'off' }
+    await runTurn(first, { message: 'first', working_dir: dir }, off, 'cli-uuid-1')
+    await runTurn(second, { message: 'second', working_dir: dir }, off, 'cli-uuid-2')
+
+    for (const args of spawnedArgs()) expect(args).not.toContain('--session-id')
+  })
+
+  it('keeps sessions apart: one DSH session never continues another', async () => {
+    const first = fakeChild(5031)
+    const second = fakeChild(5032)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1', 'session-a')
+    await runTurn(second, { message: 'second', working_dir: dir }, autoOptions, 'cli-uuid-2', 'session-b')
+
+    const args = spawnedArgs()
+    expect(args[1]).not.toContain('--session-id')
   })
 })

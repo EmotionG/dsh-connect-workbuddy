@@ -49,8 +49,12 @@ import {
   MAX_REPLY_CHARS_CAP,
   MAX_TURNS_CAP,
   PERMISSION_MODES,
+  SESSION_CONTINUITY_MODES,
   TIMEOUT_SECS_CAP,
+  forgetCliSession,
   mountAskTool,
+  recallCliSession,
+  rememberCliSession,
   resolveWorkingDir,
   runAsk,
 } from '../src/cli-bridge/tool.ts'
@@ -73,6 +77,7 @@ function options(overrides: Partial<BridgeOptions> = {}): BridgeOptions {
     allowUnattended: false,
     maxReplyChars: 60_000,
     injectResult: true,
+  sessionContinuity: 'auto',
     maxTurnsPerSessionHour: 6,
     maxTurnsPerHour: 20,
     ...overrides,
@@ -1046,5 +1051,60 @@ describe('mountCliBridge', () => {
     // it did nothing.
     expect(log.mock.calls[0]?.[0]).toContain('两个入口都没挂上')
     expect(() => dispose()).not.toThrow()
+  })
+})
+
+/**
+ * `cliBridge.sessionContinuity` — the setting and the in-memory memory behind it.
+ *
+ * The setting exists because continuation is a BEHAVIOUR CHANGE, not a bug fix:
+ * a second `/codebuddy` used to be an independent agent by construction, and
+ * anyone who relied on that must be able to get it back with one key.
+ */
+describe('session continuity settings and memory', () => {
+  it('defaults to auto, accepts off, and falls back with a reason on a typo', () => {
+    expect(CLI_BRIDGE_DEFAULTS.sessionContinuity).toBe('auto')
+    expect(normalizeCliBridgeOptions({}).sessionContinuity).toBe('auto')
+    expect(normalizeCliBridgeOptions({ sessionContinuity: 'off' }).sessionContinuity).toBe('off')
+    // Case-SENSITIVE, like permissionMode and effort: a value that only looks
+    // right is rejected out loud rather than silently honoured.
+    expect(normalizeCliBridgeOptions({ sessionContinuity: ' OFF ' }).sessionContinuity).toBe('auto')
+
+    const rejected: string[] = []
+    const value = normalizeCliBridgeOptions({ sessionContinuity: 'sometimes' }, message => rejected.push(message))
+    // A typo must not silently run the other mode without saying so.
+    expect(value.sessionContinuity).toBe('auto')
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]).toContain('sometimes')
+    expect(rejected[0]).toContain(SESSION_CONTINUITY_MODES.join(', '))
+  })
+
+  it('remembers, recalls and forgets one session at a time', () => {
+    forgetCliSession('mem-a')
+    forgetCliSession('mem-b')
+    expect(recallCliSession('mem-a')).toBe('')
+    rememberCliSession('mem-a', 'uuid-1')
+    rememberCliSession('mem-b', 'uuid-2')
+    expect(recallCliSession('mem-a')).toBe('uuid-1')
+    expect(recallCliSession('mem-b')).toBe('uuid-2')
+    // A blank id is never remembered: an empty string means "the CLI reported
+    // none", and storing it would erase a usable entry.
+    rememberCliSession('mem-a', '')
+    expect(recallCliSession('mem-a')).toBe('uuid-1')
+    rememberCliSession('mem-a', 'uuid-3')
+    expect(recallCliSession('mem-a')).toBe('uuid-3')
+    forgetCliSession('mem-a')
+    expect(recallCliSession('mem-a')).toBe('')
+    forgetCliSession('mem-b')
+  })
+
+  it('stays bounded, dropping the oldest entry first', () => {
+    // 256 is the documented ceiling; one more than that must not grow the map
+    // without limit in a process that lives for days.
+    for (let index = 0; index <= 256; index += 1) rememberCliSession(`cap-${String(index)}`, `uuid-${String(index)}`)
+    expect(recallCliSession('cap-0')).toBe('')
+    expect(recallCliSession('cap-1')).toBe('uuid-1')
+    expect(recallCliSession('cap-256')).toBe('uuid-256')
+    for (let index = 0; index <= 256; index += 1) forgetCliSession(`cap-${String(index)}`)
   })
 })

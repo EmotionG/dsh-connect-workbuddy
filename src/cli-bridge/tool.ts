@@ -50,6 +50,17 @@ export const TOOLS_CAP = 12
 /** Hard ceiling on the reply length, in characters. */
 export const MAX_REPLY_CHARS_CAP = 400_000
 
+/**
+ * What `cliBridge.sessionContinuity` accepts.
+ *
+ * `auto` threads the previous CLI session into the next call; `off` leaves every
+ * call independent unless the caller passes `session_id` itself. There is no
+ * `on`-with-a-different-mechanism value: the one that was measured to work is
+ * `--session-id <existing>`, and offering `--continue` (whatever ran last in the
+ * cwd) next to it would make two concurrent sessions race for one conversation.
+ */
+export const SESSION_CONTINUITY_MODES = ['auto', 'off'] as const
+
 /** The normalized bridge settings, derived from the plugin config. */
 export interface BridgeOptions {
   /** Whether the route is mounted at all. Off by default. */
@@ -73,6 +84,12 @@ export interface BridgeOptions {
   allowUnattended: boolean
   maxReplyChars: number
   injectResult: boolean
+  /**
+   * `auto` = a call with no explicit `session_id` continues the previous CLI
+   * session of the same DSH session. `off` = every call starts fresh unless the
+   * caller names a session itself.
+   */
+  sessionContinuity: (typeof SESSION_CONTINUITY_MODES)[number]
   /** Turns per hour in one session; 0 = unbounded. */
   maxTurnsPerSessionHour: number
   /** Turns per hour across the whole process; 0 = unbounded. */
@@ -131,6 +148,50 @@ function result(partial: Partial<AskResult>): AskResult {
 function clampInt(value: unknown, fallback: number, cap: number): number {
   const number = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback
   return Math.max(1, Math.min(cap, number))
+}
+
+/**
+ * Last CLI session id per DSH session, for automatic continuation.
+ *
+ * WHY A MAP AND NOT JUST A TOOL ARGUMENT. `--session-id <existing>` really does
+ * resume the conversation — measured against the installed CLI: a number sent in
+ * turn 1 came back from turn 2, and the CLI echoed the same id both times. But
+ * that id only reaches the CLI when the CALLER passes it back as `session_id`,
+ * which asks the model to copy a uuid out of the previous result. Best effort,
+ * not a guarantee. Remembering the id here makes continuation the default rather
+ * than a habit.
+ *
+ * IN MEMORY ON PURPOSE. The value is a uuid owned by the CLI, and an unknown id
+ * is not an error there — the CLI silently starts a fresh session under it. So
+ * the failure mode of a lost or stale entry is one new conversation, never a
+ * mixed-up one, which is the right trade for a file the plugin would otherwise
+ * have to garbage-collect. Bounded (FIFO) so a long-lived process cannot grow it
+ * without limit.
+ */
+const CLI_SESSION_MEMORY = new Map<string, string>()
+const CLI_SESSION_MEMORY_CAP = 256
+
+/** Remember the CLI session a DSH session should continue next time. */
+export function rememberCliSession(sessionKey: string, cliSessionId: string): void {
+  if (sessionKey === '' || cliSessionId === '') return
+  // Delete first so an updated key moves to the back of the insertion order.
+  CLI_SESSION_MEMORY.delete(sessionKey)
+  CLI_SESSION_MEMORY.set(sessionKey, cliSessionId)
+  while (CLI_SESSION_MEMORY.size > CLI_SESSION_MEMORY_CAP) {
+    const oldest = CLI_SESSION_MEMORY.keys().next()
+    if (oldest.done === true) break
+    CLI_SESSION_MEMORY.delete(oldest.value)
+  }
+}
+
+/** The CLI session to continue for this DSH session, or `''` for a fresh one. */
+export function recallCliSession(sessionKey: string): string {
+  return CLI_SESSION_MEMORY.get(sessionKey) ?? ''
+}
+
+/** Drop one session's memory (used by tests and by an explicit reset). */
+export function forgetCliSession(sessionKey: string): void {
+  CLI_SESSION_MEMORY.delete(sessionKey)
 }
 
 /**
@@ -444,6 +505,18 @@ async function runAskTurn(
   const sessionIdArg = typeof args['session_id'] === 'string' ? args['session_id'].trim() : ''
   const signal = execution?.signal
 
+  // Continuation: an explicit `session_id` always wins, because the caller may be
+  // deliberately branching to a different conversation. Otherwise `auto` picks up
+  // whatever this DSH session ran last, so `/codebuddy` twice in a row shares one
+  // CodeBuddy conversation without the model having to copy a uuid forward.
+  const sessionKey = sessionKeyOf(execution, 'codebuddy_ask')
+  const continuedSessionId =
+    sessionIdArg !== ''
+      ? sessionIdArg
+      : options.sessionContinuity === 'auto'
+        ? recallCliSession(sessionKey)
+        : ''
+
   if (liveTurn !== undefined) liveTurn.phase = 'running'
 
   const outcome = await runAgent(
@@ -457,7 +530,7 @@ async function runAskTurn(
       appendSystemPrompt: options.appendSystemPrompt,
       maxTurns: clampInt(args['max_turns'], options.maxTurns, MAX_TURNS_CAP),
       timeoutMs: clampInt(args['timeout_secs'], options.timeoutSecs, TIMEOUT_SECS_CAP) * 1000,
-      ...(sessionIdArg !== '' ? { sessionId: sessionIdArg } : {}),
+      ...(continuedSessionId !== '' ? { sessionId: continuedSessionId } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(liveTurn === undefined
         ? {}
@@ -504,6 +577,14 @@ async function runAskTurn(
   const tools = [...outcome.toolCounts.entries()]
     .slice(0, TOOLS_CAP)
     .map(([name, count]) => ({ name, count }))
+
+  // Recorded even when the turn failed: a session the CLI opened is resumable
+  // whether or not this particular turn reached a conclusion, and resuming it
+  // next time is strictly better than re-exploring the workspace from zero.
+  // Recorded regardless of `sessionContinuity`, because the setting decides what
+  // is READ, not what is kept — flipping it back to `auto` then picks up the most
+  // recent conversation instead of the one before the setting was turned off.
+  rememberCliSession(sessionKey, outcome.sessionId ?? '')
 
   return result({
     ok: outcome.ok,
@@ -669,7 +750,10 @@ export function mountAskTool(tools: BridgeToolsService | undefined, deps: AskDep
           },
           session_id: {
             type: 'string',
-            description: '可选：指定 CLI 会话 id，让后续调用接着同一个会话。不传则每次开新会话。',
+            description:
+              '可选：要续接的 CLI 会话 id。留空 = 由插件自动续接本会话上一轮的 CodeBuddy 对话'
+              + '（cliBridge.sessionContinuity=auto 时；=off 时留空就是每次开新会话）。'
+              + '只有想故意开一条新对话、或切到另一条对话时才显式传。',
           },
           allow_unattended: {
             type: 'boolean',

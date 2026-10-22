@@ -698,6 +698,11 @@ const cliBridgeConfig = z.object({
     'Hand a successful /codebuddy result to the session model so the conversation knows about it. '
     + 'That wake-up costs a real DSH turn; set false to keep results purely local.',
   ),
+  sessionContinuity: z.string().default('auto').description(
+    'Whether a second /codebuddy (or codebuddy_ask) in the same session continues the previous CodeBuddy '
+    + 'conversation: auto (default) resumes it via --session-id, off starts a fresh one every time. '
+    + 'An explicit session_id argument always wins over this setting.',
+  ),
   maxTurnsPerSessionHour: z.number().step(1).min(0).default(6).description(
     'Bridged calls allowed per hour in one session. 0 disables the limit.',
   ),

@@ -34,9 +34,11 @@
   - **结论回注会话模型**（`injectResult`，默认开）：空闲则 `steer` 起一轮，运行中则 `inject` 排进下一步。回注文本首行带 `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]`，并明确写「不要为了再确认一次而重复调用」，防止「回注 → 模型再问 → 再回注」的烧额度循环。
   - **凭据复用**：`CODEBUDDY_AUTH_TOKEN` → 插件已维护的 vault，**不需要再登录一次**。区域优先于新鲜度，`regionOrder` 默认 `cn,global`。
   - **非破坏性装配**：`cliBridge.enabled` 默认 `false`；`tools` / `commands` 用 `ctx.inject([...])`（**不是** apply 期 `ctx.get()` 采样）等待宿主服务。
-  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
+  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,sessionContinuity,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
   - **开关在卡片里，不用手改 YAML**：账号卡片的偏好区新增一个**全局**勾选「允许调用本机 CodeBuddy CLI 干活」，默认关闭。勾上后 `/codebuddy` 与 `codebuddy_ask` 一起出现，取消后一起消失；**关着时两个入口根本不注册**，不是注册后藏起来。写的是顶层 `cliBridge.enabled`（全局，与 cn/global 分区无关），只重建这一条路由，不 dispose provider 栈、不打断在飞请求。读取走 Host 的已提交值而不是浏览器镜像——后者在本命名空间会 stale，一个「看起来开了」的假值在这里等于谎报消费能力。
   - **跑的时候看得见（实时胶囊）**：`conversation.composer.dock` 上挂一颗 `CodeBuddy · 7 tools · 42s · last: Bash`，数据来自插件自己的只读路由 `/plugins/dsh-connect-workbuddy/cli-live`（序列化宿主侧的 live board）。宿主工具调用是一次性的，`execute()` 不返回界面就什么都不知道——这颗胶囊补的就是那几分钟的空白。5 秒轮询、秒数由 1 秒本地 tick 推、多会话共享一个在途请求；没有回合时渲染 `null`，那一行不动。路由**无条件注册**（开关关着也在），客户端才能把「没有回合」与「没有这条路由」分开。**胶囊只描述本会话的回合**：座位 `conversation.composer.dock` 声明成 `scope: 'session'`，`inject` 第一个参数就是 `sessionId`，组件按它过滤——live board 是**宿主级**的（一条路由回答进程里所有会话），不过滤就会在 A 会话的输入框下面描述 B 会话（甚至另一个标签页）的回合。宿主没给 `sessionId` 时不过滤；宿主拿不到 `agent.id` 而标成 `sessionId: ''` 的行也保留，那同样是「真有人在干活」的证据。**不按供应商门控**：额度胶囊只在 WorkBuddy 供应商下出现是因为它报那家的额度，这颗胶囊报的是一个本地进程，CLI 路线刻意与模型无关。
+
+- **连续调用默认续接同一条 CodeBuddy 对话**（`sessionContinuity`，默认 `auto`）。第一次调用报回的 CLI `session_id` 记在宿主进程里（按 DSH 会话分开，最多 256 条，FIFO），第二次调用没显式传 `session_id` 时自动用它走 `--session-id`。**先量过再接**：真机跑两轮，第一轮让 CLI 记住 `7391`，第二轮只传会话 id 问它数字，答出 `7391`，且两次回显同一个 id；另一个方向也量了——传一个**不存在**的 id 不报错，CLI 会静默开一条新会话，所以这条记忆丢掉或过期只会退化成「一次新对话」，不会串到别人的对话里。显式传 `session_id` 永远优先（可以故意开新线）；设 `off` 回到「每次独立」。
 
 ### Fixes（相对 PR #104 初版）
 

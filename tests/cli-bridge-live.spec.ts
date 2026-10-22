@@ -31,6 +31,7 @@ function options(overrides: Partial<BridgeOptions> = {}): BridgeOptions {
     allowUnattended: false,
     maxReplyChars: 60_000,
     injectResult: true,
+  sessionContinuity: 'auto',
     maxTurnsPerSessionHour: 6,
     maxTurnsPerHour: 20,
     ...overrides,
