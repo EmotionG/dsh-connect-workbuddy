@@ -16,7 +16,7 @@
  *
  * Every one of those is asserted below rather than described.
  */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -259,7 +259,10 @@ let allowedDir = ''
 let outsideDir = ''
 
 beforeAll(async () => {
-  base = await mkdtemp(join(tmpdir(), 'wb-bridge-dir-'))
+  // Canonicalise the root before deriving anything from it: on macOS `tmpdir()` is
+  // `/var/folders/...`, which is a symlink to `/private/var/...`, while
+  // `resolveWorkingDir` returns realpaths — comparing the two spellings fails.
+  base = await realpath(await mkdtemp(join(tmpdir(), 'wb-bridge-dir-')))
   sessionDir = join(base, 'session')
   sessionChild = join(sessionDir, 'packages', 'app')
   allowedDir = join(base, 'allowed')
