@@ -58,7 +58,7 @@
 
 ### Tests
 
-- 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（16 条），共 **85 条**。
+- 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（17 条），共 **86 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
 - **`runner.ts` 第一次有测试。** 初版的 53 条全是纯逻辑与注册形状，`runOneTurn` / `runAgent` / `spawn` 一次都没被调用过 —— 而评审找到的第 5/6/7/8 条缺陷全在那个盲区里。新 spec 用 `vi.mock('node:child_process')` 造 fake child，断言的是模块自己声明的协议：
   - `control_request` 的回包形状（`subtype:'success'` / `request_id` 原样回传 / `allowed:false`），且拒绝理由不以 synthetic-deny 前缀开头、result 帧前 **stdin 不 close**（这一条在修复前必红）；`interrupt` 分两条：普通工具**不带**（带了会中止整轮）、`ExitPlanMode` **必带**（不带则 `plan` 挂死）
   - 多 text block 拼接、tool_use 计数、result 帧的 usage / session_id / errors 解析
@@ -66,7 +66,7 @@
   - 换号：只有 401 才换、**超时/崩溃不换**、最后一条 401 也不重试、空凭据列表报 `no credential worked`
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
-- 全量：**114 文件 / 1899 条通过**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 444.40 kB）。
+- 全量：**114 文件 / 1905 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 446.54 kB）。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
 
 ### Tests（同期并入 main：issue #102 / #108）
