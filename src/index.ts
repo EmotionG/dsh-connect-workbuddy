@@ -50,6 +50,14 @@ import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
+import {
+  createCliBridgeRuntime,
+  mountCommandSurface,
+  mountToolSurface,
+  type CliBridgeRuntime,
+  type CliBridgeSettings,
+} from './cli-bridge/mount.ts'
+import type { BridgeCommandsService, BridgeToolsService } from './cli-bridge/services.ts'
 import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
 import { measureTps } from './tps.ts'
@@ -478,6 +486,15 @@ export interface Config {
   imageModelIds?: string[]
   /** @deprecated See {@link Config.lastCatalog}. */
   contextBudgets?: Record<string, WorkBuddyContextBudget>
+  /**
+   * The optional CLI route: let the locally signed-in CodeBuddy CLI do the work
+   * in a separate agent instead of proxying the gateway.
+   *
+   * It is OFF by default and completely independent of the provider stacks, so a
+   * config that never mentions it behaves exactly as before. This is a
+   * client-fingerprint workaround, not an account one — see `cli-bridge/runner`.
+   */
+  cliBridge?: CliBridgeSettings
 }
 
 const modelConfig = z.object({
@@ -628,6 +645,66 @@ function unwrapVolatile<T>(value: T): T {
  * exposing it as part of its public API.
  */
 
+const cliBridgeConfig = z.object({
+  enabled: z.boolean().default(false).description(
+    'Mount the optional CodeBuddy CLI route (tool codebuddy_ask + /codebuddy). Off by default; '
+    + 'the provider stacks are unaffected either way.',
+  ),
+  binary: z.string().default('').description(
+    'Absolute path to the CodeBuddy CLI JS entry (the package\'s bin/codebuddy, not its .cmd shim). '
+    + 'Empty means auto-detect in the usual global npm/pnpm/yarn/volta/nvm/fnm locations. '
+    + 'There is deliberately no fallback to whatever "codebuddy" is on PATH.',
+  ),
+  model: z.string().default('').description(
+    'Model id passed as --model. Empty means the CLI\'s own configured default.',
+  ),
+  permissionMode: z.string().default('dontAsk').description(
+    'Permission mode passed as --permission-mode: dontAsk (default: read tools allowed, writes refused, never blocks), '
+    + 'plan / default / auto, acceptEdits (may edit files), or bypassPermissions (allows everything).',
+  ),
+  effort: z.string().default('').description(
+    'Reasoning effort passed as --effort: minimal, low, medium, high, xhigh or max. Empty means unset.',
+  ),
+  maxTurns: z.number().step(1).min(1).default(10).description(
+    'Agent turn budget for one bridged call. Clamped to 100.',
+  ),
+  timeoutSecs: z.number().step(1).min(1).default(900).description(
+    'Wall-clock budget for one bridged call, in seconds. Clamped to 1800.',
+  ),
+  regionOrder: z.string().default('cn,global').description(
+    'Credential region preference for the CLI, comma separated. Domestic tokens are accepted by '
+    + 'copilot.tencent.com; global tokens are refused there with 401.',
+  ),
+  workingDir: z.string().default('').description(
+    'Default working directory for a bridged call when the caller names none. Must exist and be a directory. '
+    + 'Empty means a call has to name one (or come from a session that has one).',
+  ),
+  allowedDirs: z.string().default('').description(
+    'Extra roots a bridged call may be pointed at, comma separated absolute paths. A call can always run '
+    + 'inside its own session workspace; anything else has to be listed here. Empty means only the session workspace.',
+  ),
+  appendSystemPrompt: z.string().default('').description(
+    'Extra system prompt appended to every bridged call. Passed as --append-system-prompt, never through a shell.',
+  ),
+  allowUnattended: z.boolean().default(false).description(
+    'Allow a bridged call with no directory at all to run in a throwaway temp directory. '
+    + 'Off by default: an agent that can edit files should not be aimed at a directory nobody chose.',
+  ),
+  maxReplyChars: z.number().step(1).min(1).default(60_000).description(
+    'Reply length cap handed back to the model, in characters. Clamped to 400000.',
+  ),
+  injectResult: z.boolean().default(true).description(
+    'Hand a successful /codebuddy result to the session model so the conversation knows about it. '
+    + 'That wake-up costs a real DSH turn; set false to keep results purely local.',
+  ),
+  maxTurnsPerSessionHour: z.number().step(1).min(0).default(6).description(
+    'Bridged calls allowed per hour in one session. 0 disables the limit.',
+  ),
+  maxTurnsPerHour: z.number().step(1).min(0).default(20).description(
+    'Bridged calls allowed per hour across the whole process. 0 disables the limit.',
+  ),
+})
+
 export const Config: z<Config> = z.object({
   authFile: asVolatile(z.string().description('WorkBuddy desktop auth file (defaults to the app\'s own location)')),
   accountId: z.string().description('Deprecated: pre-split account selector, attributed to its own region'),
@@ -637,6 +714,13 @@ export const Config: z<Config> = z.object({
   enabledModelIds: z.array(z.string()).default([]).description('Deprecated: pre-region-split CN selection'),
   imageModelIds: z.array(z.string()).default([]).description('Deprecated: pre-region-split CN image opt-in'),
   contextBudgets: z.dict(z.number().step(1).min(1)).default({}).description('Deprecated: pre-region-split CN context budgets'),
+  // Volatile: a user turning the route on or retuning its budget should not need
+  // a full plugin reload (which disposes both provider stacks and drops every
+  // in-flight request). The mount listens for `loader/volatile-update` and
+  // rebuilds only when the serialized settings actually changed.
+  cliBridge: asVolatile(
+    cliBridgeConfig.default({} as any).description('Optional CodeBuddy CLI route; off by default and independent of the providers'),
+  ) as unknown as z<CliBridgeSettings>,
 }) as unknown as z<Config>
 
 /**
@@ -1088,6 +1172,10 @@ export function apply(ctx: Context, config: Config): void {
     // the tool is registered/unregistered HERE, on the same call that moves the
     // routes, or it would follow a stale answer.
     syncImageTool(value)
+    // The CLI route reads its settings the same way: `cliBridge` is volatile, so
+    // turning it on arrives through this same call and the surfaces have to
+    // follow here (they cannot re-apply).
+    syncCliBridge(value)
     void refreshRegionUsability()
   }
 
@@ -1218,6 +1306,85 @@ export function apply(ctx: Context, config: Config): void {
       disposeImageTool?.()
       disposeImageTool = undefined
       imageTools = undefined
+    })
+  })
+
+  // Optional CLI route (`codebuddy_ask` + `/codebuddy`).
+  //
+  // Mounted the SAME way as the image tool above, and for the same reason: both
+  // `tools` and `commands` are host services that can appear after this row, so
+  // they are awaited with `ctx.inject` instead of sampled with `ctx.get()` once
+  // during apply. Sampling looks identical until the day a Host (Desktop) loads
+  // the surface later than the plugin, and then the entrance silently never
+  // exists — there is no error, just an empty `/` command list.
+  //
+  // The runtime (normalized options + ONE shared turn gate) is rebuilt only when
+  // the serialized settings actually change, which is what makes this safe to
+  // run from the volatile-update listener: re-mounting on every unrelated
+  // volatile write would reset the hourly budget the user is being held to.
+  let cliTools: BridgeToolsService | undefined
+  let cliCommands: BridgeCommandsService | undefined
+  let cliRuntime: CliBridgeRuntime | undefined
+  let cliRuntimeKey = ''
+  let disposeCliTool: (() => void) | undefined
+  let disposeCliCommand: (() => void) | undefined
+
+  const disposeCliSurfaces = (): void => {
+    disposeCliTool?.()
+    disposeCliTool = undefined
+    disposeCliCommand?.()
+    disposeCliCommand = undefined
+  }
+
+  const syncCliBridge = (value: Config): void => {
+    const settings = unwrapVolatile(value.cliBridge)
+    // The key covers everything that changes behavior; anything else in the
+    // settings object is derived from these fields anyway.
+    const key = JSON.stringify(settings ?? {})
+    if (key !== cliRuntimeKey) {
+      cliRuntimeKey = key
+      disposeCliSurfaces()
+      cliRuntime?.deps.gate?.clear()
+      cliRuntime = createCliBridgeRuntime(
+        settings,
+        REGION_KEYS.map(region => ({ region, store: stacks[region].store })),
+        message => ctx.logger.warn(`dsh-connect-workbuddy: ${message}`),
+      )
+    }
+    if (cliRuntime === undefined) {
+      disposeCliSurfaces()
+      return
+    }
+    if (cliTools !== undefined && disposeCliTool === undefined) {
+      disposeCliTool = mountToolSurface(cliRuntime, cliTools)
+    }
+    if (cliCommands !== undefined && disposeCliCommand === undefined) {
+      disposeCliCommand = mountCommandSurface(cliRuntime, cliCommands)
+    }
+  }
+
+  ctx.inject(['tools'], (toolsCtx) => {
+    cliTools = (toolsCtx as unknown as { tools?: BridgeToolsService }).tools
+    if (cliTools === undefined) return
+    syncCliBridge(current())
+    toolsCtx.effect(() => () => {
+      // Only this surface: the other one may still be mounted on a fiber that
+      // outlives this one, and tearing it down here would leave `cliTools`
+      // unset but `disposeCliCommand` undefined, so nothing would re-mount it.
+      disposeCliTool?.()
+      disposeCliTool = undefined
+      cliTools = undefined
+    })
+  })
+
+  ctx.inject(['commands'], (commandsCtx) => {
+    cliCommands = (commandsCtx as unknown as { commands?: BridgeCommandsService }).commands
+    if (cliCommands === undefined) return
+    syncCliBridge(current())
+    commandsCtx.effect(() => () => {
+      disposeCliCommand?.()
+      disposeCliCommand = undefined
+      cliCommands = undefined
     })
   })
 

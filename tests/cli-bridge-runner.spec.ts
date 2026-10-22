@@ -1,0 +1,477 @@
+/**
+ * The half of the CLI route that actually runs a process: `runAgent` /
+ * `runOneTurn` in `src/cli-bridge/runner.ts`.
+ *
+ * WHY THIS FILE EXISTS AT ALL. The first draft shipped 53 tests and not one of
+ * them ever reached `spawn`. Every defect the maintainer found in the runner —
+ * the permission handshake hanging, the credential walk continuing after a
+ * timeout, stderr ending up in the transcript unredacted, the read buffers
+ * having no ceiling — lived exactly in that blind spot. So the child process is
+ * mocked here and those paths are asserted by name.
+ *
+ * WHY A MOCK INSTEAD OF THE REAL CLI. A test suite must not need a CodeBuddy
+ * install, a vault account and the upstream gateway to pass, and it must not
+ * spend an account quota on every CI run. What is worth pinning down is the
+ * PROTOCOL this module speaks, and that is fully observable from the frames a
+ * fake child emits.
+ */
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const spawnMock = vi.hoisted(() => vi.fn())
+
+vi.mock('node:child_process', () => ({ spawn: spawnMock }))
+
+// Imported AFTER the mock is registered, which is what makes the module under
+// test pick up the fake `spawn`.
+import { isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
+import type { BridgeCredential, TurnOptions } from '../src/cli-bridge/runner.ts'
+
+/** One fake child process, with the pieces `runner.ts` touches. */
+interface FakeChild {
+  pid: number
+  stdin: {
+    writes: string[]
+    write: (chunk: string) => boolean
+    end: () => void
+    on: (event: string, listener: (...args: unknown[]) => void) => void
+    ended: boolean
+  }
+  stdout: {
+    setEncoding: () => void
+    on: (event: string, listener: (chunk: string) => void) => void
+  }
+  stderr: {
+    setEncoding: () => void
+    on: (event: string, listener: (chunk: string) => void) => void
+  }
+  killed: boolean
+  kill: () => boolean
+  on: (event: string, listener: (...args: unknown[]) => void) => void
+  /** Push a parsed frame to stdout as one NDJSON line. */
+  emitFrame: (frame: unknown) => void
+  /** Push raw bytes to stdout (for the "line too long" case). */
+  emitRaw: (text: string) => void
+  emitStderr: (text: string) => void
+  close: (code: number | null) => void
+  writesAfterEnd: () => string[]
+}
+
+function fakeChild(pid = 4242): FakeChild {
+  const stdoutListeners: Array<(chunk: string) => void> = []
+  const stderrListeners: Array<(chunk: string) => void> = []
+  const closeListeners: Array<(...args: unknown[]) => void> = []
+  const errorListeners: Array<(...args: unknown[]) => void> = []
+
+  const child: FakeChild = {
+    pid,
+    stdin: {
+      writes: [],
+      ended: false,
+      write(chunk: string) {
+        child.stdin.writes.push(chunk)
+        return true
+      },
+      end() {
+        child.stdin.ended = true
+      },
+      on() {},
+    },
+    stdout: {
+      setEncoding() {},
+      on(_event, listener) {
+        stdoutListeners.push(listener)
+      },
+    },
+    stderr: {
+      setEncoding() {},
+      on(_event, listener) {
+        stderrListeners.push(listener)
+      },
+    },
+    killed: false,
+    kill() {
+      child.killed = true
+      return true
+    },
+    on(event, listener) {
+      if (event === 'close') closeListeners.push(listener)
+      if (event === 'error') errorListeners.push(listener)
+    },
+    emitFrame(frame) {
+      const line = `${JSON.stringify(frame)}\n`
+      for (const listener of stdoutListeners) listener(line)
+    },
+    emitRaw(text) {
+      for (const listener of stdoutListeners) listener(text)
+    },
+    emitStderr(text) {
+      for (const listener of stderrListeners) listener(text)
+    },
+    close(code) {
+      for (const listener of closeListeners) listener(code)
+    },
+    /** Writes that arrived after `stdin.end()`, which would be a protocol bug. */
+    writesAfterEnd() {
+      // `stdin.end()` is only ever called at settle/fail time in runner.ts, so a
+      // later write is only reachable through the deny path. Asserted instead as
+      // "the deny went out before the end", which the tests check directly.
+      return []
+    },
+  }
+  void errorListeners
+  return child
+}
+
+/** The options one turn needs, with the CLI entry pointed at a real file. */
+function turnOptions(entry: string, overrides: Partial<TurnOptions> = {}): TurnOptions {
+  return {
+    prompt: 'do the thing',
+    cwd: process.cwd(),
+    binary: entry,
+    model: '',
+    permissionMode: 'dontAsk',
+    effort: '',
+    maxTurns: 3,
+    timeoutMs: 5_000,
+    appendSystemPrompt: '',
+    ...overrides,
+  }
+}
+
+const credential: BridgeCredential = { token: 'token-abcdef123456', source: 'cn/one', region: 'cn', expired: false }
+
+let dir = ''
+let entry = ''
+
+beforeEach(async () => {
+  spawnMock.mockReset()
+  dir = await mkdtemp(join(tmpdir(), 'wb-cli-bridge-'))
+  entry = join(dir, 'codebuddy')
+  // `resolveCliEntry` takes an explicit path literally, but only after it exists.
+  await writeFile(entry, '#!/usr/bin/env node\n')
+})
+
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true })
+})
+
+/** Make the next spawn return this fake child. */
+function useChild(child: FakeChild): void {
+  spawnMock.mockImplementation(() => child)
+}
+
+/** Frames a real CLI emits before the turn's result, kept minimal. */
+function initFrames(child: FakeChild): void {
+  child.emitFrame({ type: 'system', subtype: 'init', session_id: 'session-1' })
+}
+
+describe('runOneTurn protocol', () => {
+  it('keeps stdin open and answers every permission request with a REAL denial', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({
+      type: 'control_request',
+      request_id: 'perm_1',
+      request: { subtype: 'can_use_tool', tool_name: 'Write' },
+    })
+
+    // The denial is answered ON stdin, while the turn is still running.
+    const denial = child.stdin.writes
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+      .find(frame => frame['type'] === 'control_response')
+    expect(denial).toBeDefined()
+    const response = denial!['response'] as Record<string, unknown>
+    expect(response['subtype']).toBe('success')
+    expect(response['request_id']).toBe('perm_1')
+    const decision = response['response'] as Record<string, unknown>
+    expect(decision['allowed']).toBe(false)
+    // INTERRUPT IS PER-TOOL. For an ordinary tool the CLI records the denial and
+    // tries something else, so the turn still produces a reply; setting
+    // `interrupt: true` here would abort the whole turn (measured against the
+    // real CLI: acceptEdits + Bash denial → is_error, empty reply, 4.2s). Only
+    // `ExitPlanMode` needs it — see the next test.
+    expect(decision['interrupt']).toBeUndefined()
+    // A reason the CLI reads as synthetic would be IGNORED — i.e. the tool would
+    // proceed as if allowed. Never ship such a reason.
+    expect(isSyntheticDenyReason(String(decision['reason']))).toBe(false)
+
+    // Nothing has ended stdin yet: the prompt was written, the pipe stays open.
+    expect(child.stdin.ended).toBe(false)
+
+    child.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, result: 'done' })
+    const outcome = await running
+
+    expect(outcome.ok).toBe(true)
+    expect(outcome.text).toBe('done')
+    expect(outcome.deniedTools).toEqual(['Write'])
+    // The prompt travelled on stdin, and stdin is closed only after `result`.
+    expect(child.stdin.writes[0]).toContain('"type":"user"')
+    expect(child.stdin.writes[0]).toContain('do the thing')
+    expect(child.stdin.ended).toBe(true)
+  })
+
+  it('adds interrupt ONLY for ExitPlanMode, which otherwise wedges plan mode', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({
+      type: 'control_request',
+      request_id: 'perm_plan',
+      request: { subtype: 'can_use_tool', tool_name: 'ExitPlanMode' },
+    })
+
+    const denial = child.stdin.writes
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+      .find(frame => frame['type'] === 'control_response')
+    expect(denial).toBeDefined()
+    const decision = (denial!['response'] as Record<string, unknown>)['response'] as Record<string, unknown>
+    expect(decision['allowed']).toBe(false)
+    // Measured: deny WITHOUT interrupt in `plan` mode hangs >70s until timeout;
+    // with it the turn ends in milliseconds.
+    expect(decision['interrupt']).toBe(true)
+
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'ok' })
+    const outcome = await running
+    expect(outcome.deniedTools).toEqual(['ExitPlanMode'])
+  })
+
+  it('counts tool_use blocks and keeps every assistant text block', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'first' },
+          { type: 'tool_use', name: 'Read' },
+          { type: 'tool_use', name: 'Read' },
+          { type: 'tool_use', name: 'Grep' },
+          { type: 'text', text: 'second' },
+        ],
+      },
+    })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1 })
+    const outcome = await running
+    expect(outcome.text).toBe('first\nsecond')
+    expect([...outcome.toolCounts.entries()]).toEqual([['Read', 2], ['Grep', 1]])
+  })
+
+  it('reads usage, session id and the error channel off the result frame', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitFrame({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      num_turns: 4,
+      session_id: 'session-9',
+      errors: ['boom'],
+      usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 7 },
+    })
+    const outcome = await running
+    expect(outcome.ok).toBe(false)
+    expect(outcome.sessionId).toBe('session-9')
+    expect(outcome.numTurns).toBe(4)
+    expect(outcome.usage?.cache_read_input_tokens).toBe(7)
+    expect(outcome.error).toContain('boom')
+  })
+
+  it('redacts the credential and any token-shaped text from everything it returns', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          // A CLI that echoes its own environment must not put the token in the
+          // transcript, where it survives in the session history forever.
+          { type: 'text', text: `the env had ${credential.token} in it` },
+          { type: 'text', text: 'and a bearer: Bearer aaaaaaaaaaaaaaaaaaaa' },
+        ],
+      },
+    })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, errors: [`401 for ${credential.token}`] })
+    const outcome = await running
+    expect(outcome.text).not.toContain(credential.token)
+    expect(outcome.text).toContain('[redacted credential]')
+    expect(outcome.text).not.toContain('aaaaaaaaaaaaaaaaaaaa')
+    // The result-frame errors take the same treatment: the credential is in this
+    // process's environment, so it can appear in any channel the CLI prints.
+    expect(String(outcome.error)).not.toContain(credential.token)
+  })
+
+  it('fails on a single absurdly long line instead of buffering it forever', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitRaw('x'.repeat(MAX_FRAME_BYTES + 1))
+    await expect(running).rejects.toThrow(/longer than/)
+    expect(child.stdin.ended).toBe(true)
+  })
+
+  it('fails when the process exits without a result frame, and keeps the stderr tail', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitStderr('Error: cannot find module\n  at somewhere')
+    child.close(1)
+    await expect(running).rejects.toThrow(/exited with code 1 and emitted no result frame/)
+    await expect(running).rejects.toThrow(/cannot find module/)
+  })
+
+  it('fails on its own timeout and takes the process tree down', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry, { timeoutMs: 30 }), [credential], () => {})
+    initFrames(child)
+    await expect(running).rejects.toThrow(/exceeded its/)
+    expect(child.stdin.ended).toBe(true)
+    // On Windows the tree is taken down through taskkill; either way something
+    // was killed rather than the child being left to run.
+    const killed = child.killed || spawnMock.mock.calls.some(call => call[0] === 'taskkill')
+    expect(killed).toBe(true)
+  })
+
+  it('honours a host cancellation and reports it as such', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const controller = new AbortController()
+    const running = runAgent(turnOptions(entry, { signal: controller.signal }), [credential], () => {})
+    initFrames(child)
+    controller.abort()
+    await expect(running).rejects.toThrow('cancelled by the host')
+  })
+
+  it('reports a missing CLI instead of spawning whatever is on PATH', async () => {
+    const missing = join(dir, 'nope', 'codebuddy')
+    await expect(runAgent(turnOptions(missing), [credential], () => {})).rejects.toThrow(/不存在/)
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('runAgent credential walk', () => {
+  it('moves to the next account ONLY on a recognised credential refusal', async () => {
+    // Realistic pids, NOT 1/2: `killTree` feeds this pid to `process.kill(-pid)` as a real
+    // process-group id, so a fabricated low pid escapes the mock and signals the actual OS.
+    const first = fakeChild(51_001)
+    const second = fakeChild(51_002)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+    const other: BridgeCredential = { token: 'token-zzzzzzzzzzzz', source: 'global/two', region: 'global', expired: false }
+
+    const running = runAgent(turnOptions(entry), [credential, other], () => {})
+    first.emitFrame({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      errors: ['401 Authentication required. Please use /login command to sign in'],
+    })
+    // The second credential answers properly.
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2))
+    second.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1 })
+    second.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } })
+
+    const outcome = await running
+    expect(outcome.credential.region).toBe('global')
+    expect(outcome.ok).toBe(true)
+  })
+
+  it('does NOT burn another account on a timeout or a crash', async () => {
+    const first = fakeChild(51_001)
+    useChild(first)
+    /** Spawns of the CLI itself, ignoring the Windows `taskkill` used to clean up. */
+    const cliSpawns = (): number =>
+      spawnMock.mock.calls.filter(call => !String(call[0]).endsWith('taskkill')).length
+    // Two credentials are available; a timeout on the first attempt must not
+    // become two 900-second attempts.
+    await expect(
+      (async () => {
+        const running = runAgent(turnOptions(entry, { timeoutMs: 30 }), [credential, credential], () => {})
+        first.emitFrame({ type: 'system', subtype: 'init' })
+        return running
+      })(),
+    ).rejects.toThrow(/exceeded its/)
+    expect(cliSpawns()).toBe(1)
+  })
+
+  it('does not retry the LAST account either, so a 401 with one account fails fast', async () => {
+    const only = fakeChild(51_001)
+    useChild(only)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    only.emitFrame({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['401 Authentication required'] })
+    const outcome = await running
+    expect(outcome.ok).toBe(false)
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses to walk when there is no credential at all', async () => {
+    await expect(runAgent(turnOptions(entry), [], () => {})).rejects.toThrow(/no credential worked/)
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('never turns a child pid of 1 into a signal for every process of the user', async () => {
+    // Regression, with a real blast radius: a fake (or already-reaped) child can report
+    // `pid: 1`, and `process.kill(-1, 'SIGTERM')` does not fail for it — it signals EVERY
+    // process this user may signal. On a desktop that is the whole login session: Finder,
+    // Dock, the user's chat apps, and every running DSH host all died, then DSH relaunched
+    // and looked like it was "restarting itself". The guard must degrade to the single-child
+    // kill instead of aiming at a non-positive process group.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      const only = fakeChild(1)
+      useChild(only)
+      await expect(
+        runAgent(turnOptions(entry, { timeoutMs: 30 }), [credential], () => {}),
+      ).rejects.toThrow(/exceeded its/)
+      const targets = killSpy.mock.calls.map(([target]) => target)
+      expect(targets.filter(target => typeof target === 'number' && target < 0)).toEqual([])
+      expect(only.killed).toBe(true)
+    } finally {
+      killSpy.mockRestore()
+    }
+  })
+})
+
+describe('looksLikeAuthFailure', () => {
+  it('reads only the CLI error channel, never the assistant正文', () => {
+    // A review that simply QUOTES an HTTP 401 in its own prose must not be read
+    // as "the token was refused" — that used to discard a good turn and re-run
+    // it on the next account.
+    expect(looksLikeAuthFailure({ isError: false, errors: [], subtype: 'success' })).toBe(false)
+    expect(looksLikeAuthFailure({ isError: true, errors: ['401 Authentication required'], subtype: undefined })).toBe(true)
+    expect(looksLikeAuthFailure({ isError: true, errors: ['please run the /login command'], subtype: undefined })).toBe(true)
+    expect(looksLikeAuthFailure({ isError: true, errors: ['invalid_api_key'], subtype: undefined })).toBe(true)
+    // Non-credential failures stay put: a 429 or a model error would just burn
+    // the next account's quota for the same answer.
+    expect(looksLikeAuthFailure({ isError: true, errors: ['429 rate limited'], subtype: undefined })).toBe(false)
+    expect(looksLikeAuthFailure({ isError: true, errors: [], subtype: 'error_during_execution' })).toBe(false)
+  })
+})
+
+describe('isSyntheticDenyReason', () => {
+  it('rejects the prefixes the CLI silently ignores', () => {
+    // Those reasons mean "the human went away", not "the human said no" — the
+    // CLI drops the denial and lets the tool run.
+    expect(isSyntheticDenyReason('cancelled')).toBe(true)
+    expect(isSyntheticDenyReason('Cancelled by user')).toBe(true)
+    expect(isSyntheticDenyReason('timeout waiting for user response')).toBe(true)
+    expect(isSyntheticDenyReason('This is an unattended automated session.')).toBe(true)
+    expect(isSyntheticDenyReason('dsh-connect-workbuddy runs this turn unattended')).toBe(false)
+  })
+})

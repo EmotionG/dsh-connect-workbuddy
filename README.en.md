@@ -53,6 +53,7 @@ It depends on the WorkBuddy client's own endpoints (not a public API), so the pl
 - **Multi-candidate credential paths** — probes the platform defaults for macOS / Windows / Linux in turn, overridable by environment variable or directly in the card. **When nothing is found, the card lists which paths were probed and why each one failed**: five distinct reasons (absent / unreadable / no usable token / encrypted with no key available / belongs to the other region), so the easiest case to misdiagnose — signed in, but the desktop app is not present — says the app must be there instead of telling you to sign in again. The **belongs to the other region** reason is different in kind: that sign-in is real and usable, it is simply filed under the other tab, so the card states the fix outright — switch tabs, no need to sign in again. The list says it once: the paragraph states the conclusion, the collapsed list supplies the per-path detail, and the two never repeat each other.
 - **Secure loopback shim** — one random port + in-process random secret per region; the real WorkBuddy token is never handed to pi-ai.
 - **Command-line diagnostics** — `status` / `doctor` / `logout`, reporting sign-in and credits per region, without a browser.
+- **CLI route (optional, off by default)** — Disguising requests as a CodeBuddy client to pass the channel check is an arms race, and it has already produced account-level restrictions (issue #98, code 11140). A second route skips that disguise: **let the locally signed-in CodeBuddy CLI run the task itself** — it reads files, runs git, edits code. Turn on `cliBridge.enabled` and the plugin gains a `codebuddy_ask` tool and a `/codebuddy` command, with the result injected back into the session model. While it is off, the plugin behaves **exactly** as before. **It bypasses the client-fingerprint layer, not the account layer**: it uses the same accounts from this plugin's vault, so it is not a get-out-of-jail card after a block. See [CLI route](#cli-route-optional-let-codebuddy-do-the-work).
 
 ## How it works
 
@@ -284,6 +285,87 @@ dsh plugin --profile web exec dsh-connect-workbuddy status
 > `Desktop auth file: present` means the file was found; if `status` still reports not-signed-in while `Encrypted-credential support` is `unavailable` (no app on the server), that is the encrypted-credential-without-key case — carrying the file over cannot fix it.
 
 > 🔒 **The credential is the account**: that file is a directly usable session. Transfer it over an encrypted channel (`scp` / private network), tighten it with `chmod 600` once on the server, and keep it out of anything that gets packaged or committed.
+
+## CLI route (optional): let CodeBuddy do the work
+
+> Off by default (`cliBridge.enabled: false`). While it is off, the plugin behaves **exactly** as before: no extra tool, no extra command, no extra request.
+
+This route uses CodeBuddy as a **tool** rather than as a model provider: the plugin exposes a `codebuddy_ask` tool and a `/codebuddy` command, and a local, already signed-in CodeBuddy CLI runs one real turn in its own process — reading files, running `git`, editing code — then hands the conclusion back.
+
+**What this actually buys, stated plainly.** The provider route has to make a request look like a CodeBuddy client to pass the gateway's channel check; since 4.15.x that check matches an exact substring mid-prompt, and the plugin dodges it with zero-width spaces at punctuation boundaries. That is an arms race, and it is no longer free: issue #98 has produced an **account-level** restriction (`code 11140`, "the account shows abnormal behaviour and has been restricted").
+
+The CLI route escapes the **client-fingerprint layer**, not the account layer. It hands the CLI `CODEBUDDY_AUTH_TOKEN` taken from this plugin's own vault — the same WorkBuddy accounts. So the claim "the process talking to the gateway really is the signed-in CodeBuddy CLI, there is no identity to forge, therefore the account cannot be restricted" **does not hold**: the identity is the same set of accounts, `11140` is account-level, and the same accounts are just as restricted on this route. What is genuinely bypassed is "does this request's client fingerprint look like CodeBuddy" — a real gain against the channel check, but not immunity from blocking. The two routes are complementary fallbacks, not a replacement.
+
+### Prerequisites
+
+- The CodeBuddy CLI is installed (npm package `@tencent-ai/codebuddy-code`; `codebuddy` and `cbc` are the same entry point). For a non-standard install, point `cliBridge.binary` at the absolute path.
+- It is signed in. Credentials are resolved in this order: the `CODEBUDDY_AUTH_TOKEN` environment variable, then this plugin's **own** vault (`$DSH_HOME/workbuddy-vault/<region>/<account>.json`). In other words, **the accounts you already signed in for this plugin are reused directly — no second sign-in.** (Verified against the real CLI: `getAuthenticationAttributesSync` checks `CODEBUDDY_AUTH_TOKEN` ahead of its own sign-in file.)
+- Region **outranks freshness**: a domestic token is valid against `copilot.tencent.com`, while a global token gets a 401 there (measured: `401 Authentication required ... (target: https://copilot.tencent.com)`). Hence the default `cn,global` order, falling through only when a region fails.
+
+### Turning it on
+
+```jsonc
+{
+  "cliBridge": {
+    "enabled": true
+  }
+}
+```
+
+Every other key has a default. See the table below. Changing them does not need a host restart: `cliBridge` is a volatile field, so a change rebuilds only this route instead of reloading both provider stacks.
+
+### The two entrances
+
+| Entrance | Who triggers it | Working directory | Whose budget it spends |
+| --- | --- | --- | --- |
+| `codebuddy_ask` tool | the model decides to call it | the session workspace, or a `working_dir` the caller passes, or `cliBridge.workingDir` | CodeBuddy quota, plus the DSH tokens of the wake-up the result is injected into (`injectResult` is on by default) |
+| `/codebuddy` command | a human types it | **always the current session workspace** | the same — the command itself skips the model, but by default the result is injected back into it |
+
+An **empty** `/codebuddy` means "review the uncommitted changes in this workspace" (that invocation is forced to the read-only `dontAsk` permission mode and is told to run `git diff` itself and report only what it actually saw); **text after it** is sent through verbatim.
+
+When the turn finishes, the conclusion is **injected back into the session model** (`cliBridge.injectResult`, on by default): an idle session is woken for a new turn, a running one gets it queued for its next step. **That step really spends DSH tokens** — set `injectResult` to `false` to leave the model untouched, and the `/codebuddy` result is then shown to you only. The injected text starts with `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]` so neither you nor the model mistakes it for a human message.
+
+### Permissions: read-only by default
+
+`permissionMode` defaults to **`dontAsk`**: read-only tools (Read/Glob/Grep) run, writes and command execution are refused, and the turn **does not hang** — the CLI ends the turn itself and reports which tools were denied.
+
+**Why not `plan`**, the more conservative candidate and the default this review suggested: under `-p` (headless), `plan` emits a `control_request` and waits on stdin for an approval, and an unattended call has nobody at the terminal to click it. Left unhandled, the CLI waits out its own 60-second protocol timeout while the plugin waits out `timeoutSecs` (900 seconds by default) — both measured attempts hung exactly this way. Hence `dontAsk` as the default, plus an explicit denial of every `control_request` in the runner. **The denial is per tool.** Only `ExitPlanMode` carries `interrupt: true` (without it `plan` will not finish; measured hanging past 70 seconds). Every other tool (Bash, Write, …) must NOT carry it: with it the whole turn aborts (measured under `acceptEdits` — a denied Bash gave `is_error`, an empty reply, and a 4.2-second turn), while without it the CLI records the denial and picks a different tool, finishing normally (measured: it switched to PowerShell and succeeded in 12 seconds). To let it edit files for real, set `acceptEdits` explicitly.
+
+### Working directory: a four-step ladder plus allowed roots
+
+`codebuddy_ask` resolves its directory as: the caller's `working_dir` → **this session's workspace** (`session.header.cwd`) → `cliBridge.workingDir` → (only when `allow_unattended` is on) a scratch directory → otherwise it **refuses and explains the three ways out**.
+
+Whichever step wins, the directory must pass three checks: **absolute**, **exists and is a directory**, and **inside an allowed root** (the session workspace, `cliBridge.workingDir`, `cliBridge.allowedDirs`). `allowedDirs` is a comma-separated list of absolute paths for directories outside the workspace. So a model that invents `/` or `~/.ssh` cannot get it executed, and `..` cannot walk out (the comparison uses resolved `realpath` and matches on path-separator boundaries, so `/repo-evil` is not inside `/repo`).
+
+### Configuration
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | The only switch. When `false`, this route registers nothing. |
+| `binary` | `''` | Absolute path to the CLI executable. **When empty, only known install locations are probed and a miss refuses to run** — it never falls back to whatever `codebuddy` is on PATH (that binary would be handed the vault token). |
+| `model` | `''` | Passed to `--model`; empty uses the CLI's own default. |
+| `permissionMode` | `dontAsk` | `dontAsk` (default, read-only) / `plan` / `default` / `auto` / `acceptEdits` / `bypassPermissions`. The last two can write. |
+| `effort` | `''` | `--effort`: `minimal` / `low` / `medium` / `high` / `xhigh` / `max`; empty uses the CLI default. |
+| `maxTurns` | `10` | CLI turn limit for one task (hard cap 100). |
+| `timeoutSecs` | `900` | Wall-clock timeout for one task, in seconds (hard cap 1800). |
+| `regionOrder` | `cn,global` | Credential region priority. |
+| `workingDir` | `''` | Default working directory for the tool entrance, and also one of the allowed roots. |
+| `allowedDirs` | `''` | Extra allowed roots: comma-separated absolute paths. |
+| `appendSystemPrompt` | `''` | Appended to the CLI system prompt; empty appends nothing. |
+| `allowUnattended` | `false` | Allow falling back to a scratch directory when no working directory exists. Off by default: the CLI can read and write, so it should not run in a directory nobody named. |
+| `maxReplyChars` | `60000` | Maximum characters handed back to the session model; longer replies are truncated with a note (hard cap 400000). |
+| `injectResult` | `true` | Whether to inject the result back into the session model. Only `false` leaves the model completely untouched. |
+| `maxTurnsPerSessionHour` | `6` | Turns per session per hour. `0` disables the cap. |
+| `maxTurnsPerHour` | `20` | Turns across all sessions per hour. `0` disables the cap. |
+
+### Boundaries
+
+- **No shared context.** CodeBuddy is a separate agent and cannot see this conversation. It is good at "review this module independently" or "go investigate"; it is bad at "continue the thread I was on" — it has to re-read the repository.
+- **Writing is gated, not sandboxed.** `dontAsk` is read-only by default; once you set `acceptEdits` it really does edit files in the workspace. The allowed roots constrain **where** it runs, not **what** it does there.
+- **Two separate budgets.** CodeBuddy CLI quota and DSH model credit are unrelated. The command itself spends no DSH model tokens, but the default injection makes the session model take another turn — that one is real DSH usage. The tool description carries the cost signal, and the hourly caps exist to stop an "inject → model asks again → inject again" loop.
+- **It fails instead of trying every account.** Only a recognised credential refusal (401 / `Authentication required` / `/login`) moves on to the next account; timeouts, crashes and a missing CLI are raised immediately — retrying a 900-second timeout across a dozen vault accounts is worse than the failure. The walk also no longer looks at what the model said: an early version scanned the CLI's **prose** too, so reviewing code that merely quoted `HTTP 401` discarded a good turn.
+- **A timeout kills the whole process tree.** The CLI spawns `git` / `npm`, so killing only the direct child leaves orphans. POSIX signals the process group; Windows uses `taskkill /T`.
+- **Restart needed.** New bundles and JS changes only take effect after a DSH host restart.
 
 ## Command line
 
