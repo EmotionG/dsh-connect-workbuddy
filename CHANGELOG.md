@@ -1,5 +1,49 @@
 # Changelog
 
+## 未发布
+
+> 版本号留空（新增能力属 **minor**）。**默认关闭，关闭时插件行为与 5.2.3 完全一致**：不多一个工具、不多一条指令、不多一个请求，provider 路由、模型、凭据与计费一律未变。
+>
+> 这一版是 PR #104 按维护者 13 条评审逐条重做的结果，**不是原样重提**。改动分三类：把「原版会真的伤到用户」的地方修掉、把原版站不住的论证改掉、把 runner 这条从未被测过的路径补上测试。
+
+### Features
+
+- **CLI 路线（可选）：让本机已登录的 CodeBuddy CLI 直接干活**
+  - **两个入口**：`codebuddy_ask` 工具（模型自己调用）与 `/codebuddy` 指令（用户敲，**自动取当前会话工作区**，留空 = 评审未提交改动）。
+  - **结论回注会话模型**（`injectResult`，默认开）：空闲则 `steer` 起一轮，运行中则 `inject` 排进下一步。回注文本首行带 `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]`，并明确写「不要为了再确认一次而重复调用」，防止「回注 → 模型再问 → 再回注」的烧额度循环。
+  - **凭据复用**：`CODEBUDDY_AUTH_TOKEN` → 插件已维护的 vault，**不需要再登录一次**。区域优先于新鲜度，`regionOrder` 默认 `cn,global`。
+  - **非破坏性装配**：`cliBridge.enabled` 默认 `false`；`tools` / `commands` 用 `ctx.inject([...])`（**不是** apply 期 `ctx.get()` 采样）等待宿主服务。
+  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
+
+### Fixes（相对 PR #104 初版）
+
+- **默认权限模式从 `acceptEdits` 改成 `dontAsk`，并且不采用评审建议的 `plan`。** `plan` 在 `-p` 下会发 `control_request` 等 stdin 回授权（`ExitPlanMode`）；初版写完 prompt 就 `stdin.end()`，于是永远等不到回音，一路等到 `timeoutSecs`（默认 900 秒）才失败 —— 真机两次实测都是这样挂死的。`dontAsk` 则是只读工具放行、写工具被拒、且**不卡住**（真机实测：9.9 秒一轮，Glob/Bash 放行、Write 被拒并如实汇报）。同时 runner 现在对每一条 `control_request` 明确拒绝，但 **`interrupt` 按工具区分**：只有 `ExitPlanMode` 带 `interrupt: true`（不带则 `plan` 挂过 70 秒），其它工具不带——带了会让整轮中止（实测 `acceptEdits` 下拒绝 Bash → `is_error`、空回复、4.2 秒），不带则 CLI 换个工具继续（实测改用 PowerShell，12 秒正常出结论）。拒绝理由也不能以 `cancelled` / `timeout waiting for user response` / `this is an unattended automated session` 开头（CLI 会把这类理由当作 synthetic deny 忽略掉，工具继续跑）。
+- **工作目录不再「传什么用什么」。** 初版把 `args.working_dir` 原样返回，配合默认写权限，模型可以让 agent 在 `/` 或 `~/.ssh` 里跑。现在：显式目录必须是**绝对路径**、**存在且是目录**、**落在允许根之内**（本会话工作区 / `workingDir` / `allowedDirs`），比较用 `realpath` 解析后的路径并按分隔符对齐边界（`/repo-evil` 不算 `/repo`）。工具入口的目录阶梯也从「宿主 `exec.cwd`」改成「**本会话工作区**（`execution.agent.session.header.cwd`）」——宿主给工具的 execution 里根本没有 `cwd` 字段，那一级在初版里永远是 `undefined`。
+- **装配改用 `ctx.inject`。** 初版在 `apply` 期 `ctx.get('tools')` / `ctx.get('commands')` 采样一次，与本仓库自己写的警告（"sampling ctx.get() once during apply silently loses all routes on Desktop"）冲突；Desktop 上服务晚到位时两个入口会静默消失。现在与生图工具同一套写法。
+- **`/codebuddy` 的文案不再说谎。** 初版描述写「不经过模型，不消耗 DSH 额度」，但 `injectResult` 默认开会 steer 唤醒会话模型 —— 默认配置下**真的花 DSH token**。描述与 README 现在都写明这一点，并指出 `injectResult: false` 才是完全不碰模型。
+- **加配额闸门。** 初版没有次数/频率上限，只有 `/codebuddy` 侧的 `inFlight` 挡同会话并发，工具侧完全不设防，且回注文本还写「据此继续」，形成循环烧 CodeBuddy 配额的路径。现在 `TurnGate` 同时管工具与指令（**共享同一个门**，初版的 `inFlight` 只覆盖指令），每会话每小时 6 次、全场每小时 20 次（`0` = 不限），超限具名拒绝并写日志；工具描述里带成本信号。
+- **换号只看凭据拒绝，且不再扫模型正文。** 初版 `looksLikeAuthFailure` 的正则作用在 `${errors}\n${text}`，把 assistant 的正文也扫了 —— 评审一段含 `HTTP 401` 的代码就会误判凭据被拒、整轮换号重跑。现在只看 `{isError, errors, subtype}`，并且 `catch` 里不再一律 `continue`：超时、崩溃、ENOENT 直接抛，只有明确 401 才换下一个账号（初版在 10 个 vault 账号下最坏会跑 10 × 900 秒）。
+- **超时真的杀干净。** 初版只 `child.kill()` 直接子进程，CLI 派生的 `git` / `npm` 变孤儿。现在 POSIX 用 `detached: true` + `process.kill(-pid)` 并在一秒后升级 SIGKILL，Windows 用 `taskkill /pid <pid> /T /F`；收到 result 帧后先 `stdin.end()` 并给 3 秒优雅退出窗口（实测 96 ms 自行退出），超时才杀树。
+- **缓冲有上限。** stdout 单行超 8 MiB、assistant 文本累计超 2M 字符、stderr 超 16K 字符都各自有界；初版 `stderr += chunk` 与 `buffer` / `assistantText` 累积都没有上限。
+- **所有对外文本先脱敏。** 新增 `src/cli-bridge/redact.ts`：`CODEBUDDY_AUTH_TOKEN` 就在子进程 env 里，CLI 回显它就会进会话历史。stdout 文本、`errors`、stderr 尾 6 行、回注正文全部过一遍（精确匹配本轮 token + JWT/Bearer/`sk-`/`token=` 形态）。**没有复用 `redactUpstreamText`**，因为它末尾有 `.slice(0, 300)`，会把评审结论砍成 300 字符。
+- **不再回退 PATH。** 初版探测不到就 `spawn('codebuddy')`（Windows 上 `codebuddy.cmd` + `shell: true`）—— PATH 上的任意二进制都能拿到 vault 令牌。现在探测失败**拒绝运行**并提示用 `cliBridge.binary` 指绝对路径；显式 `.cmd` / `.bat` 在 Windows 上直接拒绝（会经 `cmd.exe` 解释）。`shell: false` 全路径覆盖，`--model` / `--append-system-prompt` 不再有被 cmd.exe 切词的面。
+- **探测清单补齐，且不再承诺 `cbc`。** 初版只覆盖 `%APPDATA%\npm` 等四条；现在加了 `~/.npm-global`、`/opt/homebrew`、`~/.local`、pnpm/yarn/volta 全局目录，以及 nvm / n / fnm 的 node 版本目录。文档不再写「自动探测 `codebuddy` / `cbc`」——`cbc` 是同一个 `bin/codebuddy` 的别名，探测的是包路径而不是命令名。
+- **论证改成事实。** 初版与 README 都写「跟网关说话的那个进程真的是登录着的 CodeBuddy CLI，没有身份要伪造，所以伪装那条路被封时它还能用」。实际上代码是用 `CODEBUDDY_AUTH_TOKEN` 把 plugin vault 里的**同一个 WorkBuddy 账号**交给 CLI，身份没变，`11140` 是账号级的 —— 逃掉的只有客户端指纹层。README / 顶部注释 / CHANGELOG 现在都这么写，不再把它当「封号之后的免死金牌」。
+- **`scratchDir()` 的固定共享目录只作为 `allow_unattended` 的最后一档**，不再是默认出路；`allowUnattended` 仍然默认 `false`。
+
+### Tests
+
+- 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（16 条），共 **85 条**。
+- **`runner.ts` 第一次有测试。** 初版的 53 条全是纯逻辑与注册形状，`runOneTurn` / `runAgent` / `spawn` 一次都没被调用过 —— 而评审找到的第 5/6/7/8 条缺陷全在那个盲区里。新 spec 用 `vi.mock('node:child_process')` 造 fake child，断言的是模块自己声明的协议：
+  - `control_request` 的回包形状（`subtype:'success'` / `request_id` 原样回传 / `allowed:false`），且拒绝理由不以 synthetic-deny 前缀开头、result 帧前 **stdin 不 close**（这一条在修复前必红）；`interrupt` 分两条：普通工具**不带**（带了会中止整轮）、`ExitPlanMode` **必带**（不带则 `plan` 挂死）
+  - 多 text block 拼接、tool_use 计数、result 帧的 usage / session_id / errors 解析
+  - 单行超 `MAX_FRAME_BYTES` 即失败、无 result 帧就退出时保留 stderr 尾、超时、宿主取消（精确文本 `cancelled by the host`）、CLI 路径不存在时**从未 spawn**
+  - 换号：只有 401 才换、**超时/崩溃不换**、最后一条 401 也不重试、空凭据列表报 `no credential worked`
+  - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
+- 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
+- 全量：**114 文件 / 1899 条通过**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 444.40 kB）。
+- **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
+
 ## 5.2.3 (2026-10-22)
 
 ### Fixes
