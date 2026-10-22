@@ -122,6 +122,7 @@ WMI 服务（`Win32_Process.Create`）创建的进程与 Electron 宿主同为�
 | 未发布（PR #44） | 「重新检测账号」没能把删掉的账号找回来，而界面什么都不说 | 隐藏名单删除被拒时异常被吞掉（`rm` 的 `force` 不忽略 `EPERM`）——详见下节（B 档） |
 | 未发布（PR #44 追加） | `tests/windows-file-lock.spec.ts` 在真机上恒红，而 CI 恒绿 | **测试自身的清场竞态**（不是产品缺陷）：`kill()` 只投递信号，内核关闭句柄在其后数毫秒，此窗口内 `rm` 必得 `EBUSY`——详见下节 |
 | 4.10.1（issue #77 第二轮） | 打开设置页要等 60 s；CPU profile 里 19.1 s 的请求有 15.3 s 在 `spawnSync`（约 135 个 `reg query`） | 字段密钥的探测**只缓存成功**，且共享扫描窗口从**开始**时刻计窗——两个乘数叠在 `scanAll()` 的逐文件探测上（§1-6）。**根因跨平台**，Windows 只是把重复探测换成了同步子进程，才变成 60 秒 |
+| 5.5.0（PR #116，阻断级） | `codebuddy` CLI 的自动探测在 Windows 上 **100% 失败**，只能手填 `cliBridge.binary` | CLI 候选清单把**每个**根目录都拼上 `lib/node_modules`，而 Windows 的 npm 全局前缀 `%APPDATA%\npm` 下包直接落在 `<prefix>\node_modules`、**没有 `lib` 层**，9 条候选全部落空。CI 未拦住是因为 runner spec 里当时**没有任何**针对 `cliEntryCandidates()` 的断言（绿的是测试，坏的是真机）。修法：每个根目录自带自己的布局，并补上 pnpm / yarn / fnm 的 Windows 默认仓位置（C 档：本机只实测了 npm 那条） |
 
 ### 「重新检测账号」的静默失败（PR #44，**B 档 CI 实测**）
 
