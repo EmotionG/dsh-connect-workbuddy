@@ -134,6 +134,62 @@ export function busyLabel(level: WorkBuddyBusyLevel, locale: 'zh' | 'en' = 'zh')
 }
 
 /**
+ * A level that is drawn as an ICON rather than as words.
+ *
+ * The upstream app already mixes the two: `congested` gets an icon, the rest
+ * get words. So the icon set is deliberately SMALL — one shape per level that
+ * changes a decision — and `idle` / `normal` are not in it at all: a badge on
+ * every healthy row reads as decoration, not as a warning.
+ *
+ * The shapes are people, because that is what load looks like: one person
+ * (free), one person with someone behind them (a queue), two people pressed
+ * together (congested), and a crossed-out person (unavailable).
+ */
+export type WorkBuddyBusyIcon = 'idle' | 'busy' | 'congested' | 'unavailable'
+
+/** The levels that have an icon at all. */
+export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['idle', 'busy', 'congested', 'unavailable']
+
+/**
+ * The icon for a level, or `undefined` when the level has none.
+ *
+ * `normal` and `unknown` deliberately return `undefined`: "we were told
+ * nothing" must not be drawn, and neither must the healthy default.
+ */
+export function busyIcon(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
+  if (level === undefined) return undefined
+  if (level === 'normal' || level === 'unknown') return undefined
+  return level as WorkBuddyBusyIcon
+}
+
+/**
+ * The ONE character that stands for a level in a plain-text context.
+ *
+ * The DSH model picker renders the model name verbatim, as a string, with no
+ * slot for an image and no markup support — so a level shown THERE has to be a
+ * character. One character, not a word: the picker is narrow, and the word was
+ * what made the row read as a sentence.
+ *
+ * The choice of character is the app's own visual language, not ours:
+ *   - congested  → the two pressed together
+ *   - busy       → the one with someone behind
+ *   - unavailable→ the crossed-out one
+ *   - idle       → a single person (drawn in the card, but not in the picker:
+ *                  `DRAWN_IN_PICKER` decides which levels the picker shows)
+ *
+ * The card uses the SVG icons above; this is the fallback for the one place
+ * that cannot render them.
+ */
+export function busySymbol(level: WorkBuddyBusyLevel | undefined): string {
+  switch (level) {
+    case 'congested': return '👥'
+    case 'busy': return '🧍'
+    case 'unavailable': return '🚫'
+    default: return ''
+  }
+}
+
+/**
  * Suffix appended to a model's DSH-facing display name, prefixed with a middle
  * dot, or `''` when the level is not worth drawing.
  *
@@ -155,8 +211,13 @@ export function busyLabel(level: WorkBuddyBusyLevel, locale: 'zh' | 'en' = 'zh')
  */
 export function busyDisplaySuffix(level: WorkBuddyBusyLevel | undefined, locale: 'zh' | 'en' = 'zh'): string {
   if (level === undefined || !DRAWN_IN_PICKER.has(level)) return ''
-  const label = busyLabel(level, locale)
-  return label === undefined ? '' : ` · ${label}`
+  // The picker's name is rendered as plain text, so the level travels as ONE
+  // character instead of a word. `locale` stays in the signature because the
+  // CARD still asks for the word (`busyLabel`) for its tooltip — dropping the
+  // parameter would silently change that call site's contract.
+  const symbol = busySymbol(level)
+  if (symbol === '') return ''
+  return ` ${symbol}`
 }
 
 /** The levels that change a model-picking decision; see {@link busyDisplaySuffix}. */

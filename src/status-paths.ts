@@ -12,6 +12,7 @@
  * @module dsh-connect-workbuddy/status-paths
  */
 
+import type { WorkBuddyBusyLevel } from './busy.ts'
 import type { WorkBuddyPromo } from './promo.ts'
 
 /** Plugin-owned usage endpoint consumed by its browser half. */
@@ -622,6 +623,18 @@ export interface WorkBuddyWebModel {
   maxTokens: number
   creditMultiplier?: number
   /**
+   * The model's load level, as read from the upstream's own probe.
+   *
+   * Carried so the CARD can draw it as an ICON. The host's model picker cannot
+   * (its name is a plain string), which is why the picker gets a character and
+   * the card gets a picture.
+   *
+   * ABSENT means "not measured right now" and is NOT the same as `normal`: the
+   * card must not draw a level the upstream never stated. It is deliberately
+   * not persisted into `lastCatalog` — load is a fact about this minute.
+   */
+  busyLevel?: WorkBuddyBusyLevel
+  /**
    * Upstream's own image-input default from the latest refresh. Used ONLY to
    * pre-fill the image checkboxes when "Refresh from WorkBuddy" overwrites the
    * draft; it is not the effective capability. Persisted inside `lastCatalog`
@@ -824,6 +837,14 @@ export type WorkBuddyWebUsage =
      * must not be read as consent.
      */
     cliBridgeEnabled?: boolean
+    /**
+     * The LIVE load level per model id, for the card's icon.
+     *
+     * A SEPARATE field from `models`, because the card's model list is the
+     * SAVED roster (the one the user edits) and a saved roster has no load
+     * level in it. Absent means "not measured right now" — never "normal".
+     */
+    busyLevels?: Readonly<Record<string, WorkBuddyBusyLevel>>
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     message?: string
@@ -881,6 +902,14 @@ export type WorkBuddyWebUsage =
      * must not be read as consent.
      */
     cliBridgeEnabled?: boolean
+    /**
+     * The LIVE load level per model id, for the card's icon.
+     *
+     * A SEPARATE field from `models`, because the card's model list is the
+     * SAVED roster (the one the user edits) and a saved roster has no load
+     * level in it. Absent means "not measured right now" — never "normal".
+     */
+    busyLevels?: Readonly<Record<string, WorkBuddyBusyLevel>>
     /** WHERE this region's readout sits (issue #62); absent means `composer`. */
     creditPosition?: WorkBuddyCreditPosition
     source?: 'desktop' | 'dsh'

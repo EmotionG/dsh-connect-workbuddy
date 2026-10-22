@@ -104,10 +104,26 @@ describe('busyLabel / busyDisplaySuffix', () => {
     expect(busyDisplaySuffix('idle')).toBe('')
   })
 
-  it('puts the load to the RIGHT of the name, middle-dot separated', () => {
-    expect(busyDisplaySuffix('congested')).toBe(' · 极度拥堵')
-    expect(busyDisplaySuffix('busy', 'en')).toBe(' · Slightly congested')
-    expect(busyDisplaySuffix('unavailable')).toBe(' · 不可用')
+  it('puts the load to the RIGHT of the name, as ONE character', () => {
+    // The DSH model picker renders the model name verbatim, as a plain string:
+    // no image slot, no markup. So the level in THAT place can only be a
+    // character — the word made the row read as a sentence, and the picker's
+    // rows are narrow. The card, which renders itself, uses the SVG icons
+    // instead (`src/client/busy-icon.tsx`).
+    expect(busyDisplaySuffix('congested')).toBe(' 👥')
+    expect(busyDisplaySuffix('busy')).toBe(' 🧍')
+    expect(busyDisplaySuffix('unavailable')).toBe(' 🚫')
+    // The locale argument no longer changes the picker's mark: there is no
+    // word left in it. It stays in the signature because the card still asks
+    // `busyLabel` for its tooltip.
+    expect(busyDisplaySuffix('busy', 'en')).toBe(' 🧍')
+  })
+
+  it('keeps the WORD available for the card, which can render a tooltip', () => {
+    // The word is not gone — it moved. The card asks `busyLabel` and puts it in
+    // the icon's `title`, so the level is still readable on hover.
+    expect(busyLabel('congested')).toBe('极度拥堵')
+    expect(busyLabel('congested', 'en')).toBe('Extremely congested')
   })
 })
 

@@ -66,6 +66,7 @@ import { AccountTransfer } from './AccountTransfer.tsx'
 import { createLatestWins } from '../account-pool.ts'
 import { imageDefaultFor, nativeModalityOf } from '../native-modality.ts'
 import { selectPromoBadge } from '../promo.ts'
+import { busyIcon } from './busy-icon.tsx'
 import { promoBadgeColor, promoBadgeLabel, promoBadgeTooltip, uiLanguage } from './promo-badge.ts'
 import { inlineProbeReason } from './probe-reason.ts'
 import { remainingText } from './remaining.ts'
@@ -1140,6 +1141,15 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   // re-mapped onto the current catalog by model id.
   const draft = drafts[activeRegion]
   const visibleModels = draft?.models ?? (status.status === 'signed-in' ? status.models : [])
+  /**
+   * The LIVE load levels, keyed by model id.
+   *
+   * Read off the Host's answer rather than from the model list: the list is the
+   * SAVED roster the user edits, and a saved roster has no load level in it
+   * (load is a fact about this minute, not a setting — `src/busy.ts`). A model
+   * the probe did not answer for simply has no entry, and draws nothing.
+   */
+  const busyLevels = status.status === 'signed-in' ? status.busyLevels ?? {} : {}
   const savedEnabledIds = status.status === 'signed-in' ? new Set(status.enabledModelIds) : new Set<string>()
   const activeEnabledIds = draft?.enabledIds ?? savedEnabledIds
   const savedImageIds = status.status === 'signed-in' ? new Set(status.imageModelIds) : new Set<string>()
@@ -2165,6 +2175,14 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                       truncates with an ellipsis, and a badge
                                       inside it would be cut off with the text. */}
                                   {promoChip(model)}
+                                  {/* The upstream's LIVE load level, drawn as an
+                                      icon. It sits NEXT to the name for the same
+                                      reason the promo badge does: the name
+                                      truncates, and a marker inside it would be
+                                      cut off with the text. A level that is not
+                                      worth drawing (or was not measured) draws
+                                      nothing at all. */}
+                                  {busyIcon(busyLevels[model.id], uiLanguage())}
                                 </span>
                               </label>
                               <label

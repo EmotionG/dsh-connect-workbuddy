@@ -46,6 +46,7 @@
     "tests/issue77-card-first-paint.spec.tsx",
     "tests/promo-card.spec.tsx",
     "tests/promo-badge.spec.ts",
-    "tests/cli-bridge-card-switch.spec.tsx"
+    "tests/cli-bridge-card-switch.spec.tsx",
+    "tests/busy-icon-card.spec.tsx"
   ]
 }

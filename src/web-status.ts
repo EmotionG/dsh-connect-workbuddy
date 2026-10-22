@@ -24,6 +24,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { isVaultAccountId } from './auth.ts'
 import { lastRefusalFor, offRefused } from './off-thinking.ts'
+import type { WorkBuddyBusyLevel } from './busy.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { applyContextBudgets } from './catalog.ts'
 import { resolveCredentialRecovery } from './credential-recovery.ts'
@@ -161,6 +162,14 @@ export interface WorkBuddyStatusRouteOptions {
    * deployments, and a stale `true` here would claim a spending capability is on.
    */
   cliBridgeEnabled?(): boolean
+  /**
+   * The LIVE load level per model id, for the card's icon.
+   *
+   * Optional, and absent means "not measured": the card draws no badge rather
+   * than a made-up one. A SEPARATE read because the card's model list is the
+   * SAVED roster, which carries no load level (`src/busy.ts`).
+   */
+  busyLevels?(region: WorkBuddyRegion): Readonly<Record<string, WorkBuddyBusyLevel>>
   /**
    * Send one real-volume request to each named model of a region and report what
    * came back.
@@ -632,6 +641,10 @@ function toWebModel(
     nativeContextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     ...model.creditMultiplier === undefined ? {} : { creditMultiplier: model.creditMultiplier },
+    // The load level rides along so the CARD can draw it as an icon. The host's
+    // model picker cannot (its name is a plain string) and gets a character
+    // instead — see `busyDisplaySuffix`. Absent means "not measured right now".
+    ...model.busyLevel === undefined ? {} : { busyLevel: model.busyLevel },
     ...model.supportsImages === undefined ? {} : { supportsImages: model.supportsImages },
     ...model.multimodal === undefined ? {} : { multimodal: model.multimodal },
     ...model.reasoning === undefined ? {} : {
@@ -877,6 +890,9 @@ export async function workBuddyWebStatus(
   // region at a time, so the switch has to be present on whichever tab is open.
   // `=== true` for the same reason as `imageToolEnabled`: absent is not consent.
   const cliBridgeEnabled = deps.cliBridgeEnabled?.() === true
+  // The LIVE load levels, beside the model list rather than inside it: the
+  // card's list is the SAVED roster, and a saved roster has no load level.
+  const busyLevels = deps.busyLevels?.(region) ?? {}
   const authStatus = await store.status()
   // Whether a saved per-region choice is in effect, on every branch: the card
   // needs it to show that clearing really did return the region to the app's
@@ -887,7 +903,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, busyLevels }
   }
   let credential
   try {
@@ -921,6 +937,7 @@ export async function workBuddyWebStatus(
       creditPosition,
       imageToolEnabled,
       cliBridgeEnabled,
+      busyLevels,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
       // sign-ins DO exist (the orphaned-saved-id case), the card already has
@@ -947,6 +964,7 @@ export async function workBuddyWebStatus(
     creditPosition,
     imageToolEnabled,
     cliBridgeEnabled,
+    busyLevels,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:
     // `displayModels` is the saved/live directory and knows nothing about a
@@ -1222,6 +1240,7 @@ async function workBuddyWebPool(
       id: model.id,
       name: model.name,
       ...model.creditMultiplier === undefined ? {} : { creditMultiplier: model.creditMultiplier },
+      ...model.busyLevel === undefined ? {} : { busyLevel: model.busyLevel },
     })),
   }
 }

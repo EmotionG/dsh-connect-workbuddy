@@ -1,5 +1,18 @@
 # Changelog
 
+## 未发布
+
+### Fixes
+
+- **负载徽标不再「刚出现就消失」**：等级以前只活在**运行时目录**里，而任何一次配置变更（切区、改模型选择、改思考档、开关、换号）都会触发 `applySelection()` 用**已保存的 `lastCatalog` 重算目录**——而 `lastCatalog` 里没有 `busyLevel`（负载**刻意不落盘**：`src/busy.ts` 写着「存下来的负载等级是谎言」）。于是你一动任何设置，徽标就被抹掉，上游其实什么都没变。	**现在改为「重放后重新问一次」**：探针只读、免费、整份名单约 190 ms，徽标因此在设置变更后活下来。	不落盘这件事仍然保留——负载是**这一分钟**的事实，跨重启后那个数字可能早就过期了，比不显示更危险。	探针失败照旧只是少一枚徽标，绝不会连模型列表一起丢。
+
+### Features
+
+- **负载徽标改用图标**：拥堵不再是四个字，而是一个「人多人少」的图标。
+  - **卡片里是真图标**（`src/client/busy-icon.tsx`，内联 SVG，16 单位网格）：`busy` 轻微拥堵 = 一前一后两个人（暖黄）、`congested` 极度拥堵 = 两个人挤在一起 + 汗滴（深橙）、`unavailable` 不可用 = 人加斜杠（灰）、`idle` 空闲 = 一个人（但**默认不画**）。	颜色跟随主题，并**保留 `title` 悬停文字**（「极度拥堵」四个字还在），所以省地方但不丢信息。
+  - **模型选择器里是字符**：DSH 宿主把模型名当**纯字符串**渲染（没有图片位、不接受富文本），所以那一处只能是符号——`👥` / `🧍` / `🚫`。	一个字比四个字更像「徽标」，也让窄行不再读成一句话。
+  - **语义沿用上游约定**：上游 App 自己就是混着来的——`congested` 用图标、其余用文字；健康默认一律不画（一排徽标是装饰，不是警告）。
+
 ## 5.3.0 (2026-10-22)
 
 > 新增能力属 **minor**，本次定版 **5.3.0**。**默认关闭，关闭时插件行为与 5.2.3 完全一致**：不多一个工具、不多一条指令、不多一个请求，provider 路由、模型、凭据与计费一律未变。
@@ -68,7 +81,7 @@
   - 换号：只有 401 才换、**超时/崩溃不换**、最后一条 401 也不重试、空凭据列表报 `no credential worked`
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
-- 全量：**116 文件 / 1920 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 446.54 kB）。
+- 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
 
 ### Tests（同期并入 main：issue #102 / #108）

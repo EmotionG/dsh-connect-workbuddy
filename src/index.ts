@@ -85,6 +85,7 @@ import type { WorkBuddyShim } from './shim.ts'
 import { WorkBuddyUpstreamClient, knownRegionOf, regionOf } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { attachBusyLevels } from './busy.ts'
+import type { WorkBuddyBusyLevel } from './busy.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
 
@@ -1090,6 +1091,28 @@ export function apply(ctx: Context, config: Config): void {
     return live?.length ? live : fallbackModelsFor(region)
   }
 
+  /**
+   * The load levels of the LIVE roster, keyed by model id.
+   *
+   * A SEPARATE read on purpose. `displayModels()` prefers the SAVED
+   * `lastCatalog` (it is what the card edits), and a saved roster carries no
+   * load level — load is not persisted, see `src/busy.ts`. So the card cannot
+   * get the level from the model list it already has; it needs the live roster
+   * beside it.
+   *
+   * Returning a MAP (not a merged roster) keeps the two apart: the card's list
+   * stays the saved one the user edits, and the badge is a decoration that may
+   * be absent for a model the probe did not answer for.
+   */
+  const liveBusyLevels = (region: WorkBuddyRegion): Record<string, WorkBuddyBusyLevel> => {
+    const live = stacks[region]?.catalog?.current() ?? []
+    const levels: Record<string, WorkBuddyBusyLevel> = {}
+    for (const model of live) {
+      if (model.busyLevel !== undefined) levels[model.id] = model.busyLevel
+    }
+    return levels
+  }
+
   let current = () => config
   let invalidateCatalog = (): void => {}
 
@@ -1153,6 +1176,42 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /**
+   * Re-stamp the LIVE load levels onto a roster that was just recomputed.
+   *
+   * WHY A REPLAY NEEDS THIS. `configuredModels()` rebuilds the roster from the
+   * SAVED `lastCatalog`, and a saved roster has no load level in it — load is
+   * deliberately not persisted (`src/busy.ts`: a cached level is a lie the
+   * moment the settings page closes). So every config change — switching
+   * region, changing the model selection, toggling a level, moving an account —
+   * used to wipe the badges that were on screen a second earlier, and the user
+   * saw "极度拥堵" appear and then vanish without touching the upstream at all.
+   *
+   * The fix is to ask again rather than to remember: the probe is read-only,
+   * free, and answers in ~190 ms for the whole roster. Keeping the level out
+   * of disk is the point, so the honest place to get it back is the upstream.
+   *
+   * Fail-soft, like the other probe: a level that cannot be read is a missing
+   * badge, never a missing model list.
+   */
+  const restampBusyLevels = async (
+    region: WorkBuddyRegion,
+    models: readonly WorkBuddyModelInfo[],
+  ): Promise<readonly WorkBuddyModelInfo[]> => {
+    if (models.length === 0) return models
+    try {
+      const credential = await stacks[region].store.resolve()
+      const levels = await client.fetchModelBusy(credential, models.map(model => model.id))
+      return levels.size === 0 ? models : attachBusyLevels(models, levels)
+    } catch (error: unknown) {
+      ctx.logger.warn(
+        'dsh-connect-workbuddy: load probe unavailable while re-applying the selection; the roster keeps no load levels',
+        error,
+      )
+      return models
+    }
+  }
+
   /** Push the current config into every region's store selection and catalog. */
   const applySelection = (value: Config): void => {
     const authFile = unwrapVolatile(value.authFile)
@@ -1166,6 +1225,19 @@ export function apply(ctx: Context, config: Config): void {
       stacks[region].catalog.set(configuredModels(value, region, stacks[region].catalog.current()))
     }
     invalidateCatalog()
+    // The replay above rebuilt each roster from the SAVED directory, which
+    // carries no load level (see `restampBusyLevels`). Ask the upstream again
+    // so the badges survive a settings change instead of blinking out. This runs
+    // AFTER the synchronous work on purpose: the roster must be published
+    // first, so the model list is never held hostage to a probe.
+    for (const region of REGION_KEYS) {
+      void (async () => {
+        const live = await restampBusyLevels(region, stacks[region].catalog.current())
+        if (live.length === 0) return
+        stacks[region].catalog.set(live)
+        invalidateCatalog()
+      })()
+    }
     syncRegionRegistration(value)
     // The image tool is gated on this same region switch, and the switch is a
     // volatile field: the loader only broadcasts it, it does not re-apply. So
@@ -1419,6 +1491,14 @@ export function apply(ctx: Context, config: Config): void {
       return out
     },
     displayModels: region => displayModels(current(), region),
+    /**
+     * The LIVE load levels, read beside the saved roster the card lists.
+     *
+     * The card's model list is the SAVED `lastCatalog`, which carries no load
+     * level (load is not persisted — `src/busy.ts`), so the badge has to come
+     * from the live roster instead.
+     */
+    busyLevels: region => liveBusyLevels(region),
     enabledModelIds: region => regionStateOf(current(), region).enabledModelIds ?? [],
     imageModelIds: region => regionStateOf(current(), region).imageModelIds ?? [],
     offModelIds: region => savedOffModelIds(regionStateOf(current(), region), displayModels(current(), region)),
