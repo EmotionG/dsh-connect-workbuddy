@@ -66,11 +66,10 @@ describe('the load badge as a character (the DSH model picker)', () => {
     expect(busySymbol('unavailable')).toBe('🚫')
   })
 
-  it('draws nothing for a level that is not worth drawing', () => {
-    // `idle` is the upstream's "nobody is here" wording and `unknown` is
-    // "we were told nothing" — neither may become a claim. `normal` IS drawn
-    // (one person), because the healthy case is worth saying.
-    expect(busySymbol('idle')).toBe('')
+  it('draws nothing ONLY for a level the upstream never reported', () => {
+    // `unknown` is the plugin's own "the probe did not answer" — it must never
+    // become a claim. Every level the upstream DID report is drawn, `idle`
+    // included (one green person: "free right now" is useful).
     expect(busySymbol('unknown')).toBe('')
     expect(busySymbol(undefined)).toBe('')
   })
@@ -79,25 +78,24 @@ describe('the load badge as a character (the DSH model picker)', () => {
     expect(busyDisplaySuffix('congested')).toBe(' 🧍🧍🧍')
     expect(busyDisplaySuffix('busy')).toBe(' 🧍🧍')
     expect(busyDisplaySuffix('normal')).toBe(' 🧍')
-    expect(busyDisplaySuffix('idle')).toBe('')
+    expect(busyDisplaySuffix('idle')).toBe(' 🧍')
     expect(busyDisplaySuffix('unknown')).toBe('')
     expect(busyDisplaySuffix(undefined)).toBe('')
   })
 })
 
 describe('the load badge as an icon (the card)', () => {
-  it('has an icon for every level that is drawn', () => {
+  it('has an icon for every level the upstream reported', () => {
+    expect(busyIcon('idle')).toBe('idle')
     expect(busyIcon('normal')).toBe('normal')
     expect(busyIcon('busy')).toBe('busy')
     expect(busyIcon('congested')).toBe('congested')
     expect(busyIcon('unavailable')).toBe('unavailable')
   })
 
-  it('has NO icon for "nobody is here" or for "we were told nothing"', () => {
-    // `idle` says nothing, and `unknown` is the plugin's own "the probe did
-    // not answer" — neither may be turned into a claim the upstream did not
-    // make.
-    expect(busyIcon('idle')).toBeUndefined()
+  it('has NO icon for "we were told nothing"', () => {
+    // `unknown` is the plugin's own "the probe did not answer" — it must
+    // never be turned into a claim the upstream did not make.
     expect(busyIcon('unknown')).toBeUndefined()
     expect(busyIcon(undefined)).toBeUndefined()
   })

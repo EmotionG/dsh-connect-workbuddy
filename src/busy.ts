@@ -137,18 +137,17 @@ export function busyLabel(level: WorkBuddyBusyLevel, locale: 'zh' | 'en' = 'zh')
  * A level that is drawn as an ICON rather than as words.
  *
  * The upstream app already mixes the two: `congested` gets an icon, the rest
- * get words. So the icon set is deliberately SMALL — one shape per level that
- * changes a decision — and `idle` / `normal` are not in it at all: a badge on
- * every healthy row reads as decoration, not as a warning.
+ * get words. So the icon set is deliberately SMALL — ONE shape (a person),
+ * repeated, and the COUNT plus the COLOUR carry the level.
  *
  * The shapes are people, because that is what load looks like: one person
  * (free), one person with someone behind them (a queue), two people pressed
  * together (congested), and a crossed-out person (unavailable).
  */
-export type WorkBuddyBusyIcon = 'normal' | 'busy' | 'congested' | 'unavailable'
+export type WorkBuddyBusyIcon = 'idle' | 'normal' | 'busy' | 'congested' | 'unavailable'
 
 /** The levels that have an icon at all. */
-export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['normal', 'busy', 'congested', 'unavailable']
+export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['idle', 'normal', 'busy', 'congested', 'unavailable']
 
 /**
  * The icon for a level, or `undefined` when the level has none.
@@ -159,11 +158,11 @@ export const BUSY_ICONS: readonly WorkBuddyBusyIcon[] = ['normal', 'busy', 'cong
  */
 export function busyIcon(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
   if (level === undefined) return undefined
-  // `normal` IS drawn — as ONE person, the healthy case. Only `idle` (the
-  // upstream's own "nobody is here" wording) and `unknown` (the plugin's own
-  // "we were told nothing") are left out: a badge that says nothing is noise,
-  // and a badge that guesses is worse than no badge.
-  if (level === 'idle' || level === 'unknown') return undefined
+  // Only `unknown` is left out: it is the plugin's own "the probe did not
+  // answer", and a badge that guesses is worse than no badge. Every level the
+  // upstream DID report is drawn — `idle` included, in green, because "the
+  // model is free right now" is useful information, not noise.
+  if (level === 'unknown') return undefined
   return level as WorkBuddyBusyIcon
 }
 
@@ -195,6 +194,7 @@ export function busySymbol(level: WorkBuddyBusyLevel | undefined): string {
     case 'congested': return '🧍🧍🧍'
     case 'busy': return '🧍🧍'
     case 'normal': return '🧍'
+    case 'idle': return '🧍'
     case 'unavailable': return '🚫'
     default: return ''
   }
@@ -234,12 +234,12 @@ export function busyDisplaySuffix(level: WorkBuddyBusyLevel | undefined, locale:
 /**
  * The levels that change a model-picking decision; see {@link busyDisplaySuffix}.
  *
- * `normal` is IN: one person is the healthy case and the row should say so.
- * `idle` is out — it is the upstream's own "nobody is here" wording, and a
- * badge that says nothing is noise. `unknown` is out for a second reason: the
+ * `idle` is IN as well: one green person says "free right now", which is
+ * useful. `unknown` is the only level left out, for a second reason: the
  * plugin must not invent a claim the upstream never made.
  */
 const DRAWN_IN_PICKER: ReadonlySet<WorkBuddyBusyLevel> = new Set<WorkBuddyBusyLevel>([
+  'idle',
   'normal',
   'busy',
   'congested',

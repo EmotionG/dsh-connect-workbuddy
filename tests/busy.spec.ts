@@ -107,11 +107,12 @@ describe('busyLabel / busyDisplaySuffix', () => {
     expect(busyDisplaySuffix(undefined)).toBe('')
   })
 
-  it('leaves a merely IDLE model unbadged in the picker, though it has a word', () => {
-    // The word exists (the app's detail panel uses it), but seven idle rows out
-    // of twenty would turn a warning into decoration — see busyDisplaySuffix.
+  it('draws an IDLE model as ONE green person', () => {
+    // The word exists (the app's detail panel uses it) and the ICON exists too:
+    // one green person says "free right now", which is useful rather than
+    // decorative.
     expect(busyLabel('idle')).toBe('空闲')
-    expect(busyDisplaySuffix('idle')).toBe('')
+    expect(busyDisplaySuffix('idle')).toBe(' 🧍')
   })
 
   it('puts the load to the RIGHT of the name, as ONE character', () => {

@@ -115,6 +115,20 @@ describe('the load-level icon in the card', () => {
     expect(drawn[0]?.querySelectorAll('g')).toHaveLength(1)
   })
 
+  it('colours the crowd as a RAMP: green, yellow, orange, red', async () => {
+    // The colour order is one the eye already knows, so the severity of a row
+    // can be compared with another at a glance, without reading a word.
+    const m = await render({
+      'model-a': 'idle',
+      'model-b': 'congested',
+    })
+    const drawn = icons(m.container)
+    const idle = drawn.find(icon => icon.className.includes('dsm-workbuddy-busy-idle'))
+    const congested = drawn.find(icon => icon.className.includes('dsm-workbuddy-busy-congested'))
+    expect(idle?.getAttribute('style')).toContain('#3aa76d')
+    expect(congested?.getAttribute('style')).toContain('#d93a2b')
+  })
+
   it('keeps the word reachable, in the tooltip', async () => {
     const m = await render({ 'model-a': 'congested' })
     // The picture saves room; the title keeps the level readable. The wording

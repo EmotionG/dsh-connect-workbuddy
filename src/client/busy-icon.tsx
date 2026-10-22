@@ -8,10 +8,14 @@
  * picture is possible and therefore better.
  *
  * ONE SHAPE, AND THE COUNT CARRIES THE MEANING. The icon set is a single
- * person, repeated: one for a free model, two when a queue has formed, three
- * when the model is congested. A crossed-out person for "unavailable" is the
- * one exception, because "nobody can use this" is not a matter of degree: there
- * is no "one and a half unavailable".
+ * person, repeated: one for an idle model, one for a healthy one, two when a
+ * queue has formed, three when the model is congested. A crossed-out person for
+ * "unavailable" is the one exception, because "nobody can use this" is not a
+ * matter of degree: there is no "one and a half unavailable".
+ *
+ * THE COLOUR IS A RAMP. Green (idle) → yellow (normal) → orange (busy) → red
+ * (congested) is an order the eye already knows, so the severity of one row can
+ * be compared with another at a glance, without reading a word.
  *
  * WHY PEOPLE. Load is a fact about how many people are ahead of you, so the
  * shape is people. The upstream app already uses an icon for its most severe
@@ -27,6 +31,7 @@ import type { WorkBuddyBusyIcon, WorkBuddyBusyLevel } from '../busy.ts'
 
 /** The word for a level, in the card's language, for the tooltip. */
 const TITLES_ZH: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
+  idle: '空闲',
   normal: '正常',
   busy: '轻微拥堵',
   congested: '极度拥堵',
@@ -34,6 +39,7 @@ const TITLES_ZH: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
 }
 
 const TITLES_EN: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
+  idle: 'Idle',
   normal: 'Normal',
   busy: 'Slightly congested',
   congested: 'Extremely congested',
@@ -42,9 +48,14 @@ const TITLES_EN: Readonly<Partial<Record<WorkBuddyBusyIcon, string>>> = {
 
 /** The color per level, as a CSS custom property so the theme can override it. */
 const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
-  normal: 'var(--dsm-workbuddy-busy-normal, #9aa0a6)',
-  busy: 'var(--dsm-workbuddy-busy-busy, #d99a00)',
-  congested: 'var(--dsm-workbuddy-busy-congested, #e2571f)',
+  // Green = free right now, yellow = healthy, orange = a queue, red = jammed.
+  // The colour is a RAMP, not a set of unrelated hues: the eye reads the
+  // order green → yellow → orange → red without being taught it, so the
+  // severity of a row can be compared across rows at a glance.
+  idle: 'var(--dsm-workbuddy-busy-idle, #3aa76d)',
+  normal: 'var(--dsm-workbuddy-busy-normal, #d9b300)',
+  busy: 'var(--dsm-workbuddy-busy-busy, #e08a1e)',
+  congested: 'var(--dsm-workbuddy-busy-congested, #d93a2b)',
   unavailable: 'var(--dsm-workbuddy-busy-unavailable, #8a8f98)',
 }
 
@@ -56,6 +67,7 @@ const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
  * (a crossed-out person) instead of a crowd.
  */
 const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
+  idle: 1,
   normal: 1,
   busy: 2,
   congested: 3,
@@ -64,11 +76,11 @@ const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
 /** The icon for a level, or `undefined` when the level is not drawn. */
 export function busyIconOf(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIcon | undefined {
   if (level === undefined) return undefined
-  // `normal` IS drawn — as ONE person, the healthy case. `idle` (the upstream's
-  // "nobody is here" wording) and `unknown` (the plugin's "we were told
-  // nothing") are left out: a badge that says nothing is noise, and a badge
-  // that guesses is worse than no badge.
-  if (level === 'idle' || level === 'unknown') return undefined
+  // Only `unknown` is left out: it is the plugin's own "the probe did not
+  // answer", and a badge that guesses is worse than no badge. Every level the
+  // upstream DID report is drawn — `idle` included, in green, because "the
+  // model is free right now" is useful information.
+  if (level === 'unknown') return undefined
   return level as WorkBuddyBusyIcon
 }
 
