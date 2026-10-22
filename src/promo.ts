@@ -146,6 +146,42 @@ export interface WorkBuddyPromoSchedule {
   dailyUnusable?: true
 }
 
+/**
+ * The upstream's own discounted price for a promotion, when it publishes one.
+ *
+ * This is what makes a "night discount" badge more than decoration: the badge
+ * says the model is on offer, and this field says HOW MUCH less it costs during
+ * the offer. The plugin used to drop it, so a model could wear a "night
+ * discount" badge while still showing its full price — the card and the
+ * composer readout then disagreed with what the user was actually charged.
+ *
+ * Shapes observed on the CN feed (2026-10-21, `docs/PROMO_BADGE.md`):
+ *
+ *   { discountedCredits: "0x", displayMode: "replace", factor: 0 }
+ *
+ * `discountedCredits` is a STRING with the unit glued on ("0x", "0.06x"), not
+ * a number: `Number("0.06x")` is `NaN`, so it must be parsed, not coerced.
+ * `factor` is a ratio the upstream sometimes supplies (0.545 = "55% of the
+ * normal price"); it is used only when `discountedCredits` cannot be read, and
+ * the two disagreeing means the string wins — it is the figure the user will
+ * be charged.
+ */
+export interface WorkBuddyPromoDiscount {
+  /**
+   * The multiplier the user pays during the promotion, e.g. `0` for free.
+   *
+   * Parsed from `discountedCredits` ("0x" / "0.06x" / "0.06"), or derived from
+   * `factor` when only that is present. `undefined` when neither could be read.
+   */
+  multiplier?: number
+  /**
+   * The upstream's display instruction. `'replace'` means "show this instead of
+   * the normal multiplier"; anything else is not yet observed, so it is not
+   * acted on.
+   */
+  displayMode?: 'replace'
+}
+
 /** The upstream's explanatory copy for the badge. */
 export interface WorkBuddyPromoHover {
   /** The Chinese wording. */
@@ -173,6 +209,10 @@ export interface WorkBuddyPromo {
    * badge matters. Used to pick ONE badge per model when several apply.
    */
   priority: number
+  /**
+   * The discounted price during the promotion, when the upstream publishes one.
+   */
+  discount?: WorkBuddyPromoDiscount
 }
 
 /** A record-ish value, or undefined for anything else. */
@@ -289,6 +329,43 @@ function parseDaily(value: unknown): WorkBuddyPromoWindow[] | undefined {
   return windows.length === 0 ? undefined : windows
 }
 
+/**
+ * Read a multiplier out of the upstream's `discountedCredits` string.
+ *
+ * The upstream writes the unit INTO the value ("0x", "0.06x", "0.06"), so the
+ * trailing `x` is stripped rather than handed to `Number()`. A value that does
+ * not become a finite non-negative number is refused — a wrong price shown to
+ * the user is worse than the normal price, because the normal price is at least
+ * true.
+ */
+function multiplierOfCredits(value: unknown): number | undefined {
+  const raw = text(value)
+  if (raw === undefined) return undefined
+  const stripped = raw.replace(/x$/i, '').trim()
+  if (stripped === '') return undefined
+  const parsed = Number(stripped)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+/** The upstream's `discount` → this plugin's discount shape. */
+function parseDiscount(value: unknown): WorkBuddyPromoDiscount | undefined {
+  const raw = record(value)
+  if (raw === undefined) return undefined
+  const fromString = multiplierOfCredits(raw['discountedCredits'])
+  const fromFactor = typeof raw['factor'] === 'number' && Number.isFinite(raw['factor']) && raw['factor'] >= 0
+    ? raw['factor']
+    : undefined
+  // The string wins: it is the figure the user is charged. `factor` only fills
+  // in when the string is absent or unreadable.
+  const multiplier = fromString ?? fromFactor
+  const displayMode = raw['displayMode'] === 'replace' ? 'replace' as const : undefined
+  if (multiplier === undefined && displayMode === undefined) return undefined
+  return {
+    ...multiplier === undefined ? {} : { multiplier },
+    ...displayMode === undefined ? {} : { displayMode },
+  }
+}
+
 /** The upstream's `schedule` → this plugin's schedule shape. */
 function parseSchedule(value: unknown): WorkBuddyPromoSchedule | undefined {
   const raw = record(value)
@@ -328,6 +405,7 @@ function parsePromo(value: unknown, source: 'promotion' | 'tier'): WorkBuddyProm
   if (badge === undefined) return undefined
   const hover = parseHover(raw['hover'])
   const schedule = parseSchedule(raw['schedule'])
+  const discount = parseDiscount(raw['discount'])
   const priority = typeof raw['priority'] === 'number' && Number.isFinite(raw['priority']) ? raw['priority'] : 0
   const id = text(raw['id']) ?? `${source}:${modelIds.join(',')}`
   return {
@@ -337,6 +415,7 @@ function parsePromo(value: unknown, source: 'promotion' | 'tier'): WorkBuddyProm
     badge,
     ...hover === undefined ? {} : { hover },
     ...schedule === undefined ? {} : { schedule },
+    ...discount === undefined ? {} : { discount },
     priority,
   }
 }
@@ -532,6 +611,52 @@ function hasSchedule(promo: WorkBuddyPromo): boolean {
  * Only ONE badge is drawn per model: a model row is one line wide, and two
  * badges would push the model name and the image/think checkboxes out of it.
  */
+/**
+ * The multiplier to DRAW for a model right now: the promotion's discounted
+ * price when a discount is running, otherwise the catalog's own figure.
+ *
+ * WHY THIS IS SEPARATE FROM THE BADGE. The badge answers "is this model on
+ * offer"; this answers "at what price". They usually agree, but not always —
+ * and when they disagreed the user saw a "night discount" badge next to the
+ * full price (issue #120). The discount lives in the SAME entry that carries
+ * the badge, so the two can be answered from one document and one clock.
+ *
+ * TWO RULES, both about not overstating an offer:
+ *
+ *   1. Only a promotion that is RUNNING at `nowMs` discounts the price. A
+ *      standing badge (the daytime half of a night-discount pair) is drawn
+ *      outside the discount hours, and it must NOT discount them — that is
+ *      exactly the bug this function exists to prevent. The badge admits
+ *      standing entries through `selectPromoBadge`; the price does not.
+ *   2. `displayMode` must say `'replace'`, and the value must parse. An entry
+ *      with a badge but no readable discount changes nothing, so the catalog's
+ *      figure stands.
+ *
+ * The result is `undefined` when the catalog figure should be used unchanged —
+ * the caller then keeps whatever it already draws. Returning the base value
+ * from here would make a caller that has no base figure (a model whose
+ * `credits` was absent) invent one.
+ */
+export function selectPromoMultiplier(
+  promos: readonly WorkBuddyPromo[] | undefined,
+  nowMs: number,
+): number | undefined {
+  if (promos === undefined || promos.length === 0) return undefined
+  const sorted = [...promos].sort((a, b) =>
+    b.priority - a.priority
+    || (a.source === b.source ? 0 : a.source === 'promotion' ? -1 : 1))
+  for (const promo of sorted) {
+    const discount = promo.discount
+    if (discount === undefined || discount.multiplier === undefined) continue
+    if (discount.displayMode !== 'replace') continue
+    // Rule 1: the DISCOUNT runs on the daily window, so a standing badge
+    // outside it must not discount anything.
+    if (!promoActiveAt(promo, nowMs)) continue
+    return discount.multiplier
+  }
+  return undefined
+}
+
 export function selectPromoBadge(
   promos: readonly WorkBuddyPromo[] | undefined,
   nowMs: number,

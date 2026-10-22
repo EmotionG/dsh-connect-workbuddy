@@ -65,7 +65,7 @@ import { AccountTransfer } from './AccountTransfer.tsx'
 // and one set of tests.
 import { createLatestWins } from '../account-pool.ts'
 import { imageDefaultFor, nativeModalityOf } from '../native-modality.ts'
-import { selectPromoBadge } from '../promo.ts'
+import { selectPromoBadge, selectPromoMultiplier } from '../promo.ts'
 import { busyIcon } from './busy-icon.tsx'
 import { promoBadgeColor, promoBadgeLabel, promoBadgeTooltip, uiLanguage } from './promo-badge.ts'
 import { inlineProbeReason } from './probe-reason.ts'
@@ -160,6 +160,19 @@ function promoChip(model: WorkBuddyWebModel): ReactElement | null {
       {promoBadgeLabel(promo, language)}
     </span>
   )
+}
+
+/**
+ * The multiplier to DRAW for a model right now (issue #120).
+ *
+ * A "night discount" badge used to sit next to the full price: the badge was
+ * resolved against the clock while the number beside it was the catalog's
+ * static figure. The discount lives in the same upstream entry, so both are
+ * answered against the same clock — a promotion that is running and carries a
+ * readable `replace` discount wins; otherwise the catalog figure stands.
+ */
+function effectiveRate(model: WorkBuddyWebModel): number | undefined {
+  return selectPromoMultiplier(model.promos, Date.now()) ?? model.creditMultiplier
 }
 
 /** One region's unsaved model edits; switching tabs never drops these. */
@@ -2177,13 +2190,13 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                                 <span className="dsm-workbuddy-model-copy">
                                   <span className="dsm-workbuddy-model-name">
                                     {model.name}
-                                    {model.creditMultiplier === undefined ? null
+                                    {effectiveRate(model) === undefined ? null
                                       // The SAME token the picker shows: the label slot
                                       // appends `x0.00` to the model name (see
                                       // `adapter.ts`), and a card saying `(0.00x)` would
                                       // make one number look like two. The 7px gap above
                                       // already separates it from the name, so no dot.
-                                      : <span className="dsm-workbuddy-model-name-rate">x{model.creditMultiplier.toFixed(2)}</span>}
+                                      : <span className="dsm-workbuddy-model-name-rate">x{effectiveRate(model)!.toFixed(2)}</span>}
                                   </span>
                                   {/* The upstream's own promotion badge, when one
                                       holds for this model right now. It sits NEXT

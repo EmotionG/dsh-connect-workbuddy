@@ -45,7 +45,7 @@ import type { ReactElement } from 'react'
 import { busyIcon } from './busy-icon.tsx'
 import type { WorkBuddyBusyLevel } from '../busy.ts'
 import type { WorkBuddyPromo } from '../promo.ts'
-import { selectPromoBadge } from '../promo.ts'
+import { selectPromoBadge, selectPromoMultiplier } from '../promo.ts'
 import { promoBadgeColor, promoBadgeLabel, promoBadgeShortLabel, promoBadgeTooltip, uiLanguage } from './promo-badge.ts'
 import { withWorkBuddyRegion, WORKBUDDY_USAGE_PATH } from '../status-paths.ts'
 import type { WorkBuddyWebModel, WorkBuddyWebRegion } from '../status-paths.ts'
@@ -84,6 +84,9 @@ const TICK_MS = 60_000
 interface StatusSnapshot {
   levels: Readonly<Record<string, WorkBuddyBusyLevel>>
   promos: Readonly<Record<string, readonly WorkBuddyPromo[]>>
+  /** Each model's catalog multiplier, so the label can show the discounted
+   *  price while a discount runs (issue #120). */
+  rates: Readonly<Record<string, number>>
 }
 
 /** The snapshot per region, plus when it was read. */
@@ -116,10 +119,12 @@ async function statusNow(region: WorkBuddyWebRegion): Promise<StatusSnapshot | u
     // along on a response whose probe has not run, and losing them because the
     // probe is cold would be a second, unrelated failure.
     const promos: Record<string, readonly WorkBuddyPromo[]> = {}
+    const rates: Record<string, number> = {}
     for (const model of body.models ?? []) {
+      if (model.creditMultiplier !== undefined) rates[model.id] = model.creditMultiplier
       if (model.promos !== undefined) promos[model.id] = model.promos
     }
-    const snapshot: StatusSnapshot = { levels: body.busyLevels ?? {}, promos }
+    const snapshot: StatusSnapshot = { levels: body.busyLevels ?? {}, promos, rates }
     caches.set(region, { snapshot, at: Date.now() })
     return snapshot
   } catch {
@@ -258,9 +263,16 @@ function WorkBuddyModelLabelInner(props: {
   // after this snapshot was cached still shows, and one that closed stops.
   const promo = snapshot === undefined ? undefined : selectPromoBadge(snapshot.promos[modelId], Date.now())
 
+  const baseRate = snapshot?.rates[modelId]
+  // Same clock as the badge: a standing "night discount" entry outside its
+  // hours must not change the price (issue #120).
+  const discounted = snapshot === undefined ? undefined : selectPromoMultiplier(snapshot.promos[modelId], Date.now())
+  const rate = discounted ?? baseRate
+
   return (
     <span className="dsm-workbuddy-model-label">
       <span>{name}</span>
+      {rate === undefined ? null : <span className="dsm-workbuddy-model-label-rate"> · x{rate.toFixed(2)}</span>}
       {promo === undefined ? null : <PromoBadge promo={promo} compact={compact} />}
       {level === undefined ? null : busyIcon(level, 'zh')}
     </span>
