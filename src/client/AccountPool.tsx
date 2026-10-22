@@ -1413,7 +1413,15 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
               // disabled but still rendered so rows never shift position.
               orderIndex: isMember && orderIsManual ? left + 1 : undefined,
               orderIsManual,
-              moveEnabled: pool.enabled === true && isMember && canEditPool,
+              // The DRAFT's `enabled`, not the saved one (`pool.enabled`). The
+              // arrows live in the membership block, which the user builds up in
+              // the draft: tick an account, order it, then press Save once. Gating
+              // on the SAVED switch made the arrows not exist until a save the
+              // user had no reason to suspect was required — the order looked
+              // impossible to set, and the next Save then had nothing to write.
+              // Still the draft, never a claim about the running pool:
+              // `poolRunning` (saved) remains the single source for what is live.
+              moveEnabled: active.enabled && isMember && canEditPool,
               onMoveUp: () => { void moveMember(account.accountId, -1) },
               onMoveDown: () => { void moveMember(account.accountId, 1) },
               moveUpDisabled: left <= 0,

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixes
+
+- **排序箭头在「账号池还没保存开启」时不出现 —— 先勾选再排序这条自然路径被堵死。** `AccountPool.tsx` 的 `moveEnabled` 读的是**已保存**的 `pool.enabled`，而同一行旁边的 `isMember` 读的却是**草稿** `active.memberAccountIds`。于是：勾选账号入池（草稿变了）→ 想去排序 → **箭头根本不存在**，因为开关还没保存；用户既看不到箭头，也就没有理由去按保存，下一次保存自然「什么都没写」——这正是「手动排序没保存」的实际形态。改成读草稿的 `active.enabled`：箭头描述的是草稿，就该跟着草稿走（报告运行中的池仍然是 `poolRunning`，那个值没有动）。变异验证：改回 `pool.enabled`，新增用例立刻红（期望 4 个箭头、实际 0 个）。
+- **`regionsMapOf()` 会跳到更深一层，读到同名区域的过期副本。** 旧规则是「只要有 `regions` 键就往下跳」，理由是可以同时接受「整份 settings」和「regions map」两种入参。但 regions **map 自己也可能有 `regions` 键** —— 本机真实 profile 里 `config.regions` 下就躺着 `accounts` / `regions` / `cliBridge` 三个旧写入留下的兄弟键。一旦跳下去，读到的就是**另一份更旧的同名区域**：实测同一份文档，「按 section 读」得到 `['c','a','b']`，「按 map 读」得到 `[]`（正是「排序明明存了却读不出来」）。现在改为**按形状判定**：外层对象只要含有区域 id（`cn` / `global`）就是 map，直接用它；否则才是 section，才往里跳。变异验证：把判定换回无条件跳，新增用例立刻红。
+
 ### Docs
 
 - **写明负载徽标仅在国内版：国际网关没有这条接口（实测，非推断）。** 2026-10-22 用插件自己的凭据与客户端对 `www.workbuddy.ai` 实测：`POST /v2/chat/busy` 回 **404 `{"error_msg":"404 Route Not Found"}`**，另试 `/v3/chat/busy`、`/v2/models/busy`、`/v2/chat/model/busy`、`/v1/chat/busy`（POST + GET 各一次）**12 个组合全是 404**；同一份凭据读该网关的 `/v3/config` **200、28 个模型**，且这 28 个模型的**全部字段名里没有任何**含 busy / load / queue / wait / level / pressure 的字段。结论：**不是路径写错、不是身份不对、不是权限问题 —— 上游国际版从未提供这个事实**。行为保持不变（探针失败仍被 `withBusyLevels` 捕获、记一条 warn、模型目录照常下发，卡片渲染为「没有徽标」），本次只补文档与代码注释，**故意不按区域门控探针**：真门控等于把「上游将来补上」这件事也一并关掉，而今天多付的代价只是每轮一次 404。顺带订正 README 里一句已过时的描述（还写着「`idle` 有词但不画」）：5.3.1 起 `idle` 就是那枚**绿色火箭**、`normal` 是 1 个黄人，两处文案现在与 `src/client/busy-icon.tsx` 的实际渲染一致。

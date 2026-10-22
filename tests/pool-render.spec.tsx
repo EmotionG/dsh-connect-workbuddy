@@ -1274,6 +1274,44 @@ describe('manual priority: rows, rank badges and the up/down arrows', () => {
     await m.unmount()
   })
 
+  it('offers the arrows while the pool switch is still an UNSAVED draft', async () => {
+    // The natural flow is: tick an account, order it, press Save ONCE. Gating
+    // the arrows on the SAVED switch made them not exist until a save the user
+    // had no reason to suspect was required, so the order looked impossible to
+    // set — and the next Save then had nothing to write. The arrows describe the
+    // DRAFT, so the draft's `enabled` is what they must read.
+    stubFetch(() => ({ body: {} }))
+    const m = await mount(AccountPool, baseProps({
+      pool: poolOf({
+        // The Host has the pool OFF; the draft is about to turn it on.
+        enabled: false,
+        memberAccountIds: ['a', 'b'],
+        effectiveMemberAccountIds: ['a', 'b'],
+        orderAccountIds: [],
+        accounts: [
+          accountOf({ accountId: 'a', accountName: 'Name A', current: true }),
+          accountOf({ accountId: 'b', accountName: 'Name B' }),
+        ],
+      }),
+    }))
+    // Turn the pool on in the DRAFT only (no save yet)…
+    // The switch lives in the mode bar (which carries `pool-settings` too), and
+    // the member checkboxes live in the table — so the mode bar's own checkbox
+    // is the ONE under `.dsm-workbuddy-pool-modebar`.
+    const poolSwitch = m.container.querySelector<HTMLInputElement>(
+      '.dsm-workbuddy-pool-modebar input[type=checkbox]',
+    )
+    expect(poolSwitch, 'the pool switch must render').not.toBeNull()
+    await m.click(poolSwitch!)
+    await m.settle()
+    // …and the member rows must already offer their arrows.
+    expect(
+      m.container.querySelectorAll('.dsm-workbuddy-pool-move-btn').length,
+      'a ticked member must be orderable before Save',
+    ).toBe(4)
+    await m.unmount()
+  })
+
   it('the badge is NOT a button — it only describes the order', async () => {
     // Rendering it as an inert <button> would announce a control that does
     // nothing, and inflate the row's button count (2 arrows + N inert badges).

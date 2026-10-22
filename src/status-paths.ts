@@ -355,16 +355,33 @@ export function regionOfStatusUrl(url: string): WorkBuddyWebRegion | undefined {
  * it is then `undefined`: the enabled flag reads back as "on" forever (the very
  * symptom described above), and a merge that spreads this map silently drops
  * the region it was not editing. Unwrap before narrowing.
+ *
+ * THE HOP IS CONDITIONAL, and that is the whole point (a saved manual pool
+ * order "disappearing"). "Has a `regions` key" is NOT sufficient evidence that
+ * the caller passed the whole section: the `regions` MAP can legitimately carry
+ * a `regions` key of its own, because an earlier build could write a sibling
+ * field name into it — a live profile was found with `accounts`, `regions` and
+ * `cliBridge` sitting beside `cn` / `global`. Hopping there means reading a
+ * DIFFERENT, older copy of the same region: measured, the same document returned
+ * `['c','a','b']` when read as a section and `[]` when read as a map. So a value
+ * counts as the whole section only when it shows a key that is neither a region
+ * id nor a known sibling — i.e. it looks like a settings document. A plain (or
+ * dirty) `cn` / `global` map is returned as-is.
  */
 function regionsMapOf(value: unknown): Record<string, unknown> {
   const unwrapped = unwrapVolatileDeep(value)
   if (typeof unwrapped !== 'object' || unwrapped === null || Array.isArray(unwrapped)) return {}
   const record = unwrapped as Record<string, unknown>
   const nested = record['regions']
-  if (typeof nested === 'object' && nested !== null && !Array.isArray(nested)) {
-    return nested as Record<string, unknown>
-  }
-  return record
+  if (typeof nested !== 'object' || nested === null || Array.isArray(nested)) return record
+  // Both shapes are objects and both may carry `regions`. Decide by asking which
+  // one IS a region map: a map's keys are region ids (possibly plus stray
+  // sibling names left by an old writer). If the OUTER object has at least one
+  // region id, it is the map — hopping would land on a different, older copy of
+  // the same region (measured: `['c','a','b']` as a section, `[]` as a map).
+  const regionIds = WORKBUDDY_REGIONS as readonly string[]
+  const outerIsMap = Object.keys(record).some(key => regionIds.includes(key))
+  return outerIsMap ? record : nested as Record<string, unknown>
 }
 
 /** One region's stored slot as a plain object; any other shape reads as empty. */

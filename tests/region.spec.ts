@@ -38,6 +38,35 @@ describe('regionEnabledOf', () => {
   it('reads from the bare regions map when given one', () => {
     expect(regionEnabledOf({ cn: { enabled: false } }, 'cn')).toBe(false)
   })
+
+  it('does NOT hop a layer when the regions MAP itself carries a dirty `regions` key', () => {
+    // Observed on a live profile: `config.regions` held `accounts`, `regions`
+    // and `cliBridge` beside `cn` / `global` — sibling field names a pre-fix
+    // build had written INTO the map. The old rule ("has a `regions` key =>
+    // the caller passed the whole section") then jumped down to a STALE copy of
+    // the same region, and a saved manual pool order read back as empty: the
+    // user's sort looked unsaved while the file still had it.
+    //
+    // The shallow copy is the truth here; the nested one is the stale duplicate.
+    const dirtyMap = {
+      regions: { cn: { enabled: true, pool: { orderAccountIds: [] } } }, // stale copy
+      cliBridge: { enabled: false },
+      cn: { enabled: false, pool: { orderAccountIds: ['c', 'a', 'b'] } }, // the real slot
+      global: { enabled: true },
+    }
+    expect(regionEnabledOf(dirtyMap, 'cn'), 'must read the shallow slot').toBe(false)
+    // …and the same for the whole section, where hopping IS correct.
+    const whole = { regions: dirtyMap, lastCatalog: [] }
+    expect(regionEnabledOf(whole, 'cn')).toBe(false)
+  })
+
+  it('still hops for a section whose only non-region key is `accounts`-like', () => {
+    // `accounts` is ambiguous (a real top-level field AND a stray key inside the
+    // live map), so it is not treated as evidence. A section carrying any OTHER
+    // field still hops.
+    const section = { regions: { cn: { enabled: false } }, models: [] }
+    expect(regionEnabledOf(section, 'cn')).toBe(false)
+  })
 })
 
 describe('nextRegionEnabled', () => {
