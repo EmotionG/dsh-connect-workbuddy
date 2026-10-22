@@ -27,6 +27,11 @@
 >
 > 这一版是 PR #104 按维护者 13 条评审逐条重做的结果，**不是原样重提**。改动分三类：把「原版会真的伤到用户」的地方修掉、把原版站不住的论证改掉、把 runner 这条从未被测过的路径补上测试。
 
+### Fixes（已合入的 #104 之后补的）
+
+- **回注不再冒充用户发言**：`source.kind` 从 `'user'` 改成 `'codebuddy-bridge'`。`MessageSourceMap` 本来就是**可扩展**的（每个生产者在自己模块里声明 kind，`dsh-connect-atomcode` 就是这么做的），只在宿主自己的闭集里挑一个「最像的」既没必要也没好处——副作用是 GUI 把这条回注渲染成**用户气泡**，看不出它是通知。声明放在 `src/dsh-llm-augment.d.ts`；`PROVENANCE_LINE` 仍然留在正文首行，因为模型看不见 `source`。
+- **胶囊改用 composer 共用的样式**：原来是内联 `fontSize: 0.85em` / `opacity: .85`，字号继承 dock 正文，和旁边的额度胶囊、ContextMeter 对不齐，看着像外挂。类定义进 `WORKBUDDY_COMPOSER_CSS`（`.dsm-workbuddy-cli-live` / `-dot`，12px、`label-tertiary`、tab-nums、`prefers-reduced-motion` 关掉脉冲），由组件自己幂等注入——额度胶囊被 gate 关掉时样式也得在。
+
 ### Features
 
 - **CLI 路线（可选）：让本机已登录的 CodeBuddy CLI 直接干活**
@@ -96,7 +101,7 @@
 
 ### Tests
 
-- 新增 `tests/cli-bridge.spec.ts`（72 条）与 `tests/cli-bridge-runner.spec.ts`（25 条），共 **97 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
+- 新增 `tests/cli-bridge.spec.ts`（75 条）与 `tests/cli-bridge-runner.spec.ts`（30 条），共 **105 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
 - 开关本身另有两条：`tests/cli-bridge-switch.spec.ts`（`__save` 的合并语义：显式 false 生效、同级 cap 不被冲掉）与 `tests/cli-bridge-card-switch.spec.tsx`（读取只认显式 true、写入先 Host 后 scope、卡片默认关且点击只 POST 全局字段）。
 - **`runner.ts` 第一次有测试。** 初版的 53 条全是纯逻辑与注册形状，`runOneTurn` / `runAgent` / `spawn` 一次都没被调用过 —— 而评审找到的第 5/6/7/8 条缺陷全在那个盲区里。新 spec 用 `vi.mock('node:child_process')` 造 fake child，断言的是模块自己声明的协议：
   - `control_request` 的回包形状（`subtype:'success'` / `request_id` 原样回传 / `allowed:false`），且拒绝理由不以 synthetic-deny 前缀开头、result 帧前 **stdin 不 close**（这一条在修复前必红）；`interrupt` 分两条：普通工具**不带**（带了会中止整轮）、`ExitPlanMode` **必带**（不带则 `plan` 挂死）
@@ -106,10 +111,10 @@
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
 - 重做版补的 8 条：`cliEntryCandidates()` 的四条布局断言（Windows 的 npm 前缀下直接是 `node_modules`、**没有 `lib` 层**；POSIX 前缀仍拼 `lib/node_modules`；pnpm / yarn 的全局仓本身就是模块根；同一个目录只被探测一次）；Windows 上 pnpm / yarn / fnm 三个仓库位置一条（fnm 那条要真造一个版本目录，否则「按版本展开」根本没被执行）；`parseCommandInput` 的 `--edit` 一条（带正文 → `acceptEdits` 且正文剥掉前缀）；配额拒绝后临时目录不残留一条；以及一条**反向约束**：指令的 hint 里不得出现默认权限模式跑不起来的示例。
-- 全量：**116 文件 / 1942 条通过（另 2 条跳过）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功。
+- 全量：**121 文件 / 1998 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功。
 - **实时胶囊的测试（新增）**：`tests/cli-bridge-live.spec.ts`（12 条）锁宿主侧 live board —— 开/退休告、失败回合也退休、指令与工具两个入口的标签、`elapsedMs` 由宿主时钟算、无 board 时不告警、以及「目录校验拒绝的调用**不得**留下胶囊」（公告发生在所有前置条件之后，所以没开始的工作不会闪一下）；`tests/cli-bridge-live-pill.spec.tsx`（19 条）锁客户端 —— 空闲渲染 `null`、标签含工具数与秒数、`starting`/`finishing` 不显示秒、`+N`、**秒数在两次轮询之间本地前进且请求数不变**、宿主时钟偏移校正、路由失败/畸形文档/没有 `fetch` 都不抛、**`serverTime` 不是数字时整份文档作废（否则标签会印出 `NaNs`）**、**单条回合缺数字时只丢那一条**、**连续三个周期失败后胶囊自己退场**、目录只进 tooltip 不进标签、**只描述本会话的回合**（别会话的行既不出现在标签里也不计入 `+N`）、**只有别会话在跑时渲染 `null`**、**宿主标不成会话的行照样保留**、**座位不给 `sessionId` 时不过滤**，以及 `readLive` 的并发合并与缓存过期。另在 `cli-bridge-runner.spec.ts` 补一条「板子上的 `sessionId` 必须是 DSH 会话 id，不得被 CLI 自己的 uuid 覆盖」——**先证明它会红**才留下：把那一行临时加回去，报 `expected 'cli-session-uuid' to be 'session-dsh'`。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
-- 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
+- **会话续接的 7 条**（`cli-bridge-runner.spec.ts` 4 条 + `cli-bridge.spec.ts` 3 条）：第二轮真的带上第一轮报回的 `--session-id`、**第一轮不带**（没有可续接的就不该传）、显式 `session_id` 盖过记忆、`off` 时两轮都不带、两个 DSH 会话互不串（记忆按会话分桶）、设置的默认值与错值回退、以及记忆本身的写入/覆盖/清空/空值不覆盖/256 条上限。跨会话那条第一版用的是固定 key，被记忆污染后改成每例独立 key + `forgetCliSession` —— 那不是「修测试」，是测试自己发现了一个真实的隔离缺口。
 
 ### Tests（同期并入 main：issue #102 / #108）
 
