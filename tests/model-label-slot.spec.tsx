@@ -20,7 +20,7 @@
  *    models have one. A badge that guesses is worse than no badge.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { WorkBuddyModelLabel, resetBusyLevelCache } from '../src/client/WorkBuddyModelLabel.tsx'
+import { regionOfProvider, WorkBuddyModelLabel, resetBusyLevelCache } from '../src/client/WorkBuddyModelLabel.tsx'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 afterEach(() => {
@@ -91,6 +91,16 @@ describe('the model label in the host picker', () => {
     )
     expect(markup).toContain('Model Z')
     expect(markup).not.toContain('dsm-workbuddy-busy')
+  })
+
+  it('maps each provider to the region it serves', () => {
+    // The two gateways are separate catalogs with separate load, so a request
+    // without the region would show one region's levels on the other's models.
+    // Pinning the MAPPING (not the fetch) keeps the test honest under static
+    // rendering, where effects do not run at all.
+    expect(regionOfProvider('workbuddy')).toBe('cn')
+    expect(regionOfProvider('workbuddy-global')).toBe('global')
+    expect(regionOfProvider('deepseek-account')).toBeUndefined()
   })
 
   it('does not fetch at all when the Host has no levels to report', () => {

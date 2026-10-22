@@ -25,16 +25,32 @@ import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import { busyIcon } from './busy-icon.tsx'
 import type { WorkBuddyBusyLevel } from '../busy.ts'
-import { WORKBUDDY_USAGE_PATH } from '../status-paths.ts'
+import { withWorkBuddyRegion, WORKBUDDY_USAGE_PATH } from '../status-paths.ts'
+import type { WorkBuddyWebRegion } from '../status-paths.ts'
 
-/** The provider ids this plugin registers. */
-const OWNED_PROVIDER_IDS: ReadonlySet<string> = new Set(['workbuddy', 'workbuddy-global'])
+/** The provider ids this plugin registers, and the region each one serves. */
+const PROVIDER_REGIONS: ReadonlyMap<string, WorkBuddyWebRegion> = new Map([
+  ['workbuddy', 'cn'],
+  ['workbuddy-global', 'global'],
+])
+
+/**
+ * The region a provider id serves, or `undefined` for a provider that is not
+ * this plugin's.
+ *
+ * Exported because the mapping is the part that can be silently wrong: asking
+ * the Host without the region answers for the DEFAULT region, which would put
+ * one gateway's load on the other gateway's models.
+ */
+export function regionOfProvider(providerId: string): WorkBuddyWebRegion | undefined {
+  return PROVIDER_REGIONS.get(providerId)
+}
 
 /** How long a fetched level set is trusted, in milliseconds. */
 const CACHE_MS = 60_000
 
-/** The levels, by model id, plus when they were read. */
-let cache: { levels: Record<string, WorkBuddyBusyLevel>, at: number } | undefined
+/** The levels per region, by model id, plus when each set was read. */
+const caches = new Map<WorkBuddyWebRegion, { levels: Record<string, WorkBuddyBusyLevel>, at: number }>()
 
 /**
  * The levels, read from the Host once and reused briefly.
@@ -43,10 +59,14 @@ let cache: { levels: Record<string, WorkBuddyBusyLevel>, at: number } | undefine
  * guessing, because a badge that claims a level the upstream never stated is
  * worse than no badge.
  */
-async function levelsNow(): Promise<Record<string, WorkBuddyBusyLevel> | undefined> {
-  if (cache !== undefined && Date.now() - cache.at < CACHE_MS) return cache.levels
+async function levelsNow(region: WorkBuddyWebRegion): Promise<Record<string, WorkBuddyBusyLevel> | undefined> {
+  const cached = caches.get(region)
+  if (cached !== undefined && Date.now() - cached.at < CACHE_MS) return cached.levels
   try {
-    const response = await fetch(WORKBUDDY_USAGE_PATH, {
+    // The answer is per REGION: the two gateways are separate catalogs with
+    // separate load, so asking without the region would show one region's
+    // levels on the other's models.
+    const response = await fetch(withWorkBuddyRegion(WORKBUDDY_USAGE_PATH, region), {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
     })
@@ -54,7 +74,7 @@ async function levelsNow(): Promise<Record<string, WorkBuddyBusyLevel> | undefin
     const body = await response.json() as { busyLevels?: Record<string, WorkBuddyBusyLevel> }
     const levels = body.busyLevels
     if (levels === undefined || levels === null) return undefined
-    cache = { levels, at: Date.now() }
+    caches.set(region, { levels, at: Date.now() })
     return levels
   } catch {
     // The Host is unreachable or refused: no badge. Never a made-up one.
@@ -64,7 +84,7 @@ async function levelsNow(): Promise<Record<string, WorkBuddyBusyLevel> | undefin
 
 /** Forget the cached levels; used by the tests. */
 export function resetBusyLevelCache(): void {
-  cache = undefined
+  caches.clear()
 }
 
 /**
@@ -80,28 +100,33 @@ export function WorkBuddyModelLabel(props: {
   selected: boolean
 }): ReactElement {
   const { provider, model } = props
-  if (!OWNED_PROVIDER_IDS.has(provider.id)) {
+  const region = regionOfProvider(provider.id)
+  if (region === undefined) {
     // Another provider's model: the host renders the plain name.
     return <span>{model.name}</span>
   }
-  return <WorkBuddyModelLabelInner modelId={model.id} name={model.name} />
+  return <WorkBuddyModelLabelInner modelId={model.id} name={model.name} region={region} />
 }
 
 /** The stateful half: fetches the levels, then renders the badge. */
-function WorkBuddyModelLabelInner(props: { modelId: string, name: string }): ReactElement {
-  const { modelId, name } = props
+function WorkBuddyModelLabelInner(props: {
+  modelId: string
+  name: string
+  region: WorkBuddyWebRegion
+}): ReactElement {
+  const { modelId, name, region } = props
   const [level, setLevel] = useState<WorkBuddyBusyLevel | undefined>(undefined)
 
   useEffect(() => {
     let live = true
-    void levelsNow().then(levels => {
+    void levelsNow(region).then(levels => {
       // Superseded while in flight: a newer answer must not be overwritten by
       // an older one.
       if (!live || levels === undefined) return
       setLevel(levels[modelId])
     })
     return () => { live = false }
-  }, [modelId])
+  }, [modelId, region])
 
   return (
     <span className="dsm-workbuddy-model-label">
