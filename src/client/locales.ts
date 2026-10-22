@@ -18,12 +18,15 @@ export const en = {
   'row.tabCn': 'Domestic',
   'row.tabGlobal': 'Global',
   'row.tabHint': 'Each tab is a separate provider (workbuddy / workbuddy-global) with its own account, credits, and models. Both sides are live at once: different sessions can pick from either side, and changes on one tab never touch the other.',
-  // The free (×0) models are NOT unlimited — they carry a per-WINDOW token quota
-  // (the upstream's 6004/14003 refusals are that quota, not a billing balance).
+  // The free (×0) models are NOT unlimited: the upstream rate-limits them by
+  // single-request volume (6004, measured ~25k tokens through / ~30k refused)
+  // and by model-side load (14003). Neither is a cumulative per-window token
+  // quota the plugin can read — there is no field for it — so this line states
+  // the LIMITATION without naming a mechanism the plugin cannot verify.
   // Stated separately from `tabHint` and in bold because the misreading it
   // prevents is expensive: a user who believes ×0 means unlimited reads a 6004
-  // as "the plugin is broken" instead of "this window's allowance is spent".
-  'row.tabFreeQuotaWarn': 'Free models have a per-window token quota — they are not unlimited.',
+  // as "the plugin is broken" instead of "this request is too big / too busy".
+  'row.tabFreeQuotaWarn': 'Free models are not unlimited — the upstream limits them by request size and load.',
   'row.tabSwitchHint': 'Uncheck to switch this provider off. Its models disappear from the DSH model picker; your account, credits, and model settings are kept and return when you check it again.',
   'row.tabSwitchAria': 'Offer the {region} provider to DSH',
   'row.tabOffNotice': 'This provider is switched off: none of its models are offered to DSH. Your account, credits, and model settings are kept — check the box above the tab to bring it back.',
@@ -334,7 +337,7 @@ export const en = {
   'row.poolSettingsTitle': 'More settings',
   'row.poolSettingsHint': 'These are preferences: they take effect when you save (same as the model list). Test results are written automatically and are not affected by this button.',
   'row.poolEnabled': 'Enable the account pool',
-  'row.poolEnabledHint': 'On: the pool picks the account for every request and moves to the next one when it fails. Off: the account you select serves every request, and a failure is reported as it is.',
+  'row.poolEnabledHint': 'On: the pool picks the account for every request, and only a failover-worthy failure moves to the next account — a malformed request, a busy model, a platform queue, or a channel-gate refusal does not (switching accounts would only burn quota for the same refusal). Off: the account you select serves every request, and a failure is reported as it is.',
   'row.poolModeAuto': 'picking automatically',
   'row.poolModeManual': 'you pick',
   'row.poolManualAccountLabel': 'Account in use',
@@ -428,12 +431,12 @@ export const en = {
   // (about 5.71 credits a picture, no per-call approval in the host). Opt-in
   // for that reason, so the copy says what it costs instead of only naming it.
   'row.cliBridgeLabel': 'Let the local CodeBuddy CLI do the work',
-  'row.cliBridgeHint': 'Adds the codebuddy_ask tool and the /codebuddy command. Each call spends CodeBuddy quota (and, with injectResult on, one DSH turn). Off by default.',
+  'row.cliBridgeHint': 'Adds the codebuddy_ask tool and the /codebuddy command. Each call spends CodeBuddy quota. injectResult only affects /codebuddy — its result is injected back into the session, costing one DSH turn when the session is idle; tool calls never read it. Rate-limited: 6 turns per session per hour, 20 per process per hour, one turn at a time. Off by default.',
   'row.imageToolLabel': 'Let the model draw images',
   'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image, with no per-call confirmation. Off means the tool is not registered at all.',
   'row.showCreditsCn': 'Show credits in the composer toolbar',
   'row.showCreditsGlobal': 'Show credits in the composer toolbar',
-  'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
+  'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a one-click test of the checked accounts (the test spends real credits). The readout refreshes by itself every 5 minutes; the per-account table every 60 seconds while it is open.',
   // WHERE the readout sits (issue #62). The composer row is a LIST seat shared
   // with any other plugin that registers there — one report is the readout
   // disappearing once another plugin was installed — so the seat is a choice.
@@ -467,7 +470,7 @@ export const en = {
   'quotaNotice.fallbackHead': 'The quota for this request is exhausted',
   'quotaNotice.supplement': ' (some models also have a daily limit that is unrelated to your credits)',
   'row.creditPositionHint': 'Where the credit readout sits. "composer toolbar" is the default (the row with the model picker). Choose "below the input box" — the row carrying the round / step / token statistics — if another plugin occupies the composer toolbar and the readout does not appear.',
-  'row.showCreditsGlobalHint': 'Show the international (WB AI) credit balance in the composer toolbar, but only while this session uses a WB AI model. Click it for per-account balances and a manual refresh (refreshes by itself every 5 minutes).',
+  'row.showCreditsGlobalHint': 'Show the international (WB AI) credit balance in the composer toolbar, but only while this session uses a WB AI model. Click it for per-account balances and a one-click test of the checked accounts (the test spends real credits). The readout refreshes by itself every 5 minutes; the per-account table every 60 seconds while it is open.',
   'composer.pointsCn': 'WB CN',
   'composer.pointsGlobal': 'WB AI',
   'composer.panelTitleCn': 'WB CN credits',
@@ -519,10 +522,12 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.tabCn': '国内版',
   'row.tabGlobal': '国际版',
   'row.tabHint': '每个 tab 是一个独立供应商（workbuddy / workbuddy-global），各有自己的账号、积分与模型。两边同时生效：不同会话可各选一边，一侧的改动不影响另一侧。',
-  // 免费（×0）模型**不是无限量**：它有一个**时间段内的 token 定额**（上游的 6004/14003
-  // 拒的就是这个定额，不是账单余额）。与 `tabHint` 分开、且加粗显示，因为它要防的误读
-  // 代价很高：以为 ×0 = 无限用的人，会把 6004 读成「插件坏了」而不是「这一时段的额度用完了」。
-  'row.tabFreeQuotaWarn': '免费模型有时间段内定额 Token 上限，并非无限制使用。',
+  // 免费（×0）模型**不是无限量**：上游按**单次请求体积**限流（6004，实测约 25k token
+  // 通过、约 30k 被拒）并按**模型侧负载**限流（14003）。两者都不是插件能读到的
+  // 「时间段内累计 token 定额」——上游没有这个字段——所以这句只说限制存在，不声称
+  // 插件无法验证的机制。与 `tabHint` 分开、且加粗显示，因为它要防的误读代价很高：
+  // 以为 ×0 = 无限用的人，会把 6004 读成「插件坏了」而不是「这个请求太大/太忙」。
+  'row.tabFreeQuotaWarn': '免费模型并非无限量：上游按单次请求体积与负载限流。',
   'row.tabSwitchHint': '取消勾选即关闭该供应商：它的模型不再出现在 DSH 模型选择器里；账号、积分与模型设置都会保留，重新勾选即恢复。',
   'row.tabSwitchAria': '是否向 DSH 提供{region}供应商',
   'row.tabOffNotice': '该供应商已关闭：它的模型不会提供给 DSH。账号、积分与模型设置均已保留——勾选上方复选框即可恢复。',
@@ -812,7 +817,7 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolSettingsTitle': '更多设置',
   'row.poolSettingsHint': '下面是偏好设置：点保存才生效（与「模型管理」一致）。测试结果由插件自动写入，不受这个保存按钮影响。',
   'row.poolEnabled': '启用账号池',
-  'row.poolEnabledHint': '开启：由账号池为每次请求挑号，失败就换下一个。关闭：你选的账号服务每一次请求，失败如实报错。',
+  'row.poolEnabledHint': '开启：由账号池为每次请求挑号；只有可换号的失败才换下一个——请求本身不合法、模型繁忙、平台排队、渠道校验这四类不换（换号只会为同一个拒绝白烧一次配额）。关闭：你选的账号服务每一次请求，失败如实报错。',
   'row.poolModeAuto': '自动挑号',
   'row.poolModeManual': '手动选号',
   'row.poolManualAccountLabel': '使用哪个账号',
@@ -898,12 +903,12 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // 宿主没有逐次确认的机制），所以默认关闭，文案也必须把单价说出来，
   // 而不是只给它一个名字。
   'row.cliBridgeLabel': '允许调用本机 CodeBuddy CLI 干活',
-  'row.cliBridgeHint': '开启后多出 codebuddy_ask 工具与 /codebuddy 指令；每次调用花 CodeBuddy 配额（injectResult 开着时还会再花一次 DSH token）。默认关闭。',
+  'row.cliBridgeHint': '开启后多出 codebuddy_ask 工具与 /codebuddy 指令；每次调用花 CodeBuddy 配额。injectResult 只影响 /codebuddy：其结果回注会话，会话空闲时多花一次 DSH 回合；工具调用不读它。限流：每会话每小时 6 回合、每进程每小时 20 回合、同时只跑一个回合。默认关闭。',
   'row.imageToolLabel': '允许模型自主生图',
   'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——约 5.71 积分/张，没有逐次确认。关闭时该工具根本不会注册。',
   'row.showCreditsCn': '在输入框工具栏显示积分读数',
   'row.showCreditsGlobal': '在输入框工具栏显示积分读数',
-  'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
+  'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并一键测试勾选的账号（测试会真实消耗积分）。读数每 5 分钟自动刷新；各账号明细在面板打开时每 60 秒刷新。',
   // 积分显示在哪个位置（issue #62）。输入框工具栏是**共享**的 list 插槽，
   // 别的插件也注册在那里时本插件读数会消失（报告者遇到的就是这个），
   // 所以位置做成可选项。
@@ -929,7 +934,7 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'quotaNotice.fallbackHead': '当前请求的额度已用尽',
   'quotaNotice.supplement': '（部分模型另有每日额度，与积分无关）',
   'row.creditPositionHint': '积分显示在哪里。「输入框工具栏」是默认位置（与模型选择同一行）。如果装了别的插件后读数不显示，改成「输入框下方」—— 那是「轮次 / 步数 / token」统计所在的那一行。',
-  'row.showCreditsGlobalHint': '在对话输入框工具栏显示国际版（WB AI）剩余积分，仅当本会话使用 WB AI 模型时出现。点击可看各账号余额并手动刷新（每 5 分钟也会自动刷新）。',
+  'row.showCreditsGlobalHint': '在对话输入框工具栏显示国际版（WB AI）剩余积分，仅当本会话使用 WB AI 模型时出现。点击可看各账号余额并一键测试勾选的账号（测试会真实消耗积分）。读数每 5 分钟自动刷新；各账号明细在面板打开时每 60 秒刷新。',
   'composer.pointsCn': 'WB CN',
   'composer.pointsGlobal': 'WB AI',
   'composer.panelTitleCn': 'WB CN 积分',

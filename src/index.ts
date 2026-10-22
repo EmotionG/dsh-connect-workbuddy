@@ -406,9 +406,14 @@ export interface WorkBuddyPoolPreferences {
    * plugin behaves exactly as it did before the pool existed: the account the
    * user selected serves every request, and a failure is reported as-is.
    *
-   * It deliberately does NOT change which account serves NEXT: failover is
-   * per-request borrowing, so the user's selection stays in effect and the
-   * card can keep reporting who really served.
+   * It deliberately does NOT change the SAVED selection: while on, the pool
+   * picks the serving account for every request (`applyPoolSelection` ranks
+   * the usable members and sets a per-request override), but that override is
+   * per-request borrowing — turning the pool off hands every request back to
+   * the account the user chose, and the card can keep reporting who really
+   * served. (An older version of this comment said the pool "does NOT change
+   * which account serves NEXT", which was wrong the moment `applyPoolSelection`
+   * started ranking on every request; what never changes is the saved choice.)
    */
   enabled?: boolean
   /** Model id to test; `''` means auto-pick a free model from this region. */

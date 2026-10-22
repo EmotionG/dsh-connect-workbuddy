@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>account pool mock</title>
+<style>
+  :root{
+    --bg:#f4f4f5; --panel:#ffffff; --line:#e4e4e7; --line2:#d4d4d8;
+    --ink:#18181b; --ink2:#52525b; --ink3:#a1a1aa;
+    --green:#16a34a; --amber:#d97706; --blue:#2563eb;
+    --font:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14px;line-height:21px}
+  .card{width:1850px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 26px}
+  .head{display:flex;align-items:center;gap:12px}
+  h2{margin:0;font-size:17px}
+  .badge{padding:3px 12px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;background:#93c5fd;border:1px solid rgba(37,99,235,.35)}
+  .muted{color:var(--ink3);font-size:12px;line-height:18px}
+  .btn{padding:8px 18px;border:1px solid var(--line2);border-radius:9px;background:var(--panel);color:var(--ink2);font:inherit;font-size:13px}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .actions{display:flex;gap:10px;margin:14px 0 10px}
+  h3{margin:16px 0 2px;font-size:15px}
+  .selhead{display:flex;align-items:center;gap:10px}
+  .selhead .count{margin-left:auto;color:var(--ink2);font-size:13px}
+  table{width:100%;border-collapse:collapse;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:10px}
+  th{ text-align:left;color:var(--ink3);font-size:13px;font-weight:500;padding:10px 16px;border-bottom:1px solid var(--line)}
+  td{padding:14px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  tr.sel{background:#eef4ff}
+  .cb{width:16px;height:16px;border:1.5px solid var(--line2);border-radius:4px;display:inline-block;background:#fff;vertical-align:-3px}
+  .cb.on{background:var(--ink);border-color:var(--ink);position:relative}
+  .cb.on::after{content:"";position:absolute;left:4px;top:1px;width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(40deg)}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:0}
+  .dot.g{background:var(--green)} .dot.a{background:var(--amber)} .dot.n{background:#d4d4d8}
+  .acct{font-weight:600}
+  .sub{color:var(--ink3);font-size:12px;margin-top:2px}
+  .num{font-size:16px;font-weight:700}
+  .warn{color:var(--amber);font-size:12px;margin-top:2px}
+  .ok{color:var(--ink2)}
+  .signed{color:var(--green)}
+  .foot{margin:14px 0 0;color:var(--ink3);font-size:11px;text-align:center}
+</style></head><body>
+<div class="card">
+  <div class="head"><h2>账号池</h2><span class="badge">自动轮换中</span></div>
+  <div class="muted">本区域 4 个账号 · 目标模型 deepseek-v4.1-flash</div>
+  <div class="actions"><span class="btn primary">签到勾选的账号</span><span class="btn">测试勾选的账号</span></div>
+  <div class="muted">你指定的模型： deepseek-v4.1-flash</div>
+  <div class="selhead">
+    <div><h3 style="margin:14px 0 2px">本池包含的账号</h3><div class="muted">只有勾选的账号才会被签到、测试和轮换。默认一个都不勾 —— 请勾选你要的账号，然后保存。</div></div>
+    <span class="count">已选 4 / 6</span><span class="btn">全选</span><span class="btn">全不选</span>
+  </div>
+  <table>
+    <thead><tr><th style="width:34%">账号</th><th style="width:26%">积分</th><th style="width:24%">目标模型</th><th>签到</th></tr></thead>
+    <tbody>
+      <tr class="sel"><td><span class="cb on"></span> <span class="dot g"></span><div class="acct">示例账号 A</div><div class="sub">已在池中</div><div class="sub">测试于 11/01, 13:23</div></td><td><div class="num">3,510</div><div class="warn">310 积分 3 天内过期</div></td><td class="ok">✓ 可用</td><td class="signed">已签到</td></tr>
+      <tr class="sel"><td><span class="cb on"></span> <span class="dot g"></span><div class="acct">示例账号 B</div><div class="sub">已在池中</div><div class="sub">测试于 11/01, 13:23</div></td><td><div class="num">3,086</div><div class="sub">最近积分包 11/12, 20:04 过期</div></td><td class="ok">✓ 可用</td><td class="signed">已签到</td></tr>
+      <tr class="sel"><td><span class="cb on"></span> <span class="dot g"></span><div class="acct">示例账号 C</div><div class="sub">已在池中</div><div class="sub">测试于 11/01, 13:23</div></td><td><div class="num">2,302</div><div class="sub">最近积分包 11/12, 20:16 过期</div></td><td class="ok">✓ 可用</td><td class="signed">已签到</td></tr>
+      <tr class="sel"><td><span class="cb on"></span> <span class="dot a"></span><div class="acct">示例账号 D</div><div class="sub">已在池中</div><div class="sub">被限流</div></td><td><div class="num">3,782</div><div class="warn">300 积分 3 天内过期</div></td><td class="ok">被限流 · 11/02, 05:20 之后可再用</td><td class="signed">已签到</td></tr>
+      <tr><td><span class="cb"></span> <span class="dot n"></span><div class="acct">示例账号 E</div><div class="sub">未入池</div></td><td>—</td><td class="ok">尚未测试</td><td class="signed">已签到</td></tr>
+      <tr><td><span class="cb"></span> <span class="dot n"></span><div class="acct">示例账号 F</div><div class="sub">未入池</div></td><td>—</td><td class="ok">尚未测试</td><td class="signed">已签到</td></tr>
+    </tbody>
+  </table>
+  <p class="foot">合成数据 · 仅用于说明界面结构 · dsh-connect-workbuddy</p>
+</div>
+</body></html>
