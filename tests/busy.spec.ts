@@ -107,12 +107,12 @@ describe('busyLabel / busyDisplaySuffix', () => {
     expect(busyDisplaySuffix(undefined)).toBe('')
   })
 
-  it('draws an IDLE model as ONE green person', () => {
-    // The word exists (the app's detail panel uses it) and the ICON exists too:
-    // one green person says "free right now", which is useful rather than
-    // decorative.
+  it('draws an IDLE model as a ROCKET', () => {
+    // The word exists (the app's detail panel uses it) and the mark exists too:
+    // a rocket says "nobody is queuing, full speed", which is a different
+    // SHAPE from one person waiting — the two must not be confused at 12px.
     expect(busyLabel('idle')).toBe('空闲')
-    expect(busyDisplaySuffix('idle')).toBe(' 🧍')
+    expect(busyDisplaySuffix('idle')).toBe(' 🚀')
   })
 
   it('puts the load to the RIGHT of the name, as ONE character', () => {

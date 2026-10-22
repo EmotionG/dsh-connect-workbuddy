@@ -194,7 +194,9 @@ export function busySymbol(level: WorkBuddyBusyLevel | undefined): string {
     case 'congested': return '🧍🧍🧍'
     case 'busy': return '🧍🧍'
     case 'normal': return '🧍'
-    case 'idle': return '🧍'
+    // The idle level is a ROCKET in the card (`src/client/busy-icon.tsx`), so
+    // the character version says the same thing: nobody is queuing.
+    case 'idle': return '🚀'
     case 'unavailable': return '🚫'
     default: return ''
   }

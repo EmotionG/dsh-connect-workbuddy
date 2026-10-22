@@ -78,7 +78,7 @@ describe('the load badge as a character (the DSH model picker)', () => {
     expect(busyDisplaySuffix('congested')).toBe(' 🧍🧍🧍')
     expect(busyDisplaySuffix('busy')).toBe(' 🧍🧍')
     expect(busyDisplaySuffix('normal')).toBe(' 🧍')
-    expect(busyDisplaySuffix('idle')).toBe(' 🧍')
+    expect(busyDisplaySuffix('idle')).toBe(' 🚀')
     expect(busyDisplaySuffix('unknown')).toBe('')
     expect(busyDisplaySuffix(undefined)).toBe('')
   })

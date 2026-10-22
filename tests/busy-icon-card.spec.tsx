@@ -106,13 +106,28 @@ describe('the load-level icon in the card', () => {
     expect(peopleIn(congested)).toBe(3)
   })
 
-  it('draws ONE person for the healthy case, and NONE for idle', async () => {
+  it('draws ONE person for the healthy case', async () => {
     // The healthy case IS drawn — one person says "free" without shouting.
-    // `idle` (the upstream's "nobody is here") draws nothing at all.
     const m = await render({ 'model-a': 'normal' })
     const drawn = icons(m.container)
     expect(drawn).toHaveLength(1)
     expect(drawn[0]?.querySelectorAll('g')).toHaveLength(1)
+  })
+
+  it('draws a ROCKET for idle, not a person', async () => {
+    // "Nobody is queuing" and "one person is queuing" must not look alike at
+    // 12px, so the idle level gets a different SHAPE, not just a different
+    // colour. The rocket is drawn solid: a stroked one is a smudge at this size.
+    const m = await render({ 'model-a': 'idle' })
+    const drawn = icons(m.container)
+    expect(drawn).toHaveLength(1)
+    expect(drawn[0]?.className).toContain('dsm-workbuddy-busy-idle')
+    // The rocket's window and flame are the marks that make it a rocket.
+    const html = drawn[0]?.innerHTML ?? ''
+    expect(html).toContain('#f5a623')
+    expect(html).toContain('#ffffff')
+    // And it is NOT a person: a person has hair and a face.
+    expect(html).not.toContain('#f0c04a')
   })
 
   it('colours the crowd as a RAMP: green, yellow, orange, red', async () => {

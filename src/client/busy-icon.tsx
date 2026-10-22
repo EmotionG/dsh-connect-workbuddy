@@ -7,11 +7,16 @@
  * module is the other half: the places the plugin renders itself, where a real
  * picture is possible and therefore better.
  *
- * ONE SHAPE, AND THE COUNT CARRIES THE MEANING. The icon set is a single
- * person, repeated: one for an idle model, one for a healthy one, two when a
- * queue has formed, three when the model is congested. A crossed-out person for
- * "unavailable" is the one exception, because "nobody can use this" is not a
- * matter of degree: there is no "one and a half unavailable".
+ * ONE SHAPE, AND THE COUNT CARRIES THE MEANING — WITH ONE EXCEPTION. The
+ * crowded levels are a single person, repeated: one for a healthy model, two
+ * when a queue has formed, three when the model is congested.
+ *
+ * `idle` is the exception and gets a ROCKET: nobody is queuing, so the model is
+ * free to run at full speed. A different shape is what makes "nobody is
+ * waiting" instantly distinct from "one person is waiting" — at 12px, a colour
+ * alone is not enough. The crossed-out person for "unavailable" is the other
+ * exception, because "nobody can use this" is not a matter of degree: there is
+ * no "one and a half unavailable".
  *
  * THE COLOUR IS A RAMP. Green (idle) → yellow (normal) → orange (busy) → red
  * (congested) is an order the eye already knows, so the severity of one row can
@@ -65,7 +70,6 @@ const COLORS: Readonly<Record<WorkBuddyBusyIcon, string>> = {
 
 /** How many people each level draws. */
 const PEOPLE: Readonly<Partial<Record<WorkBuddyBusyIcon, number>>> = {
-  idle: 1,
   normal: 1,
   busy: 2,
   congested: 3,
@@ -134,6 +138,37 @@ function person(
   )
 }
 
+/**
+ * A ROCKET, for the `idle` level: nobody is queuing, so the model is free to
+ * run at full speed.
+ *
+ * A different SHAPE, not a different colour, and that is the point: the level
+ * has to be readable at 12px without reading a word, and a rocket next to one,
+ * two or three people separates "nobody is waiting" from "one person is
+ * waiting" instantly. The people count the queue; the rocket says there is
+ * none.
+ *
+ * SOLID, not outlined: a stroked rocket at this size turns into a smudge. The
+ * body is filled in the level's colour, the window is white so it reads at
+ * 12px, and the flame is a fixed orange (a flame is a flame).
+ */
+function rocket(color: string): ReactElement {
+  return (
+    <g>
+      {/* 尾焰 */}
+      <path d="M6.1 15.6c.2 1.6.8 2.8 1.9 3.7 1.1-.9 1.7-2.1 1.9-3.7z" fill="#f5a623" />
+      {/* 尾翼 */}
+      <path d="M4.4 11.8 2 16.1h2.5zM11.6 11.8l2.4 4.3h-2.5z" fill={shadeOf(color)} />
+      {/* 机身 */}
+      <path d="M8 .9c2.7 2.9 4.2 6.6 4.2 10.4 0 1.7-.4 3.2-1 4.5H4.8c-.6-1.3-1-2.8-1-4.5 0-3.8 1.5-7.5 4.2-10.4z" fill={color} />
+      {/* 舷窗 */}
+      <circle cx="8" cy="6.6" r="2.1" fill="#ffffff" />
+      {/* 机身高光 */}
+      <path d="M6.4 3.6c-.7 1.2-1.2 2.6-1.4 4.1" stroke="#ffffff" strokeOpacity=".35" strokeWidth=".7" fill="none" strokeLinecap="round" />
+    </g>
+  )
+}
+
 /** The shaded edge of the clothes, one step darker than the clothes. */
 function shadeOf(color: string): string {
   return `color-mix(in srgb, ${color} 78%, #000)`
@@ -172,6 +207,21 @@ export function busyIcon(
           {/* The bar is drawn ACROSS the figure, not over it: a line through the
               middle of a 12px person hides the very thing it is annotating. */}
           <path d="M0.6 19.4 19.4 0.6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
+        </svg>
+      </span>
+    )
+  }
+
+  if (icon === 'idle') {
+    // The one level that is not a queue: nobody is waiting.
+    return (
+      <span
+        className="dsm-workbuddy-busy dsm-workbuddy-busy-idle"
+        title={title}
+        style={{ '--dsm-workbuddy-busy-color': color } as Record<string, string>}
+      >
+        <svg viewBox="0 0 16 19.3" width={12} height={12} aria-hidden="true" focusable="false">
+          {rocket(color)}
         </svg>
       </span>
     )
