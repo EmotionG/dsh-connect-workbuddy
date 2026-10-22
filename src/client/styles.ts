@@ -288,6 +288,7 @@ export const WORKBUDDY_CARD_CSS = `
    one the brand colour stands in. "flex:none" keeps the badge whole while the
    model name beside it truncates with an ellipsis. The plain background comes
    first so an engine without color-mix still gets a readable chip. */
+.dsm-workbuddy-model-label{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;vertical-align:baseline}
 .dsm-workbuddy-busy{flex:none;display:inline-flex;align-items:center;block-size:12px;color:var(--dsm-workbuddy-busy-color);vertical-align:-2px}
 .dsm-workbuddy-busy svg{display:block;block-size:12px;inline-size:auto}
 .dsm-workbuddy-model-promo{flex:none;display:inline-flex;align-items:center;padding:0 7px;border-radius:999px;font-size:10px;line-height:16px;font-weight:600;white-space:nowrap;color:var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe));background:rgba(255,255,255,.08);background:color-mix(in srgb,var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe)) 16%,transparent);border:1px solid transparent;border-color:color-mix(in srgb,var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe)) 40%,transparent)}

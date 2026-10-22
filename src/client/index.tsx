@@ -36,6 +36,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
+import { WorkBuddyModelLabel } from './WorkBuddyModelLabel.tsx'
 import { selectQuotaNoticeClaim, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
@@ -181,6 +182,32 @@ export function apply(ctx: WorkBuddyClientContext): void {
     }
 
     /**
+     * The load badge in the HOST's model picker.
+     *
+     * The picker renders the model name as a plain string, so a provider can
+     * only put a CHARACTER there — and a character's colour is the emoji font's
+     * business, not ours. The host therefore offers exactly one seam for this:
+     * the `conversation.input.model.label` slot, whose contract is "render
+     * non-interactive inline content such as a coloured name or badge" while
+     * the picker keeps owning clicks, focus and check marks. The shipped
+     * example is the official DeepSeek "1017" release badge, which is the same
+     * job — a coloured marker beside a model name.
+     *
+     * Registered unconditionally: the component itself renders nothing for a
+     * provider that is not ours, so there is nothing to gate on.
+     */
+    const registerModelLabel = (): (() => void) | undefined => {
+      try {
+        return ctx.slots.inject('conversation.input.model.label' as never, () => (ctx.slots as unknown as {
+          register(options: { name: string }, component: unknown): () => void
+        }).register({ name: 'conversation.input.model.label' }, WorkBuddyModelLabel))
+      } catch (error: unknown) {
+        console.error('[dsh-connect-workbuddy] model label slot failed to register (host provider unaffected):', error)
+        return undefined
+      }
+    }
+
+    /**
      * The SAME readout in the ambient dock below the composer card (issue #62).
      *
      * Registered unconditionally, like the composer seat, because the CHOICE
@@ -301,6 +328,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
       registerComposerCredits(),
       registerStatsCredits(),
       registerQuotaNotice(),
+      registerModelLabel(),
     ].filter((disposer): disposer is () => void => disposer !== undefined)
 
     /**

@@ -32,7 +32,6 @@ import { WORKBUDDY_FALLBACK_SYSTEM_PROMPT } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import { piAiRuntimeInfo } from './pi-ai-runtime.ts'
 import type { PiAiGeneration } from './pi-ai-runtime.ts'
-import { busyDisplaySuffix } from './busy.ts'
 import type { ContextRescue } from './context-rescue.ts'
 
 /** Provider route this bundle owns for the domestic (CN) gateway. */
@@ -257,11 +256,14 @@ export function workBuddyDisplayName(info: WorkBuddyModelInfo): string {
   const base = info.creditMultiplier === undefined
     ? info.name
     : `${info.name} · x${info.creditMultiplier.toFixed(2)}`
-  // Load rides on the END of the same string, in the app's own words
-  // ("极度拥堵" / "轻微拥堵"), and only for a level worth drawing: the healthy
-  // default adds nothing, so a roster with no congestion reads exactly as it did
-  // before this existed. See `src/busy.ts`.
-  return `${base}${busyDisplaySuffix(info.busyLevel)}`
+  // Load does NOT ride on this string any more. The host renders the model
+  // name verbatim, and the plugin now draws the load badge in the host's own
+  // picker through the `conversation.input.model.label` slot
+  // (`src/client/WorkBuddyModelLabel.tsx`) — where it can be a COLOURED figure
+  // rather than a character whose colour belongs to the emoji font. Leaving
+  // the emoji here as well would show the same fact twice, in two visual
+  // languages. See `src/busy.ts`.
+  return base
 }
 
 /**

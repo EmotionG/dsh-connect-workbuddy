@@ -226,6 +226,11 @@ export function busyDisplaySuffix(level: WorkBuddyBusyLevel | undefined, locale:
   // character instead of a word. `locale` stays in the signature because the
   // CARD still asks for the word (`busyLabel`) for its tooltip — dropping the
   // parameter would silently change that call site's contract.
+  //
+  // NOT the place the badge is drawn, though: the host offers the
+  // `conversation.input.model.label` slot, and the plugin renders the coloured
+  // SVG people THERE (`src/client/WorkBuddyModelLabel.tsx`). An emoji here
+  // would show the same information twice, in two different visual languages.
   const symbol = busySymbol(level)
   if (symbol === '') return ''
   return ` ${symbol}`

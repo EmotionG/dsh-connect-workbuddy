@@ -47,6 +47,7 @@
     "tests/promo-card.spec.tsx",
     "tests/promo-badge.spec.ts",
     "tests/cli-bridge-card-switch.spec.tsx",
-    "tests/busy-icon-card.spec.tsx"
+    "tests/busy-icon-card.spec.tsx",
+    "tests/model-label-slot.spec.tsx"
   ]
 }
