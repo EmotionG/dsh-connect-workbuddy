@@ -1,5 +1,39 @@
 # Changelog
 
+## 5.4.0 (2026-10-22)
+
+> 少数版本：修四处真实缺陷，**请求路径、provider 路由、计费与凭据一律未变**。其中三处是「代码写好了但没被走到」的缺陷——功能早就存在，只是有一整类真实报文从未进入它们。
+
+### Fixes
+
+- **模型目录不再被陈旧快照锁死（#114 + #115，同一处缺陷的两面）**
+  - **病因**：`configuredModels()` / `displayModels()` 把「已保存目录 `lastCatalog`」当作第一优先级，而它**唯一的写入者**是卡片保存、写回的又是**它自己读到的目录**——闭环成立，实时目录被永久压制。于是上游新增的模型（CN 的 `deepseek-v4.1-flash`）永远进不来；更糟的是**冷启动播种**会在上游尚未应答时把静态兜底表写进 `lastCatalog`，而那张表**不含 `reasoning`**，每个模型因此以 `reasoning: false` 发布，宿主只给 `Default` / `Off`。
+  - **修法**：目录解析改为「**实时 > 已保存 > 静态兜底**」。已保存目录只承担**名字与勾选**，能力字段（`reasoning` / `creditMultiplier` / `supportsImages`）一律取自实时目录（新增 `src/catalog-sync.ts`）。上游已撤回但用户仍在用的模型继续保留（#32 的规则不变）。
+  - **自愈**：实时目录到达后按**内容指纹**比对回写 `lastCatalog`，只在真有差异时写、幂等（新增 `src/catalog-write.ts`），所以升级后无需手动清 profile。与兜底表逐项相同且不含能力字段的旧快照被识别为「从未配置」，不再当真。
+  - **播种不再写兜底表**：`src/web-status.ts` 播种前先判断「这份目录是不是兜底表本身」，是则跳过。
+  - **`busyLevel` 绝不进入卡片目录**：它是「这一分钟」的事实（`src/busy.ts`），且显式 `undefined` 会被设置写入的严格 JSON 编解码器拒绝，因此按 key 删除而非赋 `undefined`。
+
+- **`11128` 一族按 code 整体识别，成员由插件自己的证据点名（#113）**
+  - **病因**：旧 `isChannelRejectBody()` 要求「带渠道措辞」**且**「不带另两个门的措辞」。而 #113 实测到 `msg: "conversation id missing"` 出现在**携带全部三个会话头**的请求上——措辞不可信。后果不是文案问题：该 body 被判成 `client`，而 `src/shim.ts` 的两级救援阶梯（`forceNeutralHead` → `perturbChannelFingerprints`）是**按 kind 门控**的，`client` 根本不进那个分支。**门 A、门 B 的救援都写好了，但这一整类真实报文从未走到它们面前**——这解释了「升级了却没变化」的反馈。
+  - **修法**：`isChannelRejectBody()` 现在回答「是否属于 11128 一族」，只按 `"code":11128` 判定；新增 `channelGateMemberOf()`，用**请求侧证据**（是否带了会话头 / 首条是否 system）点名成员 `prompt` / `headers` / `first_message` / `unknown`，只影响**建议文案**、不影响分类。回复会回显上游原始 `msg`（新增 `UpstreamErrorDetail.rawMsg`）并说明为何可信或不可信；不认识的措辞明确写「没点名是哪一道门」，而不是猜一个诊断。
+
+- **扰动补上词内断点（#113 暴露的真实缺口）**
+  - 原来只在 `.` `!` `?` `,` `;` 之后插入零宽字符，所以**结尾没有标点的裸产品名完全不会被改动**——例如 DSH agent 提示的首行 `You are an AI agent powered by DeepSeek Harness` 正好在文末，`perturbChannelFingerprints()` 直接返回 `undefined`（「无可改动」），救援空转。现在按「大写词 + 大写词」加词内断点（`DeepSeek|Harness`），仍只在**上游已拒绝之后**作为最后一级重试发生，正常请求一个字节都不动。
+
+- **`alignAssistantIdentities` 只改本插件产生的消息（#111）**
+  - **病因**：原实现对**每一条** `role: 'assistant'` 消息重写 `provider` / `api`，其 docblock 断言「transcript 里不会有别的 provider 的 assistant 轮次」。**该前提不成立**：`dsh-llm` 的 `forAdapter()` 只剥掉外来消息的 `replayState`，消息本身留在列表里。于是切换过 provider 的会话会把别人的轮次改写成 `workbuddy` / `openai-completions`——等于把宿主刚关上的「可重放」那道门重新打开，并让 transcript 宣称一个不成立的来源。
+  - **修法**：重写范围收敛到本 bundle 的两个路由（`workbuddy` / `workbuddy-global`）或已带 identity 的消息，其余**原对象返回**。#102（全球区 thinking 被压平）与 #59（跨区 identity）的修复均不受影响。`HOST_FOREIGN_API` 改为导出以便测试钉住。
+
+### Docs
+
+- 订正三处此前写错的论证：`reasoning` **不会**被设置写入路径剥掉（实测 `projectForm` / standard validate 都完整保留；`simplify()` 只是表单投影、不在写入路径上）；「回显的 `You are a helpful assistant.` 就是被拒的开头」实为插件自己垫的中性头挡住了真实开头（4.15.x 已改为从 `raw` 读证据）；`systemOpeningsOfBody()` 只读字符串 content 的数组形状盲区已由 `openingEvidenceOfBody()` 取代。
+
+### Tests
+
+- 新增 `tests/catalog-sync.spec.ts`（22 条）、`tests/issue113-channel-gate-evidence.spec.ts`（17 条，含一条端到端「用 #113 的真实报文作第一次应答，断言插件真的发出了第二次请求」）、`tests/issue111-align-scope.spec.ts`（9 条）。
+- 订正 `tests/issue90-channel-reject.spec.ts`、`tests/issue98-channel-gate.spec.ts`、`tests/issue98-shim.spec.ts` 里四处**钉住旧行为**的断言（它们把「11128 的另两个门归类为 `client`」当成契约，而那正是 #113 要修的东西）。
+- 全量：**121 文件 / 1996 条通过（另 2 条 skip）**；两个 tsconfig 均 exit 0；build 成功。
+
 ## 5.3.1 (2026-10-22)
 
 > 补丁版本：5.3.0 已经发布了负载徽标，这一版修它的**消失**问题，并把它的**呈现方式**换成更好认的样子。	**没有新增任何功能**：模型目录、请求路径、provider 路由、计费与凭据一律未变，5.3.0 的全部能力原样保留。
