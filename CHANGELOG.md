@@ -1,5 +1,27 @@
 # Changelog
 
+## 5.6.0 (2026-10-23)
+
+> 特性版本：两条都来自 issue 报告——#120（错峰时段的积分倍率没跟着变）与 #124（企业/教育版账号积分恒为 0、姓名显示成登录别名）。**请求路径、provider 路由、渠道门与计费口径一律未变**；改的是「倍率与徽标同源同时钟」和「企业账号读自己那张计费表」。
+
+### Features
+
+- **错峰时段的积分倍率跟随打折，卡片与模型选择器一起变（#120）**
+  - **报告**：模型行戴着「夜间折扣」徽标，旁边的数字还是原价 `x0.11`；真实折后价要去 WorkBuddy 客户端才看得到。徽标与价格来自**同一份** `/v3/config`、同一条促销条目，但插件只解析了 `badge`，把 `discount` 整个丢掉了。
+  - **修法**：`src/promo.ts` 新增 `WorkBuddyPromoDiscount` 与 `parseDiscount()`，读 `discount.discountedCredits`（`"0.06x"` 这种**把单位粘在值里**的字符串，`Number("0.06x")` 是 `NaN`，必须剥掉末尾 `x` 再转）+ `displayMode`；`factor` 只在字符串读不出时兜底，两者不一致时**字符串胜**——它才是用户实际被扣的那个数。
+  - **何时生效**：新增 `selectPromoMultiplier()`，只让**此刻正在运行**的促销打折。夜间折扣在上游是**两条条目**：一条带折扣 + 夜间时段，另一条是白天的常驻徽标（同款徽标、互补时段、无折扣）。白天那条只配画徽标、**不许改价**，否则卡片会把夜间价挂一整天。绝对有效期（`validFrom`/`validUntil`）也一并管住，活动过期即恢复原价。
+  - **两处渲染**：卡片模型行（`WorkBuddyCard.tsx` 的 `effectiveRate()`）与宿主模型选择器的标签（`WorkBuddyModelLabel.tsx`，同时显示 `· x0.06`）都用同一套判定；选择器原来根本不显示倍率，现在补上了——那一屏正是「现在到底多少钱」最该看到的地方。
+  - **测试**：新增 `tests/issue120-promo-discount.spec.ts`（10 条）——`"0.06x"` / 裸数字 / `"0x"`（免费不等于缺失）/ `factor` 兜底 / 非有限值与非负值拒绝 / 未知 `displayMode` 忽略 / **白天常驻条目不降价** / 无折扣条目返回 `undefined`（保留目录价）/ 过期恢复 / 多条同时打折取最高优先级。
+
+- **企业版（`type: ultimate`）账号读企业计费表，姓名显示真名（#124）**
+  - **报告**：企业/教育版账号积分恒为 0，账号名显示成登录别名。
+  - **积分修法**：`fetchCredits()` 按 `enterpriseId` 分流到 `/billing/meter/get-enterprise-user-usage`（**没有 `/v2` 前缀**）。个人端点对企业成员回的是 **HTTP 200 + 空 `Accounts` 列表**——一个形状合法但内容为假的「你没有积分」，插件不是被拒绝，是问错了表。企业表回 `{credit, limitNum, cycleResetTime}`，**`credit` 是已用额度**，余额是 `limitNum - credit`；把 `credit` 当余额读会把答案整个反转，比它替换掉的 0 更糟。`cycleResetTime` 不带时区标记，按**本地时间**手动拼（`Date.parse` 对这种形状是实现相关的）。
+  - **宁可报错也不报 0**：企业端点若回不出两个数字，抛错而不是返回 `total: 0`——后者正是 #124 报告的症状，等于把 bug 当作修复。
+  - **姓名修法**：新增 `preferredAccountName()`，顺序是 `displayName` → `enterpriseUserName` → `nickname`（登录别名垫底），空白串跳过。企业凭证的 `nickname` 是登录别名，把它放第一位会让卡片看起来在管别人的账号。`displayName` / `enterpriseUserName` 从桌面 auth 文档的 `account` 节点读，并随 DSH 凭证一起落盘。
+  - **跨次读取不丢**：新增 `mergeCredentialDisplayNames()`，`scanAll()` 合并同账号的两份副本时把姓名**双向带过去**——桌面 App 不总重写这两个字段，整条替换会静默退回别名，让 #124 的症状自己回来。
+  - **签到不再浪费请求**：企业网关没有消费者签到（对成员一律回 `10001`）。`WorkBuddyPoolTarget` 新增 `enterprise`，批次直接跳过并在日志里说「企业账号无每日签到」（新增 `skipped` 状态与新文案，中英各一条）；跳过的行**不占批次间隔**——间隔是给请求留的。
+  - **测试**：新增 `tests/issue124-enterprise-credits.spec.ts`（14 条）——姓名优先级三级 + 空白跳过 + 合并保留/覆盖；企业端点被用而个人端点不被用、`limitNum - credit`、超额不为负、`Data` 包裹也能读、读不出余额即抛错、`cycleResetTime` 本地时间解析、非企业凭证仍走个人表。`tests/account-pool-run.spec.ts` 增 2 条（跳过企业账号、跳过的行不计间隔）。
+
 ## 5.5.2 (2026-10-23)
 
 > 补丁版本：两条修复都来自 issue 报告——#118（`WORKBUDDY_BODY_REPORT` 报告文件无界增长、回填整文件读写导致宿主 OOM）与 #122（界面文案审计）。**请求路径、provider 路由、模型目录、计费与凭据一律未变**；改的只有诊断文件的 I/O 形状、若干句用户可见文案与两处内部注释，外加三张 README 截图换成合成数据。
