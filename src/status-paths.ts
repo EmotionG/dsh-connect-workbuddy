@@ -367,21 +367,208 @@ export function regionOfStatusUrl(url: string): WorkBuddyWebRegion | undefined {
  * counts as the whole section only when it shows a key that is neither a region
  * id nor a known sibling — i.e. it looks like a settings document. A plain (or
  * dirty) `cn` / `global` map is returned as-is.
+ *
+ * THE RESULT IS HEALED, not merely narrowed — see {@link healedRegionsMap}.
+ * Returning the map "as-is" is what let a corrupted document keep reading as
+ * half-empty: the field held `cn` at level 0 and `global` only one level down,
+ * so every `global` question answered "never configured" even though the file
+ * still had the answer. Reads and writes both come through here, so healing
+ * here fixes both halves at once (the Host's `regionStateOf`, the card's
+ * `nextRegion*` write bases, and the catalog repair's write).
  */
-function regionsMapOf(value: unknown): Record<string, unknown> {
+export function regionsMapOf(value: unknown): Record<string, unknown> {
+  // FAST PATH, and it is load-bearing for latency: the Host's `regionStateOf`
+  // comes through here on every request (pool switch, model selection, catalog,
+  // credit gate), and the slow path DEEP-COPIES the whole field — including a
+  // 28-model directory per region. Measured on that shape: 11 µs per call
+  // against 0.05 µs for the bare lookup it replaced, i.e. a real regression on
+  // an interactive path for a field that is clean in every profile this bug
+  // never touched.
+  //
+  // A field is already healed when it has no nested `regions` copy and no
+  // sibling-field names; then it can be returned as the object it is. This is
+  // sound because only the FIELD is declared volatile — the slots inside it are
+  // stored plain data, so there is no nested live reference for the deep copy to
+  // peel (that is what the section-level `accounts` / `regions` references need,
+  // and those are handled by the slow path).
+  const peeled = peelLiveReference(value)
+  if (typeof peeled === 'object' && peeled !== null && !Array.isArray(peeled)) {
+    const candidate = peeled as Record<string, unknown>
+    if (!isRecord(candidate['regions']) && !carriesForeignKey(candidate)) return candidate
+  }
+
   const unwrapped = unwrapVolatileDeep(value)
   if (typeof unwrapped !== 'object' || unwrapped === null || Array.isArray(unwrapped)) return {}
   const record = unwrapped as Record<string, unknown>
   const nested = record['regions']
-  if (typeof nested !== 'object' || nested === null || Array.isArray(nested)) return record
+  if (typeof nested !== 'object' || nested === null || Array.isArray(nested)) {
+    return healedRegionsMap(record)
+  }
   // Both shapes are objects and both may carry `regions`. Decide by asking which
   // one IS a region map: a map's keys are region ids (possibly plus stray
   // sibling names left by an old writer). If the OUTER object has at least one
   // region id, it is the map — hopping would land on a different, older copy of
   // the same region (measured: `['c','a','b']` as a section, `[]` as a map).
-  const regionIds = WORKBUDDY_REGIONS as readonly string[]
-  const outerIsMap = Object.keys(record).some(key => regionIds.includes(key))
-  return outerIsMap ? record : nested as Record<string, unknown>
+  return healedRegionsMap(hasRegionKey(record) ? record : nested as Record<string, unknown>)
+}
+
+/** `value` with ONE `{get(): T}` live reference peeled, exactly like a read. */
+function peelLiveReference(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const get = (value as { get?: unknown }).get
+  return typeof get === 'function' ? (get as () => unknown)() : value
+}
+
+/** Whether the object carries a sibling-field name where a region id belongs. */
+function carriesForeignKey(record: Record<string, unknown>): boolean {
+  return Object.keys(record).some(key => REGION_MAP_FOREIGN_KEYS.has(key))
+}
+
+/**
+ * Names that belong to the settings SECTION (`Config` in `src/index.ts`) or to
+ * one region SLOT (`regionStateConfig`) — never to the `regions` map.
+ *
+ * They are the signature of a data-loss bug and the list that undoes it. From
+ * 5.4.0 to 5.5.0 `mergeRegionCatalog` was handed the WHOLE settings section but
+ * read it as the `regions` field, so every boot's directory repair wrote
+ * `{ accounts, regions, cliBridge }` INTO the field — replacing the region map
+ * and burying the real one under a `regions` key. A live profile ended up five
+ * levels deep (one per startup) and 258 KB of duplicated slots.
+ *
+ * Neither a region id (`cn` / `global`) nor any future one can collide with
+ * these names, so removing them from the map is safe, idempotent, and does not
+ * discard a region that a newer build might add.
+ */
+const REGION_MAP_FOREIGN_KEYS: ReadonlySet<string> = new Set([
+  // The section's own fields.
+  'authFile', 'accountId', 'accounts', 'regions', 'cliBridge',
+  // One region slot's fields.
+  'enabled', 'showCreditsInMainUi', 'creditPosition', 'lastCatalog',
+  'enabledModelIds', 'imageModelIds', 'imageToolEnabled', 'offModelIds',
+  'contextBudgets', 'pool',
+])
+
+/** A non-null, non-array object: the only shape a slot or a level can have. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Whether a map carries at least one real region id. */
+function hasRegionKey(map: Record<string, unknown>): boolean {
+  return Object.keys(map).some(key => (WORKBUDDY_REGIONS as readonly string[]).includes(key))
+}
+
+/**
+ * How much USER CONFIG one candidate slot actually carries.
+ *
+ * Used only when the map lost a region and the copies left at different depths
+ * disagree — and they do: the bug's own directory repair wrote a slot that held
+ * nothing but `lastCatalog` (it started from a map where the region was already
+ * missing), while the copy further down still holds the pool the user had
+ * checked in. "Shallowest wins" would therefore resurrect the EMPTY one and
+ * throw away the real configuration. Depth is not age in this wreckage; CONTENT
+ * is the only usable signal.
+ *
+ * Deliberately counts only non-default, user-authored values: resolved slots
+ * carry every schema default, so a slot's key count says nothing.
+ */
+function slotConfigWeight(slot: Record<string, unknown>): number {
+  let weight = 0
+  const pool = slot['pool']
+  if (isRecord(pool)) {
+    if (pool['enabled'] === true) weight += 4
+    if (Array.isArray(pool['memberAccountIds']) && pool['memberAccountIds'].length > 0) weight += 4
+    if (Array.isArray(pool['orderAccountIds']) && pool['orderAccountIds'].length > 0) weight += 2
+    if (typeof pool['targetModelId'] === 'string' && pool['targetModelId'] !== '') weight += 2
+    if (typeof pool['probeInputTokens'] === 'number' && pool['probeInputTokens'] > 0) weight += 1
+  }
+  for (const key of ['enabledModelIds', 'imageModelIds', 'offModelIds'] as const) {
+    const list = slot[key]
+    if (Array.isArray(list) && list.length > 0) weight += 1
+  }
+  const budgets = slot['contextBudgets']
+  if (isRecord(budgets) && Object.keys(budgets).length > 0) weight += 1
+  // Opt-outs are user decisions too, and the defaults are all `true` / `false`.
+  if (slot['enabled'] === false) weight += 1
+  if (slot['showCreditsInMainUi'] === false) weight += 1
+  if (slot['imageToolEnabled'] === true) weight += 1
+  return weight
+}
+
+/**
+ * The `regions` map with a corrupted document's wreckage removed.
+ *
+ * Two repairs, both keyed on the bug's signature (a foreign key or a nested
+ * `regions` copy) so a HEALTHY map passes through untouched:
+ *
+ *  1. DROP every key that names a section field or a slot field. Those are the
+ *     copies the bug wrote; keeping them means the next save carries them
+ *     forward forever.
+ *  2. RECOVER a region this level does not have from the copies buried beneath
+ *     it. A region that IS here is never replaced — the outer copy is the one
+ *     the surviving writers have been updating, and re-reading a stale inner
+ *     copy over it is exactly the defect the shape rule above was fixed for.
+ *
+ * Recovery exists because `global` in the measured profile lived ONLY one level
+ * down: without it, the host reads that region as "never configured" and the
+ * first write after the fix would delete the user's international pool outright.
+ *
+ * Among the buried copies of a MISSING region, the one carrying the most user
+ * configuration wins rather than the shallowest — see {@link slotConfigWeight}:
+ * the bug's own directory repair left `{ lastCatalog }` slots that look newer
+ * but hold nothing, one level above the copy with the pool still in it.
+ */
+function healedRegionsMap(map: Record<string, unknown>): Record<string, unknown> {
+  const healed: Record<string, unknown> = {}
+  for (const [key, slot] of Object.entries(map)) {
+    if (REGION_MAP_FOREIGN_KEYS.has(key)) continue
+    healed[key] = slot
+  }
+  const recovered: Record<string, { slot: Record<string, unknown>, weight: number }> = {}
+  let deeper = map
+  // Bounded: the measured profile was five levels deep. A number rather than
+  // `while (true)` because a self-referencing object is representable in a
+  // settings document and this function must never hang a read.
+  for (let depth = 0; depth < 8; depth += 1) {
+    const nested = deeper['regions']
+    if (!isRecord(nested)) break
+    for (const region of WORKBUDDY_REGIONS as readonly string[]) {
+      // PRESENT at this level — by key, not by shape: an emptied slot is stored
+      // as `null` (schemastery simplifies `{}` to `null`), and that is an
+      // explicit "nothing configured". Recovering over it would resurrect a pool
+      // the user had cleared, so presence alone is what protects the outer copy.
+      if (region in map) continue
+      const candidate = nested[region]
+      if (!isRecord(candidate)) continue
+      const weight = slotConfigWeight(candidate)
+      const best = recovered[region]
+      // `>` not `>=`: on equal weight the shallower copy stays, which makes the
+      // choice stable and prefers the copy written most recently.
+      if (best === undefined || weight > best.weight) recovered[region] = { slot: candidate, weight }
+    }
+    deeper = nested
+  }
+  for (const [region, entry] of Object.entries(recovered)) healed[region] = entry.slot
+  return healed
+}
+
+/**
+ * Whether the stored `regions` FIELD still carries the debris described at
+ * {@link REGION_MAP_FOREIGN_KEYS}.
+ *
+ * Pass the field itself (`Config['regions']`), not the whole section: the
+ * section legitimately has `accounts` / `cliBridge` beside `regions`, so asking
+ * that question of a section would always answer "corrupt".
+ *
+ * The catalog repair uses it to write even when the model directory already
+ * matches: without that, a profile whose directory is in agreement would never
+ * be cleaned — the very shape that made the pool look unsaved would outlive the
+ * fix that stops producing it.
+ */
+export function regionsFieldIsCorrupt(value: unknown): boolean {
+  const unwrapped = unwrapVolatileDeep(value)
+  if (!isRecord(unwrapped)) return false
+  return Object.keys(unwrapped).some(key => REGION_MAP_FOREIGN_KEYS.has(key))
 }
 
 /** One region's stored slot as a plain object; any other shape reads as empty. */

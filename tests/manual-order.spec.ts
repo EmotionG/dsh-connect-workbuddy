@@ -46,6 +46,27 @@ describe('readOrderAccountIds', () => {
     const value = { regions: { cn: { pool: { orderAccountIds: ['a', 7, null, 'b'] } } } }
     expect(readOrderAccountIds(value, 'cn')).toEqual(['a', 'b'])
   })
+
+  it('finds the order of a region whose slot only survives one level down (restart reset)', () => {
+    // The measured corrupt field: the card's save happened to leave `cn` at the
+    // surface, while the international slot — and its saved sort — remained only
+    // in the buried copy. A direct `value.regions[region]` lookup answered "no
+    // manual order" for `global`, so the credit panel silently reverted to the
+    // Host's order for accounts the user had sorted.
+    const value = {
+      regions: {
+        accounts: { enabled: true },
+        regions: { global: { pool: { orderAccountIds: ['g-2', 'g-1'] } } },
+        cliBridge: { enabled: false },
+        cn: { pool: { orderAccountIds: ['cn-1'] } },
+      },
+    }
+    expect(readOrderAccountIds(value, 'global')).toEqual(['g-2', 'g-1'])
+    expect(readOrderAccountIds(value, 'cn')).toEqual(['cn-1'])
+    // Asked for a field instead of the section, the same answer comes back —
+    // the helper tolerates both shapes, as the card's write bases do.
+    expect(readOrderAccountIds(value.regions, 'global')).toEqual(['g-2', 'g-1'])
+  })
 })
 
 describe('applyManualOrder', () => {

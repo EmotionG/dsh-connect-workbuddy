@@ -43,7 +43,7 @@ import type {
   WorkBuddyPoolCheckinRow,
   WorkBuddyPoolTestRow,
 } from './account-pool-run.ts'
-import { fastDetailOf, regionOfStatusUrl, transferActionOf } from './status-paths.ts'
+import { fastDetailOf, regionOfStatusUrl, regionsMapOf, transferActionOf } from './status-paths.ts'
 import type { WorkBuddyCreditPosition } from './status-paths.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import {
@@ -1747,8 +1747,21 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // JSON-compatibility check on mutate then rejects the save with
           // "found a function at $.ops[0].value.get". Deep-unwrap first so the
           // merge never carries a function.
-          const current = unwrapVolatileDeep(row.value?.[field] ?? {}) as Record<string, unknown>
-          const incoming = (body.value ?? {}) as Record<string, unknown>
+          //
+          // `regions` goes through `regionsMapOf` instead: it unwraps the same
+          // reference and additionally drops the sibling-field copies an older
+          // build wrote into the field (the "restart reset" report). Merging
+          // onto the RAW field would carry `accounts` / `cliBridge` / a nested
+          // `regions` copy back into every save — the document would never get
+          // clean even after the writer that produced the wreckage was fixed.
+          const current = field === 'regions'
+            ? regionsMapOf(row.value?.[field])
+            : unwrapVolatileDeep(row.value?.[field] ?? {}) as Record<string, unknown>
+          // Same narrowing for the posted value: a browser bundle from an
+          // earlier build still sends the dirty map as its merge base.
+          const incoming = field === 'regions'
+            ? regionsMapOf(body.value)
+            : (body.value ?? {}) as Record<string, unknown>
           if (field === 'cliBridge') {
             if (!isPlainRecord(incoming)) return json(res, 400, { error: 'cliBridge value must be an object' })
             const mergedBridge = nextCliBridgeSettings(current, incoming)

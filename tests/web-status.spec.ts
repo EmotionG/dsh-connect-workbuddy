@@ -1357,6 +1357,36 @@ describe('registerWorkBuddyStatusRoute __save with a live-reference config', () 
     expect(ops[0]?.value).toEqual({ cn: 'a' })
   })
 
+  it('writes a CLEAN region map when the stored field was corrupted (restart reset)', async () => {
+    // THE END-TO-END SHAPE OF THAT BUG. The buggy catalog repair wrote the whole
+    // settings section into the `regions` field, which left `accounts` and
+    // `cliBridge` beside a nested `regions` map, and buried the international
+    // region one level down. A save that merges onto that raw field carries the
+    // wreckage forward forever; narrowing both sides first is what lets one save
+    // clean the document while still applying the posted preference.
+    const { handler, mutateReceived, dispose } = await mountSaveRoutes({}, {
+      accounts: { enabled: true },
+      regions: {
+        cn: { enabled: true, pool: { enabled: false } },
+        global: { enabled: true, pool: { enabled: true, memberAccountIds: ['g1', 'g2'] } },
+      },
+      cliBridge: { enabled: false },
+      cn: { enabled: true, pool: { enabled: true, memberAccountIds: ['m1'] } },
+    })
+    const { res, status } = saveResponse()
+    await handler(saveReq({ field: 'regions', value: { cn: { pool: { enabled: true, memberAccountIds: ['m1', 'm2'] } } } }), res)
+    dispose()
+    expect(status()).toBe(200)
+    const ops = mutateReceived[0]?.[1] as Array<{ value: Record<string, unknown> }>
+    const value = ops[0]?.value as Record<string, unknown>
+    // Only real regions at the top level: the sibling copies are gone.
+    expect(Object.keys(value).sort()).toEqual(['cn', 'global'])
+    // The posted preference landed on the surface slot…
+    expect(value).toMatchObject({ cn: { pool: { enabled: true, memberAccountIds: ['m1', 'm2'] } } })
+    // …and the international region survived, recovered from the buried copy.
+    expect(value).toMatchObject({ global: { pool: { enabled: true, memberAccountIds: ['g1', 'g2'] } } })
+  })
+
   it('seeds a first save with the LIVE roster, never the static fallback (issue #32)', async () => {
     // THE second half of #32. On a profile where #31 kept `regions` empty, the
     // Host's resolved value is `{}`, so the very first save seeds `merged` with

@@ -39,7 +39,7 @@ import {
   repairedCatalog,
   resolveRoster,
 } from './catalog-sync.ts'
-import { writeRegionCatalog, type HostSettingsService } from './catalog-write.ts'
+import { healRegionsField, writeRegionCatalog, type HostSettingsService } from './catalog-write.ts'
 import { createAccountUsabilityProbe } from './credential-recovery.ts'
 import { BENEFIT_CACHE_MS, claimableBenefits, type WorkBuddyBenefitView } from './benefits.ts'
 import {
@@ -241,6 +241,12 @@ import {
   regionEnabledOf,
   nextRegionEnabled,
   nextRegionSlots,
+  // The shape of the `regions` field is not trustworthy in a profile written by
+  // an older build (see `healedRegionsMap` in `src/status-paths.ts`): the Host's
+  // read and the catalog repair's write both go through this narrowing, so one
+  // rule heals both halves (the "restart reset" report).
+  regionsMapOf,
+  regionsFieldIsCorrupt,
   // Imported for this module's own use AND re-exported below, so moving the
   // implementation to the shared bridge did not change the public API.
   unwrapVolatileDeep,
@@ -276,6 +282,8 @@ export {
   regionEnabledOf,
   nextRegionEnabled,
   nextRegionSlots,
+  regionsMapOf,
+  regionsFieldIsCorrupt,
   unwrapVolatileDeep,
 }
 
@@ -746,8 +754,17 @@ export const Config: z<Config> = z.object({
  * picks.
  */
 export function regionStateOf(config: Config, region: WorkBuddyRegion): WorkBuddyRegionState {
-  const regions = unwrapVolatile(config.regions)
-  const stored = regions?.[region]
+  // THROUGH `regionsMapOf`, not a bare lookup. The field is written by older
+  // builds in a shape that buries the real region map one level down (the
+  // "restart reset" report: the pool and the model selection looked unsaved
+  // after every restart), and this one-level read is what turned that wreckage
+  // into "the pool was never configured" — the Host's answer decides the pool
+  // switch, the member list, the model selection and the directory.
+  // `regionsMapOf` narrows the field, drops the sibling-field copies and
+  // recovers a region that only survives deeper, so an already-corrupted
+  // profile reads correctly BEFORE the repair write has cleaned it.
+  const regions = regionsMapOf(config.regions)
+  const stored = regions[region]
   // `null` counts as "no slot", exactly like `undefined`. schemastery's
   // `simplify()` serialises an EMPTY region slot as `null` (`{cn:{}}` →
   // `{cn:null}`), and a `null` reaching the return value makes every caller
@@ -1197,7 +1214,17 @@ export function apply(ctx: Context, config: Config): void {
     // The fingerprint compares what MATTERS (ids, capability fields), so a
     // directory that differs only in a load level or a promo badge is not
     // rewritten — those are not persisted anyway.
-    if (catalogFingerprint(repaired) === catalogFingerprint(saved)) return
+    //
+    // A CORRUPTED FIELD IS WRITTEN EVEN WHEN THE DIRECTORY AGREES (the "restart
+    // reset" report). The repair is also the only writer that replaces the whole
+    // `regions` field with a freshly merged map, so it is the one place that can
+    // clean out the sibling-field copies an older build wrote in. Gating that on
+    // the model directory alone would leave every in-agreement profile dirty
+    // forever — which is precisely the shape that made the pool look unsaved,
+    // outliving the fix that stopped producing it. One write per corrupted
+    // profile: after it lands, the field is clean and this branch stops firing.
+    const directoryDiffers = catalogFingerprint(repaired) !== catalogFingerprint(saved)
+    if (!directoryDiffers && !regionsFieldIsCorrupt(current().regions)) return
     try {
       await writeRegionCatalog(hostSettings(), settingsNs, region, repaired)
     } catch (error: unknown) {
@@ -1219,6 +1246,31 @@ export function apply(ctx: Context, config: Config): void {
    */
   const hostSettings = (): HostSettingsService | undefined =>
     (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as HostSettingsService | undefined
+
+  /**
+   * Clean a `regions` field a previous version corrupted, once, at boot.
+   *
+   * The corruption itself is fixed at the source (`src/catalog-write.ts`) and the
+   * read paths heal in memory, so a dirty profile is CORRECT long before this
+   * runs — but it stays dirty in the file, and the next save would carry the
+   * debris forward. The catalog repair writes the same clean shape, yet it only
+   * runs when a live roster arrives: a disabled region, an unreachable upstream
+   * or an empty answer would leave the wreckage in place for as long as those
+   * conditions hold. This needs no upstream at all.
+   *
+   * FAIL-SOFT, exactly like the repair: the read side is already right, so a
+   * write that cannot land costs tidiness and nothing else.
+   */
+  const healRegionsFieldIfCorrupt = async (): Promise<void> => {
+    try {
+      await healRegionsField(hostSettings(), settingsNs)
+    } catch (error: unknown) {
+      ctx.logger.warn(
+        'dsh-connect-workbuddy: could not clean the shape of the regions setting',
+        error,
+      )
+    }
+  }
 
   /**
    * Legacy migration for the pre-split single `accountId`: its region is
@@ -2858,6 +2910,15 @@ export function apply(ctx: Context, config: Config): void {
       // live sign-in default when nothing is selected yet).
       if (stopped) return
 
+      // Heal the FIELD before anything depends on the other write paths: the
+      // catalog repair below also cleans it, but only after a live roster lands
+      // (so never for a disabled region, an offline start, or an empty answer).
+      // The boot does not wait for it — the write only changes the file's shape,
+      // and the read side is already healed in memory — but the repair below
+      // DOES await it, because two full-field writers racing could otherwise
+      // land the older directory last and undo the repair for this boot.
+      const regionsFieldHealed = healRegionsFieldIfCorrupt()
+
       for (const region of REGION_KEYS) {
         // A switched-off region is skipped entirely: its route is withdrawn, so
         // the request would be pure waste — and skipping it is also what keeps a
@@ -2897,6 +2958,12 @@ export function apply(ctx: Context, config: Config): void {
             // directory is healed against the roster that just landed. The
             // repair writes only when the fingerprint differs, so a profile
             // already in agreement is never touched.
+            //
+            // The shape heal goes first, so the directory this describes is the
+            // CLEANED one: the repair reads the field through `describe()` right
+            // before writing, and awaiting here is what keeps the two writers
+            // from landing out of order.
+            await regionsFieldHealed
             await repairRegionCatalog(region, models)
           } catch (error: unknown) {
             ctx.logger.warn(

@@ -12,6 +12,8 @@
  * each component sorting however it likes — is exactly what drifted.
  */
 
+import { regionsMapOf } from '../status-paths.ts'
+
 /**
  * The saved manual order out of a settings snapshot, or an empty array.
  *
@@ -20,15 +22,22 @@
  * `orderAccountIds` may be anything at all. Every shape that is not a list of
  * strings means "no manual order", which is also an older profile's spelling —
  * never a crash.
+ *
+ * The map comes from `regionsMapOf` rather than a bare `value.regions` lookup:
+ * it accepts the section OR the field and heals a field an older build
+ * corrupted (the "restart reset" report). That is not cosmetic here — on the
+ * measured profile the INTERNATIONAL slot survived only one level down, so a
+ * direct lookup reported "no manual order" for the region whose order the user
+ * had actually saved, and the credit panel listed those accounts in the Host's
+ * order instead.
  */
 export function readOrderAccountIds(
   value: unknown,
   region: string | undefined,
 ): readonly string[] {
   if (region === undefined) return []
-  const regions = (value as { regions?: unknown } | null | undefined)?.regions
-  if (typeof regions !== 'object' || regions === null) return []
-  const slot = (regions as Record<string, unknown>)[region]
+  const regions = regionsMapOf(value)
+  const slot = regions[region]
   if (typeof slot !== 'object' || slot === null) return []
   const order = (slot as { pool?: unknown }).pool
   if (typeof order !== 'object' || order === null) return []

@@ -17,7 +17,7 @@
  * @module dsh-connect-workbuddy/client/account-selection
  */
 
-import { nextRegionModels, nextRegionPool, unwrapVolatileDeep } from '../status-paths.ts'
+import { nextRegionModels, nextRegionPool, regionsMapOf, unwrapVolatileDeep } from '../status-paths.ts'
 import type { WorkBuddyWebRegion, WorkBuddyCreditPosition } from '../status-paths.ts'
 
 /**
@@ -101,9 +101,15 @@ function fieldSnapshotOf(
   scope: WorkBuddyAccountScope,
   field: 'accounts' | 'regions',
 ): Record<string, unknown> {
-  const value = unwrapVolatileDeep(
-    (scope.getSnapshot().value as Record<string, unknown> | undefined)?.[field],
-  )
+  const stored = (scope.getSnapshot().value as Record<string, unknown> | undefined)?.[field]
+  // `regions` is narrowed (and healed) by the shared helper rather than unwrapped
+  // here: a field written by an older build carries sibling-field copies and the
+  // real region map one level down, and spreading THAT as a write base would
+  // carry the wreckage into every save forever (the "restart reset" report).
+  // `accounts` is a flat id map with no such history, so it only needs the
+  // unwrap.
+  if (field === 'regions') return regionsMapOf(stored)
+  const value = unwrapVolatileDeep(stored)
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 }
 

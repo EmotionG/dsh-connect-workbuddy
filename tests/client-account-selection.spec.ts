@@ -367,6 +367,32 @@ describe('writePoolPreferences', () => {
     await expect(writePoolPreferences(scope, 'cn', { ...PREFERENCES, probeInputTokens: 100_000 }))
       .rejects.toBeInstanceOf(WorkBuddySettingsWriteError)
   })
+
+  it('heals a corrupted `regions` field instead of spreading its wreckage', async () => {
+    // The "restart reset" report. The browser mirror holds whatever the Host document holds, so
+    // a profile written by the buggy catalog repair arrives here as a field with
+    // `accounts` / `cliBridge` copies beside a nested `regions` map. Using that
+    // as the write base put the copies straight back into every save — the
+    // document could never get clean, even after the writer was fixed.
+    const { scope, document } = scopeWith({
+      regions: {
+        accounts: { enabled: true },
+        regions: { global: { pool: { enabled: true, memberAccountIds: ['g1'] } } },
+        cliBridge: { enabled: false },
+        cn: { lastCatalog: [{ id: 'm' }] },
+      },
+    })
+    await writePoolPreferences(scope, 'cn', { ...PREFERENCES })
+    const regions = document()['regions'] as Record<string, Record<string, unknown>>
+    expect(Object.keys(regions).sort()).toEqual(['cn', 'global'])
+    expect(regions['accounts']).toBeUndefined()
+    expect(regions['cliBridge']).toBeUndefined()
+    expect(regions['regions']).toBeUndefined()
+    // The write itself still landed, and the buried sibling region survived it.
+    expect(regions['cn']?.['pool']).toEqual({ ...PREFERENCES })
+    expect(regions['cn']?.['lastCatalog']).toEqual([{ id: 'm' }])
+    expect(regions['global']).toEqual({ pool: { enabled: true, memberAccountIds: ['g1'] } })
+  })
 })
 
 /**
