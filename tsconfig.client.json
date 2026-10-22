@@ -17,6 +17,7 @@
   },
   "include": [
     "src/client",
+    "src/dsh-llm-augment.d.ts",
     "tests/pool-render-helpers.tsx",
     "tests/pool-render.spec.tsx",
     "tests/pool-card-render.spec.tsx",
