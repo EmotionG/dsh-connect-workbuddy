@@ -57,8 +57,9 @@ describe('the load badge as a character (the DSH model picker)', () => {
   it('uses ONE character per level, because the name is a plain string', () => {
     // The picker renders `name` verbatim: no image slot, no markup. A word made
     // the row read as a sentence; a character reads as a badge.
-    expect(busySymbol('congested')).toBe('👥')
-    expect(busySymbol('busy')).toBe('🧍')
+    // ONE shape, repeated: the COUNT is what says "congested".
+    expect(busySymbol('congested')).toBe('🧍🧍🧍')
+    expect(busySymbol('busy')).toBe('🧍🧍')
     expect(busySymbol('unavailable')).toBe('🚫')
   })
 
@@ -70,7 +71,8 @@ describe('the load badge as a character (the DSH model picker)', () => {
   })
 
   it('appends the character to the RIGHT of the name', () => {
-    expect(busyDisplaySuffix('congested')).toBe(' 👥')
+    expect(busyDisplaySuffix('congested')).toBe(' 🧍🧍🧍')
+    expect(busyDisplaySuffix('busy')).toBe(' 🧍🧍')
     expect(busyDisplaySuffix('idle')).toBe('')
     expect(busyDisplaySuffix('normal')).toBe('')
     expect(busyDisplaySuffix(undefined)).toBe('')

@@ -110,13 +110,14 @@ describe('busyLabel / busyDisplaySuffix', () => {
     // character — the word made the row read as a sentence, and the picker's
     // rows are narrow. The card, which renders itself, uses the SVG icons
     // instead (`src/client/busy-icon.tsx`).
-    expect(busyDisplaySuffix('congested')).toBe(' 👥')
-    expect(busyDisplaySuffix('busy')).toBe(' 🧍')
+    // ONE person shape, repeated: the COUNT says how congested it is.
+    expect(busyDisplaySuffix('congested')).toBe(' 🧍🧍🧍')
+    expect(busyDisplaySuffix('busy')).toBe(' 🧍🧍')
     expect(busyDisplaySuffix('unavailable')).toBe(' 🚫')
     // The locale argument no longer changes the picker's mark: there is no
     // word left in it. It stays in the signature because the card still asks
     // `busyLabel` for its tooltip.
-    expect(busyDisplaySuffix('busy', 'en')).toBe(' 🧍')
+    expect(busyDisplaySuffix('busy', 'en')).toBe(' 🧍🧍')
   })
 
   it('keeps the WORD available for the card, which can render a tooltip', () => {

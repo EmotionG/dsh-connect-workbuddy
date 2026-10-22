@@ -92,6 +92,20 @@ describe('the load-level icon in the card', () => {
     expect(drawn[0]?.closest('.dsm-workbuddy-model')?.textContent).toContain('Model A')
   })
 
+  it('draws ONE shape, and lets the COUNT say how congested it is', async () => {
+    // The whole point of the icon language: a single person, repeated. Two
+    // people means a queue has formed; three means it is congested. A second
+    // SHAPE per level would have to be learned; a count is read instantly.
+    const m = await render({ 'model-a': 'busy', 'model-b': 'congested' })
+    const drawn = icons(m.container)
+    const peopleIn = (icon: HTMLElement | undefined): number =>
+      icon?.querySelectorAll('g').length ?? 0
+    const busy = drawn.find(icon => icon.className.includes('dsm-workbuddy-busy-busy'))
+    const congested = drawn.find(icon => icon.className.includes('dsm-workbuddy-busy-congested'))
+    expect(peopleIn(busy)).toBe(2)
+    expect(peopleIn(congested)).toBe(3)
+  })
+
   it('keeps the word reachable, in the tooltip', async () => {
     const m = await render({ 'model-a': 'congested' })
     // The picture saves room; the title keeps the level readable. The wording

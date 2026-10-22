@@ -182,8 +182,9 @@ export function busyIcon(level: WorkBuddyBusyLevel | undefined): WorkBuddyBusyIc
  */
 export function busySymbol(level: WorkBuddyBusyLevel | undefined): string {
   switch (level) {
-    case 'congested': return '👥'
-    case 'busy': return '🧍'
+    // The same person repeated: ONE shape, and the COUNT carries the meaning.
+    case 'congested': return '🧍🧍🧍'
+    case 'busy': return '🧍🧍'
     case 'unavailable': return '🚫'
     default: return ''
   }
