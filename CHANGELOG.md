@@ -11,11 +11,23 @@
   - **为什么这不算伪造签名**：`foreignAssistant()` 造的 thinking 块**没有 `thinkingSignature`**，而 pi-ai 的请求组装只有存在签名时才会写 `reasoning_content`，所以该块根本不会进请求——与现在一样不发，只是不再变成可见正文。另外 `api` 只取自 `model.api`（请求组装全文不读消息自带的 `api`），改它不改变线上形状。
   - 真正的换模型仍然降级：`isSameModel` 还要求 model id 相等（有测试钉住）。
 
+- **（#108）输入框积分面板的失败原因被截断成半句话** —— 截图里那一行是「✗ 网关拦的是提示词本身，不是这个账号—」，到破折号就没了，它要解释的那半句永远看不到。
+  - 两个原因叠在一起，**缺一个都还能复现**：
+    1. **文案选错了**：面板那一行按设计是**短标签**（`availabilityMark` 的注释写明 "the SHORT form of the same fact"），但它取的是 `outcomeText()`，而 `channel-rejected` 在那里返回 `row.probeChannelRejected` —— **一段 88 字（中文）/ 179 字（英文）的解释**，本来是给账号池卡片那一列宽地方写的。面板这一列实际只有约 180px。
+    2. **CSS 是硬切不是省略**：面板的 switch 给账号名设了 `white-space:nowrap` + `overflow:hidden`（名字必须单行加省略号），而原因那一行**继承了这两条**。于是溢出部分被**直接切掉**，连省略号都没有 —— 硬切不带任何「后面还有」的信号，所以读起来像渲染坏了，而不是像被截断。
+  - 修法分两层：
+    - 新增 `outcomeMarkText()`：面板这一栏拿**结论**（`✗ 网关拦的是提示词`，新增 `row.probeChannelRejectedShort`），完整解释一个字不删 —— 它仍在行的 `title` 里（`availabilityLine`，含绝对时刻），也仍在账号池卡片上。一句话：**解释没有消失，只是不再挤在放不下它的那一格**。
+    - `.dsm-workbuddy-composer-panel-mark` 显式 `white-space:normal` + `overflow-wrap:anywhere`。这条针对**根因**：这一行是本行里唯一长度不受布局控制的文字（译文，两种语言相差 2 倍），所以它该**换行**而不是被切 —— 多一行是能读的结果，切断半个字不是。
+  - 同栏另外两个偏长的结论（`credential-rejected` 39 字、`unavailable` 19 字）现在会正常折行，不再被切。
+
 ### Tests
 
 - `tests/issue59-cross-region-thinking.spec.ts`：原「rewrites ONLY provider — api and model are untouched」用例改写为「只修宿主回退 api，原生 api 逐字节不动」。
 - 新增 2 条：宿主真实形状（`api:'dsh-foreign'` + 无签名 thinking）能保住 thinking（修复前必红）；provider 已对齐时 `dsh-foreign` 仍被单独修好（防止两个字段的修复互相短路）。
 - 已验证：撤回 `src/adapter.ts` 的改动后，新增用例立刻转红（2 failed / 12 passed）。
+- `tests/composer-credits-render.spec.tsx`（+3 条，`issue #108` 分节）：用**真实中文 locale**（不是回显 key 的桩）断言面板打印的是 `✗ 网关拦的是提示词` 且长度 < 20；完整解释仍在行 `title` 里（含「第三方 agent 过滤」）；样式表里 mark 一栏必须 `white-space:normal` + `overflow-wrap:anywhere`。
+- 变异验证：撤回 `account-state.ts` + `styles.ts` 的改动 → 2 条立刻转红；单独把 locale 里的长文案改短（模拟「删掉解释」）→ 第 2 条转红。三条都真的在守卫，不是空转。
+- 全量：**111 文件通过 / 1 跳过；1817 通过 / 2 跳过**；两个 tsconfig 均 exit 0；build 成功。
 
 ## 5.2.3 (2026-10-22)
 

@@ -48,6 +48,31 @@ export function outcomeOk(outcome: WorkBuddyWebProbeOutcome): boolean {
   return outcome === 'ok'
 }
 
+/**
+ * The MARK form of one probe outcome: the verdict alone, for a slot that cannot
+ * hold an explanation (issue #108).
+ *
+ * `outcomeText` is the right function wherever the reader has room — the pool
+ * card's probe column, the test log — and there the extra sentence earns its
+ * width. The composer panel is a different slot: one line, beside an account
+ * name, in a column about 180 px wide. `row.probeChannelRejected` is 88
+ * characters in Chinese and 179 in English, so it could never fit; with
+ * `nowrap` + `overflow:hidden` on the row it was cut mid-sentence, which the
+ * reporter read as broken rendering.
+ *
+ * So this function returns the SHORT label where one is declared and falls back
+ * to {@link outcomeText} otherwise. The full sentence is never lost: the row's
+ * `title` carries `availabilityLine`, which keeps every word and the absolute
+ * instant, and the pool card still prints it in full.
+ */
+export function outcomeMarkText(t: Translate, outcome: WorkBuddyWebProbeOutcome): string {
+  switch (outcome) {
+    // The one outcome whose label is an explanation rather than a verdict.
+    case 'channel-rejected': return t('row.probeChannelRejectedShort')
+    default: return outcomeText(t, outcome)
+  }
+}
+
 /** A short, localizable label for one probe outcome. */
 export function outcomeText(t: Translate, outcome: WorkBuddyWebProbeOutcome): string {
   switch (outcome) {
@@ -179,15 +204,15 @@ export function availabilityMark(
       // nothing left to wait for.
       const left = remainingText(t, probe.retryAtMs, nowMs)
       return left === ''
-        ? outcomeText(t, probe.outcome)
-        : `${outcomeText(t, probe.outcome)} · ${left}`
+        ? outcomeMarkText(t, probe.outcome)
+        : `${outcomeMarkText(t, probe.outcome)} · ${left}`
     }
     if (probe.outcome === 'rate-limited'
       || probe.outcome === 'model-busy'
       || probe.outcome === 'out-of-credit') {
-      return `${outcomeText(t, probe.outcome)} · ${t('row.poolRetryUnknown')}`
+      return `${outcomeMarkText(t, probe.outcome)} · ${t('row.poolRetryUnknown')}`
     }
-    return outcomeText(t, probe.outcome)
+    return outcomeMarkText(t, probe.outcome)
   }
   if (account.excludedBy !== undefined) return exclusionLabel(t, account.excludedBy)
   return undefined

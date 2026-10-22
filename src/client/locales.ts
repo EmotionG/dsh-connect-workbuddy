@@ -173,6 +173,9 @@ export const en = {
   'row.probeCredentialRejected': '✗ WorkBuddy refused this account\'s token — sign in again or pick another account',
   'row.probePolicyRejected': '✗ WorkBuddy\'s server refused this request under its content policy — re-signing in won\'t help; try the desktop app or another region/account',
   'row.probeChannelRejected': '✗ The gateway refused the PROMPT itself, not this account — the opening of a system message matched its third-party-agent filter, so another account or region answers the same way',
+  // Short form for the composer panel's one-line mark (issue #108); see the
+  // Chinese entry for why the long label cannot live there.
+  'row.probeChannelRejectedShort': '✗ Gateway refused the prompt',
   'row.probeNotFound': '✗ The upstream does not know this model',
   'row.probeUnavailable': '✗ The upstream could not be reached — no usable answer came back',
   'row.probeFailed': '✗ Test failed',
@@ -627,6 +630,15 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // same reason. (The `**` style IS used elsewhere — but only in strings that
   // go into a `title=` tooltip, where the host renders markdown.)
   'row.probeChannelRejected': '✗ 网关拦的是提示词本身，不是这个账号——某条 system 消息的开头命中了它的第三方 agent 过滤，换账号或换区域都会得到同一个答案（测试能过、聊天被拒，正是这个原因）',
+  // THE SHORT FORM of the same verdict, for the composer panel's one-line mark
+  // (issue #108). The full label above is an EXPLANATION — 88 characters in
+  // Chinese, 179 in English — and the panel prints it beside an account name in
+  // a column roughly 180 px wide. It cannot fit there by construction, so it was
+  // clipped mid-sentence by `nowrap` + `overflow:hidden`, which reads as a
+  // rendering bug rather than as "there is more to this". The panel gets the
+  // VERDICT; the full sentence stays one hover away in the row's `title` (which
+  // carries `availabilityLine`, not this) and on the pool card, which has room.
+  'row.probeChannelRejectedShort': '✗ 网关拦的是提示词',
   'row.probeNotFound': '✗ 上游不认识这个模型',
   'row.probeUnavailable': '✗ 连不上上游——上游没有给出可用答复',
   'row.probeFailed': '✗ 测试失败',
