@@ -31,6 +31,30 @@ const DAY_MS = 24 * HOUR_MS
 const DAYS_AT_MS = 2 * DAY_MS
 
 /**
+ * The recovery form of the same duration: "约 2 小时后恢复".
+ *
+ * The bare duration answers "how long?", but beside a red dot on an account row
+ * it left the most important half unsaid: what happens when it elapses. "约 2
+ * 小时后" reads equally well as "the limit lifts" and as "it expires into
+ * something else", and on a row whose whole job is to say whether the account
+ * can serve, that ambiguity is the question the reader came with.
+ *
+ * Same numbers, same rounding, same empty-string contract as
+ * {@link remainingText} — this only appends the verb. Kept as a separate
+ * function rather than a parameter so the two callers that must stay verbless
+ * (the card's "之后可再用" sentence, which already contains its own verb) cannot
+ * accidentally grow a second one.
+ */
+export function recoversInText(t: Translate, untilMs: number, nowMs: number): string {
+  const left = untilMs - nowMs
+  if (left <= 0) return ''
+  if (left < MINUTE_MS) return t('row.recoversImminent')
+  if (left < HOUR_MS) return t('row.recoversMinutes', { count: Math.round(left / MINUTE_MS) })
+  if (left < DAYS_AT_MS) return t('row.recoversHours', { count: Math.round(left / HOUR_MS) })
+  return t('row.recoversDays', { count: Math.round(left / DAY_MS) })
+}
+
+/**
  * A short "约 N 分钟后 / 约 N 小时后 / 约 N 天后", or `''` once the moment passed.
  *
  * The empty string is the contract callers depend on: an elapsed cooldown means

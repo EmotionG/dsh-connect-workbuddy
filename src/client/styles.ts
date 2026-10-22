@@ -855,9 +855,20 @@ export const WORKBUDDY_COMPOSER_CSS = `
 .dsm-workbuddy-composer-panel-mark{
   display:flex;flex-wrap:wrap;align-items:baseline;
   font-size:11px;line-height:15px;
+  /* WRAP, do not clip (issue #108). The switch above sets white-space:nowrap
+     and overflow:hidden for the NAME, which must stay on one line and ellipsise.
+     Inherited here, those two rules cut the reason mark mid-sentence with no
+     ellipsis at all — the reporter saw "…不是这个账号—" and read it as broken
+     rendering, because a hard cut carries no signal that more exists. The mark
+     is the one part of this row whose length is NOT under the layout's control
+     (it is a translated sentence, and the two locales differ by 2x), so it
+     wraps instead: an extra line is a legible outcome, a severed stroke is not.
+     overflow-wrap:anywhere because Chinese has no spaces to break at. */
+  white-space:normal;
+  overflow-wrap:anywhere;
 }
 .dsm-workbuddy-composer-panel-mark-current{color:var(--dsw-alias-state-success-primary,#22a06b)}
-.dsm-workbuddy-composer-panel-mark-reason{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.dsm-workbuddy-composer-panel-mark-reason{color:var(--dsw-alias-state-warn-primary,#f59e0b);min-width:0}
 .dsm-workbuddy-composer-panel-mark-current+.dsm-workbuddy-composer-panel-mark-reason::before{
   content:" · ";color:var(--dsw-alias-label-dimmed,rgba(127,127,127,.6));
 }

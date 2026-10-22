@@ -307,12 +307,11 @@ describe('issue #102: alignAssistantIdentities boundaries', () => {
     expect(alignAssistantIdentities(context, WORKBUDDY_MODEL_IDENTITY)).toBe(context)
   })
 
-  it('rewrites ONLY provider — api and model are untouched', async () => {
+  it('repairs ONLY the host fallback api — a native api is left byte-identical', async () => {
     const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
-    // `api` is deliberately left alone: a `dsh-foreign` message carries an api
-    // this plugin never sends, and claiming `openai-completions` for it would
-    // assert a wire shape that message was never built for. The provider
-    // mismatch is what decides the downgrade; fixing that is enough.
+    // `api` is repaired only when it carries the HOST's own fallback marker. A
+    // message already in this plugin's real wire shape must come back untouched:
+    // rewriting it would claim a shape that message was never built for.
     const original = assistantWithThinking('workbuddy-global', 'hy3', 'x') as Record<string, unknown>
     const out = alignAssistantIdentities({ messages: [original] } as never, WORKBUDDY_MODEL_IDENTITY)
     const rewritten = (out.messages as unknown as Record<string, unknown>[])[0]
@@ -320,6 +319,53 @@ describe('issue #102: alignAssistantIdentities boundaries', () => {
     expect(rewritten?.['api']).toBe('openai-completions')
     expect(rewritten?.['model']).toBe('hy3')
     // And nothing else moved: the same chunk count, the same text.
+    expect(blockTypes(out.messages)).toEqual(['thinking', 'text'])
+  })
+
+  it('KEEPS the thinking block for the shape the host actually replays (issue #102, second half)', async () => {
+    // THE CASE 5.2.3 STILL MISSED. `dsh-llm-pi-ai` does not hand pi-ai the
+    // message's recorded api: `replayedAssistant` rejects a provider mismatch
+    // and falls back to `foreignAssistant()`, which stamps `api:'dsh-foreign'`
+    // and `provider: source.provider` (the ROUTE id). So a global transcript is
+    // not merely provider-mismatched — it also carries an api this plugin never
+    // sends, and `isSameModel` fails on BOTH comparisons.
+    //
+    // Measured on a real 0.2.1-rc.2 global session: aligning `provider` alone
+    // still flattened a 1514-character thinking block into 1514 characters of
+    // assistant TEXT, which is exactly the reported symptom (working notes in
+    // the answer channel, reasoning row collapsed to one character).
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    const foreign = {
+      ...(assistantWithThinking('workbuddy-global', 'hy3', 'why I did that') as Record<string, unknown>),
+      api: 'dsh-foreign',
+      content: [
+        // `foreignAssistant()` builds thinking blocks with NO signature.
+        { type: 'thinking', thinking: 'why I did that' },
+        { type: 'text', text: 'here is the answer' },
+      ],
+    }
+    const aligned = alignAssistantIdentities({ messages: [foreign] } as never, WORKBUDDY_MODEL_IDENTITY)
+    const transformed = transformMessages(
+      aligned.messages as never,
+      requestModel(WORKBUDDY_MODEL_IDENTITY) as never,
+    )
+    expect(blockTypes(transformed)).toEqual(['thinking', 'text'])
+    const first = (transformed as { content: { thinking?: string }[] }[])[0]
+    expect(first?.content[0]?.thinking).toBe('why I did that')
+  })
+
+  it('repairs the foreign api even when the provider already matches', async () => {
+    // The repair is two independent fields: an already-aligned provider must not
+    // short-circuit the api fix, and a foreign api must not drag the provider
+    // anywhere on its own.
+    const { WORKBUDDY_MODEL_IDENTITY, alignAssistantIdentities } = await import('../src/adapter.ts')
+    const context = {
+      messages: [{ ...(assistantWithThinking(WORKBUDDY_MODEL_IDENTITY, 'hy3', 'x') as Record<string, unknown>), api: 'dsh-foreign' }],
+    } as never
+    const out = alignAssistantIdentities(context, WORKBUDDY_MODEL_IDENTITY)
+    const rewritten = (out.messages as unknown as Record<string, unknown>[])[0]
+    expect(rewritten?.['provider']).toBe(WORKBUDDY_MODEL_IDENTITY)
+    expect(rewritten?.['api']).toBe('openai-completions')
     expect(blockTypes(out.messages)).toEqual(['thinking', 'text'])
   })
 

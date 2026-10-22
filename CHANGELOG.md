@@ -31,6 +31,31 @@
 - **论证改成事实。** 初版与 README 都写「跟网关说话的那个进程真的是登录着的 CodeBuddy CLI，没有身份要伪造，所以伪装那条路被封时它还能用」。实际上代码是用 `CODEBUDDY_AUTH_TOKEN` 把 plugin vault 里的**同一个 WorkBuddy 账号**交给 CLI，身份没变，`11140` 是账号级的 —— 逃掉的只有客户端指纹层。README / 顶部注释 / CHANGELOG 现在都这么写，不再把它当「封号之后的免死金牌」。
 - **`scratchDir()` 的固定共享目录只作为 `allow_unattended` 的最后一档**，不再是默认出路；`allowUnattended` 仍然默认 `false`。
 
+- **`killTree()` 不再把 `pid ≤ 1` 当进程组 —— 这条测试曾经会把评审者的整个登录会话打死。** 原来只挡 `pid === undefined`，而 `process.kill(-pid)` 拿到的 `pid` 一旦是 `1`（测试里为了区分两个假子进程写的 `fakeChild(1)`）就退化成 `kill(-1)`：不是杀子进程树，而是**给当前用户能 signal 的所有进程发 SIGTERM**，一秒后还升级成 SIGKILL。实测（macOS）跑 `vitest run tests/cli-bridge-runner.spec.ts` 会让 launchd 记录 `node[<pid>]` 向 Finder / Dock / WindowManager / ControlCenter / 用户正开着的微信 / DSH 宿主同时发 SIGTERM；DSH 的 renderer 作为受害者退出后又被 `DesktopFatalRecovery` relaunch，用户视角就是「DSH 反复重启，还把微信一起关了」。现在 group-kill 只对 `Number.isInteger(pid) && pid > 1` 开放，其余退化成单进程 `child.kill()`；测试里的假 pid 从 `1/2` 改成 `51_001/51_002`，并新增回归用例（spy `process.kill`，断言永不出现非正数信号目标）。
+
+### Fixes（同期并入 main：issue #102 / #108）
+
+- **#102 没修完：`dsh-foreign` 的历史消息仍然把思考摊平成正文** —— 5.2.3 的 `alignAssistantIdentities()` 只改 `provider`，但 DSH 交给 pi-ai 的这条消息**根本到不了 provider 比较那一步之前就换了 api**。
+  - 真实链路：`dsh-llm-pi-ai` 的 `replayedAssistant()` 发现 `state.response.provider !== source.provider`（`workbuddy` vs `workbuddy-global`）就判定 replay 无效，改走 `foreignAssistant()`，而它把 `api` 写成 `dsh-foreign`、`provider` 取 `source.provider`（路由名）。于是 `isSameModel` 的两条比较**同时**失败；只补 `provider` 之后 `api` 仍然不等，thinking 照样被降级成 `text`。
+  - 实测（DSH 0.2.1-rc.2 + 本插件 5.2.3，真实 global 会话）：只改 `provider` 时，一条 1514 字符的 thinking 块变成 1514 字符的**正文**；两个字段都修后恢复成 `thinking`。
+  - 修法：`alignAssistantIdentities()` 在改 `provider` 之外，**仅当 `api === 'dsh-foreign'`**（宿主回退标记，插件自己从不会发这个值）时把它改回 `openai-completions`；其他任何 api 原样保留。
+  - **为什么这不算伪造签名**：`foreignAssistant()` 造的 thinking 块**没有 `thinkingSignature`**，而 pi-ai 的请求组装只有存在签名时才会写 `reasoning_content`，所以该块根本不会进请求——与现在一样不发，只是不再变成可见正文。另外 `api` 只取自 `model.api`（请求组装全文不读消息自带的 `api`），改它不改变线上形状。
+  - 真正的换模型仍然降级：`isSameModel` 还要求 model id 相等（有测试钉住）。
+
+- **（#108）输入框积分面板的失败原因被截断成半句话** —— 截图里那一行是「✗ 网关拦的是提示词本身，不是这个账号—」，到破折号就没了，它要解释的那半句永远看不到。
+  - 两个原因叠在一起，**缺一个都还能复现**：
+    1. **文案选错了**：面板那一行按设计是**短标签**（`availabilityMark` 的注释写明 "the SHORT form of the same fact"），但它取的是 `outcomeText()`，而 `channel-rejected` 在那里返回 `row.probeChannelRejected` —— **一段 88 字（中文）/ 179 字（英文）的解释**，本来是给账号池卡片那一列宽地方写的。面板这一列实际只有约 180px。
+    2. **CSS 是硬切不是省略**：面板的 switch 给账号名设了 `white-space:nowrap` + `overflow:hidden`（名字必须单行加省略号），而原因那一行**继承了这两条**。于是溢出部分被**直接切掉**，连省略号都没有 —— 硬切不带任何「后面还有」的信号，所以读起来像渲染坏了，而不是像被截断。
+  - 修法分两层：
+    - 新增 `outcomeMarkText()`：面板这一栏拿**结论**（`✗ 网关拦的是提示词`，新增 `row.probeChannelRejectedShort`），完整解释一个字不删 —— 它仍在行的 `title` 里（`availabilityLine`，含绝对时刻），也仍在账号池卡片上。一句话：**解释没有消失，只是不再挤在放不下它的那一格**。
+    - `.dsm-workbuddy-composer-panel-mark` 显式 `white-space:normal` + `overflow-wrap:anywhere`。这条针对**根因**：这一行是本行里唯一长度不受布局控制的文字（译文，两种语言相差 2 倍），所以它该**换行**而不是被切 —— 多一行是能读的结果，切断半个字不是。
+  - 同栏另外两个偏长的结论（`credential-rejected` 39 字、`unavailable` 19 字）现在会正常折行，不再被切。
+
+- **（#108 后续）「被限流 · 约 2 小时后」补成「……后恢复」** —— 只有时长、没有动词，读者还得自己猜这两小时后会发生什么；而这一行整行的职责就是回答「这个账号现在能不能用」。
+  - 新增 `recoversInText()`（`src/client/remaining.ts`）与四个 `row.recovers*` 键，**数字、取整、空串契约与 `remainingText()` 完全一致**，只多一个动词：`约 2 小时后恢复` / `约 25 分钟后恢复` / `约 3 天后恢复` / `即将恢复`；英文 `recovers in about 2 h`。
+  - **只改面板，不改账号池卡片**，这是有意为之：卡片那句自带动词（`✗ 被限流 · 10/22, 14:47 之后可再用`），再叠「恢复」就成了 `之后可再用 · 约 2 小时后恢复`，一句话说两遍。所以两个函数并存，而不是给 `remainingText()` 加参数 —— 加了参数，那两个自带动词的调用点迟早会多长出一个。
+  - 随之调整了一条既有的跨界面契约用例：它原本断言两边「同一个 key 名逐字相同」，现在断言**同一测量算出同一个时长与取整**（把 `row.recovers*` 映射成 `row.remaining*` 后比对）。这才是那个测试真正要守的不变量：两面不会对「还剩多久」给出两个答案。
+
 ### Tests
 
 - 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（16 条），共 **85 条**。
@@ -43,6 +68,18 @@
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
 - 全量：**114 文件 / 1899 条通过**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 444.40 kB）。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
+
+### Tests（同期并入 main：issue #102 / #108）
+
+- `tests/issue59-cross-region-thinking.spec.ts`：原「rewrites ONLY provider — api and model are untouched」用例改写为「只修宿主回退 api，原生 api 逐字节不动」。
+- 新增 2 条：宿主真实形状（`api:'dsh-foreign'` + 无签名 thinking）能保住 thinking（修复前必红）；provider 已对齐时 `dsh-foreign` 仍被单独修好（防止两个字段的修复互相短路）。
+- 已验证：撤回 `src/adapter.ts` 的改动后，新增用例立刻转红（2 failed / 12 passed）。
+- `tests/composer-credits-render.spec.tsx`（+3 条，`issue #108` 分节）：用**真实中文 locale**（不是回显 key 的桩）断言面板打印的是 `✗ 网关拦的是提示词` 且长度 < 20；完整解释仍在行 `title` 里（含「第三方 agent 过滤」）；样式表里 mark 一栏必须 `white-space:normal` + `overflow-wrap:anywhere`。
+- 变异验证：撤回 `account-state.ts` + `styles.ts` 的改动 → 2 条立刻转红；单独把 locale 里的长文案改短（模拟「删掉解释」）→ 第 2 条转红。三条都真的在守卫，不是空转。
+- 全量：**111 文件通过 / 1 跳过；1819 通过 / 2 跳过**；两个 tsconfig 均 exit 0；build 成功。
+- `tests/remaining.spec.tsx`（+2 条）：`recoversInText()` 与 `remainingText()` 对同一批时刻给出**相同数字与单位**（只差前缀）；过去时刻返回空串。
+- `tests/composer-credits-render.spec.tsx`：`WAIT` 正则改指 `row.recovers*`；跨界面契约用例改为比较「时长」而非「key 名」，并注明卡片为何不该加「恢复」。
+- 变异验证：把 `availabilityMark` 里的 `recoversInText` 换回 `remainingText` → 上述 2 条立刻转红。
 
 ## 5.2.3 (2026-10-22)
 

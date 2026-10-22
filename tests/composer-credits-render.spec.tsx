@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ComposerCredits } from '../src/client/ComposerCredits.tsx'
 import { WORKBUDDY_COMPOSER_CSS } from '../src/client/styles.ts'
 import { mount, stubFetch, t } from './pool-render-helpers.tsx'
+import type { Mounted } from './pool-render-helpers.tsx'
+import { zh } from '../src/client/locales.ts'
 import { AccountPool } from '../src/client/AccountPool.tsx'
 
 afterEach(() => { vi.unstubAllGlobals() })
@@ -513,16 +515,17 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
       ?.querySelector('.dsm-workbuddy-composer-panel-dot') ?? undefined
 
   it('prints the reason and the wait, but not the absolute instant', async () => {
-    // The owner's request, on this panel only: "被限流 · 约 6 小时后" stays, the
-    // "10/19, 01:32 之后可再用" in the middle goes. The wait answers the question
-    // a limited row raises ("how long?"); the date is the part nobody acts on,
-    // and in this column it read like a log line wrapped in a sentence.
+    // The owner's request, on this panel only: "被限流 · 约 6 小时后恢复" stays,
+    // the "10/19, 01:32 之后可再用" in the middle goes. The wait answers the
+    // question a limited row raises ("how long until it comes back?"); the date
+    // is the part nobody acts on, and in this column it read like a log line
+    // wrapped in a sentence.
     const m = await openPanel(poolUsage)
     const mark = markOf('A Two')
     expect(mark).toBeDefined()
     expect(mark).toContain('row.poolExcludedRateLimited')
     expect(mark, 'the reset instant must no longer be printed here').not.toContain('row.poolRetryAt')
-    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    const WAIT = /row\.recovers(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
     expect(WAIT.test(mark ?? ''), 'the wait must survive').toBe(true)
     await m.unmount()
   })
@@ -552,7 +555,7 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
     // And the WAIT stays visible. "01:32 之后可再用" alone makes the reader
     // subtract from the clock and does not say whether that is tonight or
     // tomorrow, which is why the visible half keeps the relative wait.
-    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    const WAIT = /row\.recovers(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
     expect(WAIT.test(mark), 'the panel must print how long until it is usable').toBe(true)
 
     // Render the card from the SAME document, then compare the instants. The
@@ -569,9 +572,22 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
       .find(text => text.includes('row.poolExcludedRateLimited')) ?? ''
     const cardAt = INSTANT.exec(cardLine)?.[1]
     expect(cardAt, 'the card must print the same instant').toBe(panelAt)
-    // Same wait, word for word — the suffix is shared, not re-derived.
-    const cardWait = WAIT.exec(cardLine)?.[0]
-    expect(cardWait, 'the card must print the same wait').toBe(WAIT.exec(mark)?.[0])
+    // Same WAIT derived from the same number — but not the same sentence, and
+    // that is deliberate rather than drift.
+    //
+    // The card's sentence already carries its own verb earlier ("{at} 之后可再用"),
+    // so appending "约 2 小时后恢复" there would say it twice in one line:
+    // "10/22, 14:47 之后可再用 · 约 2 小时后恢复". The panel has no such verb —
+    // its line is "被限流 · …" — so it needs one, which is the whole reason
+    // `recoversInText` exists beside `remainingText`.
+    //
+    // What the shared rule must still guarantee is the NUMBER and its rounding:
+    // both surfaces read one instant through one rounding rule, so they can
+    // never disagree about how long is left. Compare those, not the key prefix.
+    const cardNum = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/.exec(cardLine)?.[0]
+    const panelNum = (WAIT.exec(mark)?.[0] ?? '').replace('row.recovers', 'row.remaining')
+    expect(panelNum, 'the panel must state a wait at all').not.toBe('')
+    expect(cardNum, 'the card must state the same wait, from the same instant').toBe(panelNum)
     await card.unmount()
     await m.unmount()
   })
@@ -842,5 +858,102 @@ describe('ComposerCredits panel takes its order from the pool document', () => {
     await m.settle()
     expect(names()).toEqual(['A Two', 'A One'])
     await m.unmount()
+  })
+})
+
+/**
+ * Issue #108: the reason mark must FIT the column it lives in.
+ *
+ * THE REPORT. A CN row read "✗ 网关拦的是提示词本身，不是这个账号—" and stopped,
+ * the clause severed at the panel's right edge with no ellipsis. The issue title
+ * was simply "文字显示不完整".
+ *
+ * TWO CAUSES, and the fix addresses both:
+ *  1. The printed string was `row.probeChannelRejected` — 88 characters of
+ *     Chinese, 179 of English — used as the SHORT mark. It is an EXPLANATION
+ *     written for the pool card's wide probe column; the panel gives it roughly
+ *     180 px beside an account name, where it cannot fit.
+ *  2. The panel's switch sets `white-space:nowrap` + `overflow:hidden` for the
+ *     NAME and the mark inherited both, so the overflow was CUT rather than
+ *     ellipsised. A hard cut carries no signal that anything is missing, which
+ *     is why it read as broken rendering instead of as "truncated".
+ *
+ * WHAT MUST HOLD. The mark is the VERDICT, the full sentence stays one hover
+ * away, and the mark's box is allowed to WRAP — the structural rule that keeps
+ * the next long label from being severed silently.
+ */
+describe('issue #108: a long reason mark must not be clipped mid-sentence', () => {
+  /** One account, channel-rejected — the shape the reporter captured. */
+  const channelRejectedDoc = (): Record<string, unknown> => ({
+    ...usageOf('cn', 1072),
+    pool: {
+      enabled: true,
+      targetModelId: '',
+      checkinSupported: true,
+      modelId: 'deepseek-v4.1-flash',
+      accounts: [{
+        accountId: 'a-1',
+        accountName: 'ISSAC',
+        credits: 1072,
+        current: true,
+        member: true,
+        probe: { outcome: 'channel-rejected', atMs: Date.now() - 60_000, source: 'live-request' },
+      }],
+    },
+  })
+
+  /**
+   * A translator backed by the REAL Chinese strings.
+   *
+   * The shared `t` helper echoes keys, which is right for "which message did the
+   * component choose" and wrong for this issue: the defect WAS the literal
+   * length of the shipped string, so the assertion has to read the shipped one.
+   */
+  const zhT: any = (key: string, params?: Record<string, unknown>): string => {
+    const raw = (zh as Record<string, string>)[key] ?? key
+    if (params === undefined) return raw
+    return raw.replace(/\{(\w+)\}/g, (_m, name: string) => String(params[name] ?? ''))
+  }
+
+  const open = async (): Promise<Mounted> => {
+    stubFetch((url) => ({
+      body: url.includes('account-credits')
+        ? { accounts: [{ id: 'a-1', accountName: 'ISSAC', selected: true, credits: 1072 }] }
+        : channelRejectedDoc(),
+    }))
+    const m = await mount(ComposerCredits as any, { t: zhT, provider: 'workbuddy' })
+    await m.click(m.buttons()[0] as Element)
+    await m.settle()
+    return m
+  }
+
+  it('prints the SHORT verdict, not the 88-character explanation', async () => {
+    const m = await open()
+    const mark = document.body.querySelector('.dsm-workbuddy-composer-panel-mark-reason')?.textContent ?? ''
+    expect(mark).toBe('✗ 网关拦的是提示词')
+    // The point is WIDTH, so assert it directly: a swap back to the long label
+    // is the exact regression, and 88 vs 11 characters is what made it break.
+    expect(mark.length, 'the mark must be a verdict, not a paragraph').toBeLessThan(20)
+    await m.unmount()
+  })
+
+  it('keeps the whole explanation one hover away', async () => {
+    // Shortening the visible mark must not DELETE the explanation: the row's
+    // `title` carries `availabilityLine`, which is the long form plus instant.
+    const m = await open()
+    const title = Array.from(document.body.querySelectorAll('tr[title]'))
+      .find(node => node.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent === 'ISSAC')
+      ?.getAttribute('title') ?? ''
+    expect(title, 'the full sentence must survive in the title').toContain('网关拦的是提示词本身')
+    expect(title, 'and must still name the real cause').toContain('第三方 agent 过滤')
+    await m.unmount()
+  })
+
+  it('lets the mark WRAP, so a future long label is not severed', async () => {
+    // The structural half. jsdom does not evaluate CSS, so this asserts the
+    // shipped stylesheet — which is the only place the clipping ever existed.
+    const rule = /\.dsm-workbuddy-composer-panel-mark\{([^}]*)\}/.exec(WORKBUDDY_COMPOSER_CSS)?.[1] ?? ''
+    expect(rule, 'the mark must set its own whitespace').toContain('white-space:normal')
+    expect(rule, 'and must break inside a CJK run').toContain('overflow-wrap:anywhere')
   })
 })
