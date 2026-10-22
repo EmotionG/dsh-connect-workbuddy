@@ -464,10 +464,15 @@ describe('the two OTHER gates that share the 11128 code', () => {
     // or a first-message problem.
     expect(isConversationIdGateBody(CHANNEL_BODY)).toBe(false)
     expect(isFirstMessageGateBody(CHANNEL_BODY)).toBe(false)
-    // And the prompt gate itself is still the channel gate.
+    // ISSUE #113: `isChannelRejectBody` answers "is this the 11128 FAMILY",
+    // and every member belongs to it. The old expectation — false for the two
+    // siblings — is exactly what kept a misreported refusal out of the
+    // plugin's retry ladder (see `tests/issue113-channel-gate-evidence.spec.ts`).
+    // Which MEMBER it is is `channelGateMemberOf`'s job, and it decides the
+    // reply's ADVICE only, never whether the rescue runs.
     expect(isChannelRejectBody(CHANNEL_BODY)).toBe(true)
-    expect(isChannelRejectBody(CONVERSATION_ID_BODY)).toBe(false)
-    expect(isChannelRejectBody(FIRST_MESSAGE_BODY)).toBe(false)
+    expect(isChannelRejectBody(CONVERSATION_ID_BODY)).toBe(true)
+    expect(isChannelRejectBody(FIRST_MESSAGE_BODY)).toBe(true)
   })
 
   it('matches case-insensitively', () => {

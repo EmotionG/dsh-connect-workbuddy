@@ -114,7 +114,7 @@ export const WORKBUDDY_MODEL_IDENTITY = 'workbuddy'
  * is the only one that proves the field is a host marker instead of a shape this
  * plugin really produced.
  */
-const HOST_FOREIGN_API = 'dsh-foreign'
+export const HOST_FOREIGN_API = 'dsh-foreign'
 
 /**
  * Registry keys an adapter serving `providerId` must publish so that every
@@ -658,15 +658,49 @@ function transcript<T>(context: Context): T {
  * Returns the same object when nothing changed, so the common case (an
  * already-normalized transcript) allocates nothing.
  */
-export function alignAssistantIdentities(context: Context, identity: string = WORKBUDDY_MODEL_IDENTITY): Context {
+export function alignAssistantIdentities(
+  context: Context,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+  ownedRoutes: readonly string[] = [WORKBUDDY_PROVIDER, WORKBUDDY_GLOBAL_PROVIDER],
+): Context {
   const messages = context.messages
   if (!Array.isArray(messages) || messages.length === 0) return context
+  // ISSUE #111: THE MESSAGE MUST BELONG TO THIS PLUGIN FIRST. The docblock
+  // above used to claim `dsh-llm` splits history by provider, so a transcript
+  // reaching this adapter could only contain this plugin's own turns. That is
+  // NOT what the host does: `forAdapter()` (dsh-llm/lib/index.js:2151) only
+  // STRIPS `replayState` from a message whose `source.provider` belongs to
+  // another adapter — it keeps the message in the list. So a session that
+  // switched providers (the user goes from DeepSeek official to WorkBuddy, or
+  // back) hands this adapter assistant turns that this plugin never produced,
+  // and the old code rewrote THEIR `provider` to `workbuddy` and their `api`
+  // to `openai-completions`.
+  //
+  // That is worse than cosmetic. It relabels a foreign turn as this plugin's
+  // own model output, so pi-ai's `isSameModel` compares it against the request
+  // and can replay its reasoning as if this model had produced it. It also
+  // makes the transcript claim a provenance that is false — the host's own
+  // `forAdapter` went out of its way to clear `replayState` precisely so a
+  // foreign turn would NOT be replayed, and rewriting the identity handed that
+  // turn back through the door `forAdapter` had just closed.
+  //
+  // So the rewrite is scoped to the routes this bundle owns. A message from any
+  // other provider is left EXACTLY as the host built it: its `api` stays
+  // `dsh-foreign`, which is the host's honest marker for "not this adapter's
+  // wire format", and its `provider` stays whatever that adapter registered.
+  const owned = new Set(ownedRoutes)
   let changed = false
   const next = messages.map(message => {
     if (typeof message !== 'object' || message === null) return message
     const record = message as unknown as Record<string, unknown>
     if (record['role'] !== 'assistant') return message
-    const providerAligned = record['provider'] === identity
+    const provider = record['provider']
+    // A foreign turn keeps its own identity. `identity` is accepted here too
+    // because the identity IS this plugin's stamp: a message already carrying
+    // it is ours by definition (that is the CN case, where route and identity
+    // are the same string).
+    if (typeof provider !== 'string' || !owned.has(provider) && provider !== identity) return message
+    const providerAligned = provider === identity
     // Only the host's own fallback marker is repaired; every other api is the
     // shape this plugin really sends and must be preserved verbatim.
     const apiAligned = record['api'] !== HOST_FOREIGN_API
@@ -684,12 +718,14 @@ function withLegacyContext(
   api: ProviderStreams,
   generation: PiAiGeneration,
   identity: string = WORKBUDDY_MODEL_IDENTITY,
+  ownedRoutes: readonly string[] = [WORKBUDDY_PROVIDER, WORKBUDDY_GLOBAL_PROVIDER],
 ): ProviderStreams {
   /** One place so both branches and both entry points agree on the order. */
   const prepare = (context: Context): Context =>
     alignAssistantIdentities(
       generation === 'modern' ? foldModernContext(context) : adaptLegacyPiAiContext(context),
       identity,
+      ownedRoutes,
     )
   if (generation === 'modern') {
     return {
@@ -933,7 +969,13 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
       },
     },
     models: buildModels(),
-    api: withContextRescue(withLegacyContext(openAICompletionsApi(), generation, modelIdentity), options.resolveContextRescue),
+    api: withContextRescue(
+      // BOTH of this bundle's routes are owned by this adapter, so a message
+      // stamped with either is ours to align (issue #111). Anything else in
+      // the transcript belongs to another provider and is left untouched.
+      withLegacyContext(openAICompletionsApi(), generation, modelIdentity),
+      options.resolveContextRescue,
+    ),
   })
 
   // `getModels` is delegated to a live read (the reuse-catalog pattern from

@@ -315,34 +315,53 @@ describe('the reply reads the HOST body, per role (issue #98)', () => {
   })
 })
 
-describe('the two sibling `11128` gates are named, not relayed', () => {
-  it('names the conversation-id gate and keeps the host code', async () => {
+describe('the whole `11128` family answers as ONE gate, with the member named (issue #113)', () => {
+  // WHAT CHANGED AND WHY. These two used to answer as `client` with a bespoke
+  // paragraph each, precisely so a header problem would never be reported as a
+  // prompt problem. Issue #113 then measured that the upstream's `msg` is NOT
+  // reliable — a content refusal arrived saying `conversation id missing` while
+  // all three headers were present — and the `client` classification meant the
+  // plugin's retry ladder never ran for exactly the refusal it exists for.
+  //
+  // So every member of the family is now `channel_reject` (the ladder runs),
+  // and the MEMBER is named from the request-side evidence so the reply still
+  // never blames a prompt for a header problem when the headers really are the
+  // story.
+  it('names the conversation-id gate as a MISREPORT when the request carried the triple', async () => {
     const mounted = mount({ results: () => failure(400, CONVERSATION_ID_BODY) })
     shim = mounted.instance
 
     const reply = await chat(shim, [{ role: 'system', content: NOVEL_OPENING }, { role: 'user', content: 'hi' }])
 
     expect(reply.status).toBe(400)
-    expect(reply.type).toBe('client')
+    // The family classifies as the channel gate, not the generic `client`.
+    expect(reply.type).toBe('channel_reject')
+    // And the reply echoes the upstream's own sentence verbatim, then says WHY
+    // it cannot be believed: the plugin sends the triple on every chat request.
     expect(reply.message).toContain('「conversation id missing」')
     expect(reply.message).toContain('X-Conversation-ID')
-    // The shared "channel verification" paragraph must not be relayed: it is the
-    // sentence that sent these reports through account and region swaps.
-    expect(reply.message).not.toContain('这次调用没通过渠道校验，可能不是官方客户端发出的')
-    expect(reply.message).not.toContain('请按上面的提示调整后重试')
+    expect(reply.message).toContain('上游误报')
+    // It also names the real cause, so the reader is not left with a header
+    // theory that no action of theirs can satisfy.
+    expect(reply.message).toContain('实际被拒的是请求内容')
+    // The family's own diagnosis is the actionable part, so it IS present —
+    // that is the whole point of running the ladder.
+    expect(reply.message).toContain('渠道校验')
   })
 
-  it('names the first-message gate and keeps the host code', async () => {
+  it('names the first-message gate as unprovable when the request DID open with a system message', async () => {
+    // The plugin's `ensureSystemHead` puts a system message first, so a body
+    // claiming otherwise cannot be describing this request. The reply says
+    // that instead of silently repeating the upstream's wording.
     const mounted = mount({ results: () => failure(400, FIRST_MESSAGE_BODY) })
     shim = mounted.instance
 
-    const reply = await chat(shim, [{ role: 'user', content: 'hi' }])
+    const reply = await chat(shim, [{ role: 'system', content: NOVEL_OPENING }, { role: 'user', content: 'hi' }])
 
     expect(reply.status).toBe(400)
-    expect(reply.type).toBe('client')
-    expect(reply.message).toContain('「first message is not system prompt」')
-    expect(reply.message).toContain('请求本身没有消息')
-    expect(reply.message).not.toContain('请按上面的提示调整后重试')
+    expect(reply.type).toBe('channel_reject')
+    // The upstream's wording is echoed back so support can see what arrived...
+    expect(reply.message).toContain('first message is not system prompt')
   })
 })
 

@@ -89,24 +89,34 @@ describe('classifying the channel gate', () => {
     expect(classifyUpstreamError(400, CHANNEL_REJECT_BODY)).toBe('channel_reject')
   })
 
-  it('matches on `msg`, never on `displayTips`', () => {
-    // Independent of parsing order: the predicate itself must not fire on a body
-    // whose only channel-ish wording is the tips sentence, because that sentence
-    // is IDENTICAL for every member of the 11128 family.
+  it('matches on the CODE, never on `displayTips`', () => {
+    // The tips sentence is IDENTICAL for every member of the 11128 family, so
+    // matching it would prove nothing about which gate fired. The code is the
+    // identity of the FAMILY (issue #113): every member is a channel
+    // verification refusal, and the advice differs by member, not the class.
     expect(isChannelRejectBody(CHANNEL_REJECT_BODY)).toBe(true)
-    expect(isChannelRejectBody(CONVERSATION_ID_BODY)).toBe(false)
-    expect(isChannelRejectBody(FIRST_MESSAGE_BODY)).toBe(false)
-    // And a body carrying the misleading tips with NO diagnostic message is not
-    // enough to claim the prompt rule.
-    const tipsOnly = '{"code":11128,"msg":"something else","displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。"}}'
-    expect(isChannelRejectBody(tipsOnly)).toBe(false)
+    expect(isChannelRejectBody(CONVERSATION_ID_BODY)).toBe(true)
+    expect(isChannelRejectBody(FIRST_MESSAGE_BODY)).toBe(true)
+    // But a body carrying ONLY the misleading tips, with a code that is not
+    // this family's, is not this family — the tips are shared boilerplate.
+    const tipsWithForeignCode = '{"code":11140,"msg":"something else","displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。"}}'
+    expect(isChannelRejectBody(tipsWithForeignCode)).toBe(false)
   })
 
-  it('leaves the OTHER 11128 gates with their existing classification', () => {
-    // A wrongly-claimed header failure would tell the reader to rewrite a system
-    // prompt that is not at fault — worse than the generic reply.
+  it('classifies the whole 11128 FAMILY as the channel gate (issue #113)', () => {
+    // The family has three members sharing one code. Only the `msg` wording
+    // ever told them apart, and issue #113 measured that wording to be
+    // UNRELIABLE: a content refusal arrived saying `conversation id missing`
+    // while all three headers were present.
+    //
+    // The old rule excluded such a body, which filed it as `client` and
+    // SKIPPED the plugin's retry ladder — the one path that exists for this
+    // refusal. Every member is now classified as the family, because every
+    // member is a channel-verification refusal that no account, region or
+    // top-up can change. Which member it is decides the ADVICE (see
+    // `channelGateMemberOf`), never the classification.
     for (const body of [CONVERSATION_ID_BODY, FIRST_MESSAGE_BODY]) {
-      expect(classifyUpstreamError(400, body)).toBe('client')
+      expect(classifyUpstreamError(400, body)).toBe('channel_reject')
     }
   })
 
@@ -134,8 +144,16 @@ describe('the probe reports the channel gate as itself', () => {
   it('maps the gate to `channel-rejected` instead of `failed`', () => {
     // `failed` is what the card renders as a bare "✗ Test failed" — the one label
     // that invites an account fix, which cannot work here.
+    //
+    // ISSUE #113: every member of the family maps to `channel-rejected`, not
+    // just the prompt member. The old expectation (`failed` for the
+    // conversation-id body) is what made the card print a bare "✗ Test
+    // failed" for a refusal the pool could never fix. The probe body always
+    // carries a system head and the triple, so a `conversation id missing`
+    // wording on it is a misreport, exactly as measured.
     expect(outcomeOfFailure(400, CHANNEL_REJECT_BODY)).toBe('channel-rejected')
-    expect(outcomeOfFailure(400, CONVERSATION_ID_BODY)).toBe('failed')
+    expect(outcomeOfFailure(400, CONVERSATION_ID_BODY)).toBe('channel-rejected')
+    expect(outcomeOfFailure(400, FIRST_MESSAGE_BODY)).toBe('channel-rejected')
   })
 
   it('does not bench the account for it', () => {

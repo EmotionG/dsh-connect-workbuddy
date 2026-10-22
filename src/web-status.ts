@@ -27,6 +27,7 @@ import { lastRefusalFor, offRefused } from './off-thinking.ts'
 import type { WorkBuddyBusyLevel } from './busy.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { applyContextBudgets } from './catalog.ts'
+import { isUnconfiguredFallbackSnapshot } from './catalog-sync.ts'
 import { resolveCredentialRecovery } from './credential-recovery.ts'
 // Live binding only: `Config` is referenced inside request-time function
 // bodies, never at module top level, so the index<->web-status cycle is safe.
@@ -1800,6 +1801,21 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
               // and `displayModels` already prefers the live directory.
               const live = deps.displayModels(key as WorkBuddyRegion)
               if (live.length === 0) continue
+              // NEVER SEED THE STATIC FALLBACK TABLE (issue #114's root cause).
+              // `displayModels` falls back to that table whenever the upstream
+              // has not answered yet — and on a cold start, that is exactly the
+              // moment a first save happens. So the table was written into
+              // `lastCatalog` as if the user had chosen it, and the table
+              // declares NO `reasoning` block: every model in it published with
+              // `reasoning: false`, so the host offered only `Default` and
+              // `Off`. The card then saved that snapshot back, and the upstream's
+              // real tiers could never be learned — a closed loop.
+              //
+              // So a roster that IS the fallback table is not seeded. The slot
+              // simply keeps an empty directory, which the live roster fills
+              // as soon as it arrives (and `repairRegionCatalog` writes it
+              // down then).
+              if (isUnconfiguredFallbackSnapshot(live, key as WorkBuddyRegion)) continue
               slot.lastCatalog = live
             }
           }

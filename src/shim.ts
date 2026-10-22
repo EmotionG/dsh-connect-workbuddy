@@ -34,12 +34,14 @@ import {
   prepareChatBody,
   modelIdOfBody,
   forceNeutralHead,
+  channelGateMemberOf,
   isConversationIdGateBody,
   isContextTooLongBody,
   CONTEXT_OVERFLOW_MARKER,
   isFirstMessageGateBody,
   openingEvidenceOfBody,
   perturbChannelFingerprints,
+  requestEvidenceOf,
   WorkBuddyUpstreamClient,
   type UpstreamErrorKind,
   type WorkBuddyChatResult,
@@ -1984,11 +1986,44 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         if (retriedWithForcedHead) retries.push('强制中性头')
         if (retriedWithPerturbation) retries.push('一次不可见扰动')
         const retryNote = retries.length === 0 ? '' : `，并已用${retries.join('与')}重试过`
+        // ISSUE #113: WHICH MEMBER of the `11128` family this is, decided by the
+        // plugin's OWN evidence rather than by the upstream's `msg` — which
+        // issue #113 measured to misreport a content refusal as
+        // `conversation id missing`. The member decides the ADVICE: a header
+        // problem is the user's to check, a prompt problem is the plugin's to
+        // keep working on, and an unrecognised one is honestly named as such
+        // rather than guessed at.
+        const member = channelGateMemberOf(result.message, requestEvidenceOf(prepared))
+        // `detail.msg` is the upstream's own sentence, quoted verbatim so a
+        // reporter and support read the same words. It is echoed for the
+        // members the plugin can DISPROVE as well, because "what arrived" and
+        // "why it cannot be true" are two different facts and the reader needs
+        // both: without the echo they cannot tell what they are up against.
+        const said = detail?.rawMsg ?? detail?.displayMsg
+        const echo = said === undefined ? '' : `上游的 msg 是「${said}」，`
+        // A `prompt` member whose body NAMES another gate is the misreport
+        // issue #113 measured: the wording points at a header or a shape
+        // problem, but the plugin's own request disproves it, so the refusal
+        // is about the content. Saying that explicitly is the difference
+        // between "the gateway wants your headers fixed" (wrong, unfixable)
+        // and "the gateway is fingerprinting what you sent" (right, and the
+        // plugin has just retried for it).
+        const memberNote = member === 'headers'
+          ? `${echo}但本次请求已经带上了会话 id 三件套（X-Conversation-ID / -Request-ID / -Message-ID），所以这条措辞是上游误报；`
+          : member === 'first_message'
+            ? `${echo}但本次请求的首条消息就是 system；`
+            : member === 'prompt'
+              ? (isConversationIdGateBody(result.message)
+                  ? `${echo}但本次请求已经带上了会话 id 三件套（X-Conversation-ID / -Request-ID / -Message-ID），所以这条措辞是上游误报，实际被拒的是请求内容；`
+                  : isFirstMessageGateBody(result.message)
+                    ? `${echo}但本次请求的首条消息就是 system，所以这条措辞是上游误报，实际被拒的是请求内容；`
+                    : '')
+              : `${echo}它属于 11128 这一族但没点名是哪一道门，插件按渠道校验统一处理；`
         // Same `workbuddy 上游失败：…（http N）` frame as every other failure, on
         // purpose: reporters paste this sentence into issues verbatim, so the
         // shape they search for must not change just because the diagnosis did.
         const message =
-          `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${stamp}。${evidence}` +
+          `workbuddy 上游失败：${failoverReasonText(result)}（http ${result.status}）${note}${stamp}。${memberNote}${evidence}` +
           '该请求被 WorkBuddy 网关的渠道校验拦截，上游把它描述成「不是官方客户端发出的」，但那是误导性文案：' +
           '网关匹配的是每一条 system 与 assistant 消息的开头，与账号、积分、额度、网络都无关，换账号或换区域也不会改变结果。' +
           '插件已对已知的第三方 agent 指纹做归一化' + retryNote +
@@ -2023,22 +2058,6 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
       if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
       const stamp = meta.length === 0 ? '' : `（${meta.join('，')}）`
-      // The two OTHER gates that share business code `11128`. They are kept out
-      // of `channel_reject` on purpose (blaming the prompt for a header problem
-      // would be a confidently wrong diagnosis), but falling into the generic
-      // "按参数拒绝" bucket leaves the reader with the gateway's own misleading
-      // tips and nothing to act on. That is the exact reply one user pasted back
-      // into this project: `code 11128` + "可能不是官方客户端发出的" +
-      // "请按上面的提示调整后重试".
-      //
-      // Both are answered by the upstream's literal `msg`, and neither is about
-      // the prompt, so the reply says what the gate is about instead of quoting
-      // the shared "channel verification" paragraph a second time.
-      const siblingGate = isConversationIdGateBody(result.message)
-        ? '该请求被上游以「conversation id missing」拒绝：网关要求每个请求带上会话 id 头（X-Conversation-ID、X-Conversation-Request-ID、X-Conversation-Message-ID），插件每次都会带上这三个头；仍出现说明这次请求没有走插件的聊天通道，请升级插件或反馈 issue'
-        : isFirstMessageGateBody(result.message)
-          ? '该请求被上游以「first message is not system prompt」拒绝：网关要求首条消息是 system 消息；插件在请求带消息时会保证这一点，所以出现这条说明这次请求本身没有消息，或没有走插件的聊天通道，请升级插件或反馈 issue'
-          : undefined
       // An `off`-tier refusal is the one parameter rejection this plugin can name
       // itself (issue #83), and the reader cannot act on the generic sentence:
       // the remedy is unticking one checkbox, not "adjust the request".
@@ -2062,11 +2081,12 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       // an advice sentence on would read "。。" — the upstream's sentence is left
       // exactly as it arrived, minus that final stop, and the join supplies one.
       //
-      // A named sibling gate replaces the whole body INCLUDING the receipt: the
-      // receipt would be `displayTips`, and that paragraph is the same
-      // "possibly not an official client" sentence for all three gates — quoting
-      // it next to a header/first-message diagnosis is what made these reports
-      // cycle through account and region swaps.
+      // The receipt is `displayTips`, and that paragraph is the same
+      // "possibly not an official client" sentence for every member of the
+      // `11128` family — quoting it as the actionable part is what made these
+      // reports cycle through account and region swaps. The channel_reject
+      // branch above therefore owns the whole reply for this family, and by the
+      // time control reaches here the body is not that family at all.
       // ISSUE #101: the host recognises a context overflow by matching the error
       // text against ~25 ENGLISH patterns, and the gateway's own sentence for
       // `11115` is Chinese with no numbers — so it matched nothing, the host's
@@ -2077,9 +2097,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       const overflow = isContextTooLongBody(result.message)
         ? `${CONTEXT_OVERFLOW_MARKER}。`
         : ''
-      const body = siblingGate !== undefined
-        ? siblingGate
-        : `${overflow}${advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`}`
+      const body = `${overflow}${advice === '' ? receipt : `${receipt.replace(/[。.]$/u, '')}。${advice}`}`
       writeOpenAIError(
         res,
         KIND_STATUS[result.kind],

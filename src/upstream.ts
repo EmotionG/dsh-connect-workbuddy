@@ -659,25 +659,21 @@ const CHANNEL_REJECT_MARKERS: readonly string[] = [
 ]
 
 /**
- * The other gates that answer the SAME business code.
+ * The wordings that identify the OTHER two members of the `11128` family.
  *
- * Excluded explicitly so a body that also carries the channel wording can never
- * be read as the prompt rule: a confidently wrong diagnosis is worse here than
- * the generic `client` reply, because it sends the user to rewrite a system
- * prompt that is not at fault.
+ * Used ONLY to NAME a member ({@link channelGateMemberOf}), never to exclude a
+ * body from the family. The old code used them as an exclusion list, which is
+ * how issue #113's misreported refusal was kept out of the plugin's retry
+ * ladder: the upstream wrote `conversation id missing` over a content refusal,
+ * and the exclusion believed it.
  *
- * Each is also exported as its own predicate ({@link isConversationIdGateBody},
+ * Each is exported as its own predicate ({@link isConversationIdGateBody},
  * {@link isFirstMessageGateBody}) so the reply can NAME the gate instead of
  * relaying the upstream's `displayTips` — which is the SAME misleading
  * sentence for all three members of the `11128` family.
  */
 const CONVERSATION_ID_GATE_MARKER = 'conversation id missing'
 const FIRST_MESSAGE_GATE_MARKER = 'first message is not system prompt'
-
-const OTHER_CHANNEL_CODE_GATES: readonly string[] = [
-  CONVERSATION_ID_GATE_MARKER,
-  FIRST_MESSAGE_GATE_MARKER,
-]
 
 /**
  * The upstream's own advice for {@link MODEL_BUSY_CODE}, in both shapes it ships
@@ -722,20 +718,86 @@ export function carriesModelBusyTip(body: string): boolean {
 }
 
 /**
- * Whether a failure body is the gateway's CHANNEL gate rather than the other
- * `11128` ({@link conversationHeaders}' `conversation id missing`).
+ * Which member of the `11128` family a failure body belongs to.
  *
- * Both halves are required. The code alone would claim the conversation-id gate
- * too, and its reply would then blame the prompt's opening for a request-header
- * problem the plugin already fixed — a confidently wrong diagnosis is worse
- * here than the generic `client` reply, because it sends the user to rewrite a
- * system prompt that is not at fault.
+ * ISSUE #113, AND WHY THE `msg` WORDING CANNOT BE TRUSTED. The three members
+ * of this family share one business code and one `displayTips` sentence, so
+ * the `msg` is the only thing that used to tell them apart — and the `msg` is
+ * NOT reliable. Issue #113 measured a CN refusal whose `msg` literally read
+ * `conversation id missing` while the three conversation-id headers were all
+ * present and correct; the refusal was about the request's CONTENT, not its
+ * headers. (The plugin's own conversation-id workarounds were in place — see
+ * {@link conversationHeaders} — so the wording was simply wrong.)
+ *
+ * The consequence was not cosmetic. `isChannelRejectBody()` EXCLUDES a body
+ * carrying the conversation-id wording, so such a body was not recognised as
+ * the channel gate at all: it was filed as `client`, which means the plugin's
+ * two-step retry ladder (`forceNeutralHead`, then the invisible perturbation)
+ * NEVER RAN, and the user got the generic "refused on its parameters"
+ * sentence instead of the channel diagnosis. That is very likely why the
+ * reporters in issue #98's thread found that upgrading changed nothing for
+ * them: their bodies never entered the path that could have helped.
+ *
+ * So the family is now recognised BY ITS CODE, and the member is named by
+ * evidence the plugin can gather ITSELF — the request it just sent — rather
+ * than by a wording the upstream may misreport.
+ */
+export type ChannelGateMember =
+  /** The prompt's content was fingerprinted. The plugin can retry this. */
+  | 'prompt'
+  /** A request header the gateway wants was missing or rejected. */
+  | 'headers'
+  /** The request did not open with a `system` message. */
+  | 'first_message'
+  /** The body says `11128` but names none of the three. */
+  | 'unknown'
+
+/**
+ * Whether a failure body belongs to the `11128` gate family AT ALL.
+ *
+ * The code is matched in its quoted-key form (`"code":11128`): a request id is
+ * hexadecimal and can contain the digits `11128` by coincidence, and a bare
+ * substring search over an arbitrary failure body is how a red herring gets
+ * promoted into a diagnosis.
+ */
+export function isChannelGateFamilyBody(body: string): boolean {
+  return body.includes(CHANNEL_REJECT_CODE)
+}
+
+/**
+ * Whether a failure body is the gateway's CHANNEL gate — i.e. whether it
+ * belongs to the `11128` FAMILY.
+ *
+ * ISSUE #113, AND WHY THIS NOW ANSWERS "IS IT THE FAMILY" RATHER THAN "IS IT
+ * THE PROMPT MEMBER". The family has three members (prompt fingerprint,
+ * missing conversation id, missing system head) sharing one business code and
+ * one `displayTips` sentence, so the `msg` wording used to be the only thing
+ * that could tell them apart — and the wording is NOT reliable. Issue #113
+ * measured a CN refusal whose `msg` read `conversation id missing` while the
+ * three conversation-id headers were all present and correct; the refusal was
+ * about the request's CONTENT.
+ *
+ * The old rule required the channel wording AND the absence of the sibling
+ * wordings, so such a body was excluded from the channel gate entirely and
+ * filed as a plain `client`. That was not cosmetic: `client` never enters the
+ * plugin's two-step retry ladder (`forceNeutralHead`, then the invisible
+ * perturbation), so the rescue path that exists for precisely this refusal
+ * never ran. That is very likely why the reporters in issue #98's thread found
+ * that upgrading changed nothing.
+ *
+ * Every member of this family is a CHANNEL-verification refusal — the
+ * upstream's own shared sentence says so — so acting on the family is correct
+ * whoever the member is. Which member it is decides only what the reply
+ * ADVISES, and that is {@link channelGateMemberOf}'s job, decided by the
+ * plugin's own evidence rather than by a wording the upstream may misreport.
+ *
+ * The code is matched in its quoted-key form (`"code":11128`): a request id is
+ * hexadecimal and can contain the digits `11128` by coincidence, and a bare
+ * substring search over an arbitrary failure body is how a red herring gets
+ * promoted into a diagnosis.
  */
 export function isChannelRejectBody(body: string): boolean {
-  if (!body.includes(CHANNEL_REJECT_CODE)) return false
-  const lower = body.toLowerCase()
-  if (OTHER_CHANNEL_CODE_GATES.some(marker => lower.includes(marker))) return false
-  return CHANNEL_REJECT_MARKERS.some(marker => lower.includes(marker))
+  return isChannelGateFamilyBody(body)
 }
 
 /**
@@ -781,6 +843,55 @@ export function isFirstMessageGateBody(body: string): boolean {
 }
 
 /**
+ * Which member of the `11128` family a body is, decided by the plugin's OWN
+ * evidence rather than by the upstream's wording.
+ *
+ * THE EVIDENCE, IN ORDER OF STRENGTH.
+ *
+ * 1. The body carries the channel wording (`unapproved channel` /
+ *    `illegal api invocation`). That is the upstream naming the PROMPT gate
+ *    explicitly, so it is trusted.
+ * 2. The body says `conversation id missing`. The wording is only believable
+ *    when the request did NOT carry the conversation-id triple; the plugin's
+ *    `chatHeaders` adds it to every chat request, so in practice it is always
+ *    there and the wording is always a misreport — which is issue #113's
+ *    exact measurement. The refusal is then about the CONTENT, i.e. the
+ *    PROMPT gate, which is also the only member the plugin can act on.
+ * 3. The body names the first-message gate. That gate is about the request's
+ *    SHAPE, and `ensureSystemHead` guarantees a `system` head whenever the
+ *    request carries messages, so it is only reported as that gate when the
+ *    request genuinely had none.
+ * 4. Otherwise: `unknown`. The family is still the family — the retry ladder
+ *    applies — but the reply says it cannot name the member rather than
+ *    guessing, because a confidently wrong diagnosis sends the user to edit a
+ *    prompt that is not at fault.
+ *
+ * @param body The failure body.
+ * @param request What the plugin knows about the request it just sent.
+ */
+export function channelGateMemberOf(
+  body: string,
+  request?: { hasSystemHead: boolean; hasConversationHeaders: boolean },
+): ChannelGateMember {
+  const lower = body.toLowerCase()
+  if (CHANNEL_REJECT_MARKERS.some(marker => lower.includes(marker))) return 'prompt'
+  if (lower.includes(CONVERSATION_ID_GATE_MARKER)) {
+    // The wording is only believable when the headers were actually absent.
+    // When they were present, the refusal was about something else — and the
+    // prompt gate is the only member the plugin can act on.
+    if (request?.hasConversationHeaders === false) return 'headers'
+    return 'prompt'
+  }
+  if (lower.includes(FIRST_MESSAGE_GATE_MARKER)) {
+    // The plugin always sends a system head when the request has messages, so
+    // this wording is only believable when it genuinely had none.
+    if (request?.hasSystemHead === false) return 'first_message'
+    return 'unknown'
+  }
+  return 'unknown'
+}
+
+/**
  * The OPENINGS of the `system` messages in a prepared request body.
  *
  * REMOVED in favour of {@link systemOpeningEvidenceOfBody}, which answers the
@@ -798,7 +909,15 @@ function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
 }
 
-/** Classify an upstream failure from its HTTP status and body excerpt. */
+/**
+ * Classify an upstream failure from its HTTP status and body excerpt.
+ *
+ * The `11128` family is classified BY ITS CODE, not by the `msg` wording —
+ * see {@link isChannelRejectBody} and {@link channelGateMemberOf}. Which
+ * member of the family it is decides the ADVICE in the reply, never the
+ * classification: every member is a channel-verification refusal that no
+ * account, region or top-up can change.
+ */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
   if (status === 402) return 'hard_credit'
   const lower = body.toLowerCase()
@@ -825,6 +944,14 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   // that (more specific) reply, and BEFORE the plain 400 fallback so the channel
   // gate stops being filed as `client` — the misclassification that sent issues
   // #87–#90's reporters through account swaps that could not help.
+  //
+  // ISSUE #113: the whole `11128` FAMILY is classified here, by code. The old
+  // rule excluded a body carrying the conversation-id wording, on the theory
+  // that it must be a header problem — but that wording is not reliable (a
+  // content refusal was measured carrying it), and the exclusion pushed such
+  // bodies into `client`, which skips the plugin's retry ladder entirely.
+  // Which member it actually is now decides the reply's ADVICE only
+  // (`channelGateMemberOf`), never whether the rescue path runs.
   if (isChannelRejectBody(body)) return 'channel_reject'
   // BEFORE the plain 429 branch: a 14003 is a 429, and classifying it as
   // `soft_rate` is the whole of issue #56 — it made the pool treat a
@@ -856,6 +983,17 @@ export interface UpstreamErrorDetail {
   upstreamCode?: number
   /** Upstream request id — the handle support asks for. */
   requestId?: string
+  /**
+   * The upstream's RAW `msg`, kept beside {@link displayMsg}.
+   *
+   * On the `11128` family this is the DIAGNOSTIC half — it is what names which
+   * gate fired ("conversation id missing", "first message is not system
+   * prompt"), while `displayMsg` is the user-facing sentence the plugin must
+   * NOT use as a diagnosis (issue #113 measured it to mislabel a content
+   * refusal). Keeping both means a reply can echo what arrived AND say why it
+   * is or is not believable, without one overwriting the other.
+   */
+  rawMsg?: string
   /** Best human-facing message: `displayMsg.zh`, falling back to `.en`, then `msg`. */
   displayMsg?: string
   /**
@@ -929,6 +1067,7 @@ export function parseUpstreamErrorDetail(body: string): UpstreamErrorDetail | un
   const detail: UpstreamErrorDetail = {}
   if (typeof raw.code === 'number') detail.upstreamCode = raw.code
   if (typeof raw.requestId === 'string') detail.requestId = raw.requestId
+  if (typeof raw.msg === 'string' && raw.msg !== '') detail.rawMsg = raw.msg
   if (displayMsg !== undefined) detail.displayMsg = displayMsg
   if (tips !== undefined) detail.tips = tips
   // `extError` carries the parameter-level verdict. Read defensively: it is
@@ -1457,6 +1596,29 @@ export function forceNeutralHead(bodyJson: string): string | undefined {
 const ZERO_WIDTH_SPACE = '\u200b'
 
 /**
+ * Where an invisible break is inserted INSIDE a capitalised word pair, so a
+ * bare product name stops matching as an exact substring.
+ *
+ * WHY THE PUNCTUATION RULE IS NOT ENOUGH. The boundary rules above only land
+ * where there is a `.`, `!`, `?`, `,`, `;` — so a scanned message that ends
+ * with a bare product name and no trailing punctuation (``… powered by
+ * DeepSeek Harness ``, the host's own agent line, ending at end-of-text) is
+ * left COMPLETELY UNCHANGED. `perturbChannelFingerprints` then answers
+ * `undefined`, the shim spends no retry, and the fingerprint survives the
+ * rescue — measured, and it is the shape issue #113's reporter is most likely
+ * to hit, because that line is the first line of every DSH agent prompt.
+ *
+ * This rule breaks between a capitalised word and the following capitalised
+ * word (“DeepSeek|Harness”, “Visual|Studio”), which covers product names
+ * without touching ordinary prose: a sentence rarely has two capitalised
+ * words adjacent UNLESS they are a proper name, and breaking a proper name is
+ * exactly the intent. The model reads straight through U+200B, so what it
+ * understands is unchanged — that is the whole point of using it for this
+ * rather than rewriting the text.
+ */
+const WORD_INTERNAL_BREAK = /([A-Z][A-Za-z0-9]*)(\s+)(?=[A-Z][A-Za-z0-9])/gu
+
+/**
  * A body whose scanned message TEXT is perturbed just enough to break an exact
  * content fingerprint.
  *
@@ -1519,6 +1681,8 @@ export function perturbChannelFingerprints(bodyJson: string): string | undefined
       .replace(/([.!?])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
       .replace(/([。！？])/gu, `$1${ZERO_WIDTH_SPACE}`)
       .replace(/([,;])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
+      .replace(WORD_INTERNAL_BREAK, (whole: string, head: string, tail: string) =>
+        `${head}${ZERO_WIDTH_SPACE}${tail}`)
     return next === text ? undefined : next
   }
   for (const value of messages) {
@@ -2249,6 +2413,52 @@ function withPromos(
 ): readonly WorkBuddyUpstreamModel[] {
   const promos = parseWorkBuddyPromos(data['modelPromotions'], data['modelTiers'])
   return promos.length === 0 ? models : attachPromos(models, promos)
+}
+
+/**
+ * What the plugin can tell about the request it just sent, for telling the
+ * `11128` family apart.
+ *
+ * TWO FACTS, both read from the request body rather than from the upstream's
+ * `msg` — which issue #113 measured to be unreliable (a content refusal
+ * reported as `conversation id missing`).
+ *
+ * - `hasSystemHead`: does the request open with a `system` message? The
+ *   plugin guarantees it does whenever the request carries messages
+ *   (`ensureSystemHead`), so a body claiming the first-message gate is only
+ *   believable when this is false.
+ * - `hasConversationHeaders`: did the request carry the conversation-id
+ *   triple? `chatHeaders` always adds it, so this is true in practice — and
+ *   that is exactly what makes a `conversation id missing` wording
+ *   unbelievable.
+ *
+ * Never throws: a body that cannot be read answers "unknown", which is the
+ * safe direction (the wording is then believed).
+ */
+export function requestEvidenceOf(bodyJson: string): {
+  hasSystemHead: boolean
+  hasConversationHeaders: boolean
+} {
+  // The conversation-id triple is added by `chatHeaders` on EVERY chat
+  // request, so the fact is a property of this code path, not of the body.
+  const hasConversationHeaders = true
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyJson)
+  } catch {
+    return { hasSystemHead: false, hasConversationHeaders }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { hasSystemHead: false, hasConversationHeaders }
+  }
+  const messages = (parsed as Record<string, unknown>)['messages']
+  if (!Array.isArray(messages)) return { hasSystemHead: false, hasConversationHeaders }
+  const first = messages[0]
+  if (typeof first !== 'object' || first === null || Array.isArray(first)) {
+    return { hasSystemHead: false, hasConversationHeaders }
+  }
+  const role = (first as Record<string, unknown>)['role']
+  return { hasSystemHead: role === 'system' || role === 'developer', hasConversationHeaders }
 }
 
 /**

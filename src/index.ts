@@ -33,6 +33,13 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { workbuddyAccountId, WorkBuddyCredentialStore, type WorkBuddyCredential } from './auth.ts'
 import { deriveCatalog, fallbackModelsFor, withoutRouters, WorkBuddyCatalog } from './catalog.ts'
 import type { WorkBuddyContextBudget, WorkBuddyModelInfo } from './catalog.ts'
+import {
+  catalogFingerprint,
+  isUnconfiguredFallbackSnapshot,
+  repairedCatalog,
+  resolveRoster,
+} from './catalog-sync.ts'
+import { writeRegionCatalog, type HostSettingsService } from './catalog-write.ts'
 import { createAccountUsabilityProbe } from './credential-recovery.ts'
 import { BENEFIT_CACHE_MS, claimableBenefits, type WorkBuddyBenefitView } from './benefits.ts'
 import {
@@ -1030,17 +1037,24 @@ export function apply(ctx: Context, config: Config): void {
   // so a partial saved slot can DEMOTE to the live directory but never past it
   // to the static list. The static list stays the last resort, for the case it
   // was written for: an offline upstream with nothing discoverable at all.
+  //
+  // ISSUES #114 AND #115 CHANGE THE FIRST STEP. The saved directory used to
+  // WIN over the live roster, which froze the roster at a stale snapshot
+  // forever: a model the upstream added (`deepseek-v4.1-flash` on the CN
+  // roster) could never reach the user, because the only thing that wrote
+  // `lastCatalog` was the card's explicit save, and the card saved the SAVED
+  // directory back. The saved directory is now the user's NAMES, and the live
+  // roster is the CAPABILITIES — see `src/catalog-sync.ts`.
   const configuredModels = (
     value: Config,
     region: WorkBuddyRegion,
     liveModels: readonly WorkBuddyModelInfo[] = [],
   ): readonly WorkBuddyModelInfo[] => {
     const state = regionStateOf(value, region)
-    const roster = state.lastCatalog?.length
-      ? withoutRouters(state.lastCatalog)
-      : liveModels.length
-        ? liveModels
-        : fallbackModelsFor(region)
+    // `keepLoadLevel` is ON: this is the RUNTIME roster, and the load badge
+    // the model picker draws lives here. The card's directory drops it (see
+    // `displayModels`), because load is never persisted.
+    const roster = resolveRoster(state.lastCatalog ?? [], liveModels, region, { keepLoadLevel: true })
     // `canDisableThinking` must be carried into `lastCatalog` by the card's
     // save or the next load loses it and withdraws `off` from every model
     // (the same mechanism as `imageModelIds` / `multimodal`); so stamp the
@@ -1079,6 +1093,13 @@ export function apply(ctx: Context, config: Config): void {
   // its directory must show the LIVE catalog, not the static fallback, or the
   // card reports the user's in-use model as withdrawn ("已下架") while the
   // runtime is still serving it.
+  //
+  // ISSUES #114/#115: the saved directory no longer SUPPRESSES the live
+  // roster. The card used to list the saved snapshot, so a stale snapshot
+  // kept a newly added upstream model invisible AND kept a model with no
+  // `reasoning` block listed with no thinking tiers. The live roster is now
+  // merged OVER the saved one — the card shows what the upstream actually
+  // offers, and the user's own models are still kept.
   const displayModels = (value: Config, region: WorkBuddyRegion): readonly WorkBuddyModelInfo[] => {
     const state = regionStateOf(value, region)
     // Routers are dropped at every read, not just in the fresh roster. A
@@ -1086,9 +1107,12 @@ export function apply(ctx: Context, config: Config): void {
     // `default-model`, and this snapshot is what the card lists — so without
     // the filter the row would survive the upgrade and only vanish at the next
     // refresh, which reads as "the fix did not work".
-    if (state.lastCatalog?.length) return withoutRouters(state.lastCatalog)
-    const live = stacks[region]?.catalog?.current()
-    return live?.length ? live : fallbackModelsFor(region)
+    const live = stacks[region]?.catalog?.current() ?? []
+    // `keepLoadLevel` is OFF: this is the card's DIRECTORY, and the load level
+    // is a fact about this minute that is deliberately never persisted (see
+    // `src/busy.ts`). The card reads the level from a separate map instead —
+    // `liveBusyLevels` — so two sources cannot disagree.
+    return resolveRoster(state.lastCatalog ?? [], live, region)
   }
 
   /**
@@ -1115,6 +1139,81 @@ export function apply(ctx: Context, config: Config): void {
 
   let current = () => config
   let invalidateCatalog = (): void => {}
+
+  /**
+   * REPAIR a region's saved directory against the live upstream roster.
+   *
+   * ISSUES #114 AND #115, THE PERSISTED HALF. The read side now serves the
+   * live roster (see {@link resolveRoster}), but the SAVED directory would
+   * still hold the stale snapshot — and the card's save writes the saved
+   * directory back, so the stale snapshot would outlive the fix and could be
+   * written back over the healed one. So the directory is repaired once, when
+   * the live roster lands.
+   *
+   * WHAT IS WRITTEN: the live roster merged over the saved one, so a newly
+   * added upstream model enters the directory and the user's own models stay.
+   * `enabledModelIds` is NOT touched — the selection is its own field, and a
+   * model leaving the upstream roster must not lose its tick.
+   *
+   * WHEN IT IS WRITTEN: only when the fingerprint actually differs, so a
+   * profile that is already in agreement is never written to. Without that
+   * guard every startup would write, and a write per startup is a write storm
+   * on a profile the user opens often.
+   *
+   * THE FALLBACK-SNAPSHOT CASE. A directory that is byte-identical to the
+   * static fallback table was never a user's selection — it is the plugin's
+   * own placeholder that came back as if the user had chosen it (issue
+   * #114's root cause). It is replaced by the live roster outright.
+   *
+   * FAIL-SOFT: a repair that cannot be written is not a reason to fail a
+   * request. The read side is already correct without it, so the repair is
+   * an optimisation that heals the profile, never a precondition.
+   */
+  const repairRegionCatalog = async (
+    region: WorkBuddyRegion,
+    live: readonly WorkBuddyModelInfo[],
+  ): Promise<void> => {
+    if (live.length === 0) return
+    const state = regionStateOf(current(), region)
+    const saved = state.lastCatalog ?? []
+    // A saved directory that is the static fallback table is not a selection.
+    // The load level is dropped either way: it is a fact about this minute and
+    // the saved directory must never carry one (`src/busy.ts`), and an
+    // explicit `undefined` would fail the settings write's strict JSON codec.
+    const repaired = (isUnconfiguredFallbackSnapshot(saved, region)
+      ? withoutRouters(live)
+      : repairedCatalog(saved, live)
+    ).map(model => {
+      if (model.busyLevel === undefined) return model
+      const { busyLevel: _dropped, ...rest } = model
+      return rest as WorkBuddyModelInfo
+    })
+    if (repaired.length === 0) return
+    // The fingerprint compares what MATTERS (ids, capability fields), so a
+    // directory that differs only in a load level or a promo badge is not
+    // rewritten — those are not persisted anyway.
+    if (catalogFingerprint(repaired) === catalogFingerprint(saved)) return
+    try {
+      await writeRegionCatalog(hostSettings(), settingsNs, region, repaired)
+    } catch (error: unknown) {
+      // The read side already serves the live roster, so a failed repair
+      // costs nothing but the profile's own tidiness. Log it and move on.
+      ctx.logger.warn(
+        `dsh-connect-workbuddy: could not repair the ${region} model directory against the live roster`,
+        error,
+      )
+    }
+  }
+
+  /**
+   * The Host's settings service, or `undefined` when it is not available.
+   *
+   * Read through `ctx.get` at the moment of the write rather than sampled
+   * once during `apply`: the service is optional on some hosts, and a
+   * snapshot taken too early would be `undefined` forever.
+   */
+  const hostSettings = (): HostSettingsService | undefined =>
+    (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as HostSettingsService | undefined
 
   /**
    * Legacy migration for the pre-split single `accountId`: its region is
@@ -2775,6 +2874,15 @@ export function apply(ctx: Context, config: Config): void {
             // user's saved selection, written only by the card's explicit save
             // (via settingsScope). Until then the card shows the live fallback
             // directory and one press of "Refresh" captures the real one.
+            //
+            // BUT A STALE DIRECTORY IS REPAIRED (issues #114/#115). A directory
+            // written by an older build — or one that a cold start seeded with
+            // the static fallback table — would keep the roster frozen at that
+            // snapshot, and the card's next save would write it back. So the
+            // directory is healed against the roster that just landed. The
+            // repair writes only when the fingerprint differs, so a profile
+            // already in agreement is never touched.
+            await repairRegionCatalog(region, models)
           } catch (error: unknown) {
             ctx.logger.warn(
               `dsh-connect-workbuddy: dynamic ${region} model catalog unavailable; serving the static fallback list`,
