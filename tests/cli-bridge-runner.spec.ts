@@ -15,19 +15,32 @@
  * PROTOCOL this module speaks, and that is fully observable from the frames a
  * fake child emits.
  */
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spawnMock = vi.hoisted(() => vi.fn())
+const FAKE_HOME = vi.hoisted(() => 'C:\\Users\\tester')
 
 vi.mock('node:child_process', () => ({ spawn: spawnMock }))
 
+// The CLI-location list is built from `homedir()`, which must not be the machine
+// running the suite: otherwise the Windows-root assertion would pass on a
+// developer box and silently assert nothing on CI.
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => FAKE_HOME }
+})
+
 // Imported AFTER the mock is registered, which is what makes the module under
 // test pick up the fake `spawn`.
-import { isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
+import { cliEntryCandidates, isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
 import type { BridgeCredential, TurnOptions } from '../src/cli-bridge/runner.ts'
+import { createLiveBoard } from '../src/cli-bridge/live.ts'
+import type { LiveTurn } from '../src/cli-bridge/live.ts'
+import { forgetCliSession, runAsk } from '../src/cli-bridge/tool.ts'
+import type { BridgeOptions } from '../src/cli-bridge/tool.ts'
 
 /** One fake child process, with the pieces `runner.ts` touches. */
 interface FakeChild {
@@ -473,5 +486,395 @@ describe('isSyntheticDenyReason', () => {
     expect(isSyntheticDenyReason('timeout waiting for user response')).toBe(true)
     expect(isSyntheticDenyReason('This is an unattended automated session.')).toBe(true)
     expect(isSyntheticDenyReason('dsh-connect-workbuddy runs this turn unattended')).toBe(false)
+  })
+})
+
+/**
+ * The CLI-location list, which had no test at all in the first draft — and that
+ * is exactly how a list that finds the CLI on no Windows machine shipped with a
+ * green windows-latest CI leg.
+ */
+describe('cliEntryCandidates', () => {
+  const PKG = join('@tencent-ai', 'codebuddy-code', 'bin', 'codebuddy')
+  const withAppData = (value: string | undefined, body: () => void): void => {
+    const previous = process.env['APPDATA']
+    if (value === undefined) delete process.env['APPDATA']
+    else process.env['APPDATA'] = value
+    try {
+      body()
+    } finally {
+      if (previous === undefined) delete process.env['APPDATA']
+      else process.env['APPDATA'] = previous
+    }
+  }
+
+  it('looks directly under the Windows npm prefix, with no lib level', () => {
+    withAppData('C:\\Users\\tester\\AppData\\Roaming', () => {
+      const candidates = cliEntryCandidates()
+      const prefix = join('C:\\Users\\tester\\AppData\\Roaming', 'npm')
+      // What actually exists on a Windows machine.
+      expect(candidates).toContain(join(prefix, 'node_modules', PKG))
+      // What does not, and what an earlier revision wrongly built.
+      expect(candidates).not.toContain(join(prefix, 'lib', 'node_modules', PKG))
+    })
+  })
+
+  it('keeps the lib/node_modules layout for POSIX prefixes', () => {
+    const candidates = cliEntryCandidates()
+    for (const prefix of ['/usr/local', '/opt/homebrew', join(FAKE_HOME, '.npm-global')]) {
+      expect(candidates).toContain(join(prefix, 'lib', 'node_modules', PKG))
+    }
+  })
+
+  it('treats the pnpm and yarn stores as module roots themselves', () => {
+    const candidates = cliEntryCandidates()
+    expect(candidates).toContain(join(FAKE_HOME, '.local', 'share', 'pnpm', 'global', '5', 'node_modules', PKG))
+    expect(candidates).toContain(join(FAKE_HOME, '.config', 'yarn', 'global', 'node_modules', PKG))
+  })
+
+  it('probes each distinct path once', () => {
+    // `%APPDATA%\npm` and `~/AppData/Roaming/npm` are the same directory on a
+    // normal Windows machine; the list must not claim to have tried it twice.
+    withAppData(join(FAKE_HOME, 'AppData', 'Roaming'), () => {
+      const candidates = cliEntryCandidates()
+      expect(new Set(candidates).size).toBe(candidates.length)
+    })
+  })
+
+  it('finds the Windows pnpm, yarn and fnm stores where those tools put them', async () => {
+    // The same defect as the npm prefix, one level down: every one of these
+    // stores moves under `%LOCALAPPDATA%` / `%APPDATA%` on Windows, and a list
+    // that only knows the POSIX path silently finds nothing there. fnm is a
+    // versioned root, so a real directory has to exist for it to be expanded.
+    const local = await mkdtemp(join(tmpdir(), 'cb-localappdata-'))
+    const roaming = await mkdtemp(join(tmpdir(), 'cb-appdata-'))
+    const previousLocal = process.env['LOCALAPPDATA']
+    const previousRoaming = process.env['APPDATA']
+    process.env['LOCALAPPDATA'] = local
+    process.env['APPDATA'] = roaming
+    try {
+      await mkdir(join(roaming, 'fnm', 'node-versions', 'v22.0.0', 'lib', 'node_modules'), { recursive: true })
+      const candidates = cliEntryCandidates()
+      expect(candidates).toContain(join(local, 'pnpm', 'global', '5', 'node_modules', PKG))
+      expect(candidates).toContain(join(local, 'Yarn', 'Data', 'global', 'node_modules', PKG))
+      expect(candidates).toContain(join(roaming, 'fnm', 'node-versions', 'v22.0.0', 'lib', 'node_modules', PKG))
+    } finally {
+      if (previousLocal === undefined) delete process.env['LOCALAPPDATA']
+      else process.env['LOCALAPPDATA'] = previousLocal
+      if (previousRoaming === undefined) delete process.env['APPDATA']
+      else process.env['APPDATA'] = previousRoaming
+      await rm(local, { recursive: true, force: true })
+      await rm(roaming, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('live progress reporting', () => {
+  it('reports every assistant block, counting tools and characters', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const seen: Array<{ toolCalls: number; lastTool: string; chars: number }> = []
+    const running = runAgent(turnOptions(entry, {
+      onProgress: progress => { seen.push({ ...progress }) },
+    }), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'let me look' },
+          { type: 'tool_use', name: 'Grep', id: 't1' },
+        ],
+      },
+    })
+    child.emitFrame({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'Read', id: 't2' },
+          { type: 'text', text: ' and then' },
+        ],
+      },
+    })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 3, result: 'done' })
+    await running
+
+    // One call per block that changed a number, in frame order. The text block
+    // reports the tool count SO FAR, which is what makes the pill's two numbers
+    // consistent with each other at every moment.
+    expect(seen).toEqual([
+      { toolCalls: 0, lastTool: '', chars: 11 },
+      { toolCalls: 1, lastTool: 'Grep', chars: 11 },
+      { toolCalls: 2, lastTool: 'Read', chars: 11 },
+      { toolCalls: 2, lastTool: 'Read', chars: 20 },
+    ])
+  })
+
+  it('never reports the text itself', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const payloads: string[] = []
+    const running = runAgent(turnOptions(entry, {
+      onProgress: progress => { payloads.push(JSON.stringify(progress)) },
+    }), [credential], () => {})
+
+    initFrames(child)
+    child.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'SECRET-ANSWER' }] } })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'SECRET-ANSWER' })
+    await running
+
+    // The pill is a COUNT, never a copy: shipping the text here would put a
+    // second, growing copy of the answer in a place nobody asked for.
+    expect(payloads.join('')).not.toContain('SECRET-ANSWER')
+  })
+
+  it('reports nothing when no callback is supplied', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const running = runAgent(turnOptions(entry), [credential], () => {})
+    initFrames(child)
+    child.emitFrame({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Grep', id: 't1' }] } })
+    child.emitFrame({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: 'ok' })
+    // The point is that this resolves rather than throwing on an absent callback.
+    await expect(running).resolves.toMatchObject({ ok: true })
+  })
+})
+
+/**
+ * The board row is the composer pill's only source, so the ID it carries decides
+ * whether the pill shows the turn at all: the browser keeps the rows whose
+ * `sessionId` equals the session the pill is mounted in.
+ *
+ * There are TWO ids in play and they are not interchangeable — the DSH session
+ * the turn was called from (`execution.agent.id`, what the pill filters on) and
+ * the CLI's own session uuid (reported to the caller as `session_id`). The first
+ * draft wrote the second over the first at "finishing" time, which made the pill
+ * drop its own row for the last seconds of every turn. This locks the separation.
+ */
+describe('the live board row identity', () => {
+  const baseOptions: BridgeOptions = {
+    enabled: true,
+    binary: '',
+    model: '',
+    permissionMode: 'dontAsk',
+    effort: '',
+    maxTurns: 3,
+    timeoutSecs: 30,
+    regionOrder: [],
+    workingDir: '',
+    allowedDirs: [],
+    appendSystemPrompt: '',
+    allowUnattended: false,
+    maxReplyChars: 1_000,
+    injectResult: false,
+    sessionContinuity: 'off',
+    maxTurnsPerSessionHour: 0,
+    maxTurnsPerHour: 0,
+  }
+
+  it('keeps the DSH session id after the CLI reports its own session uuid', async () => {
+    const child = fakeChild()
+    useChild(child)
+    const board = createLiveBoard()
+    const opened: LiveTurn[] = []
+    const begin = board.begin
+    board.begin = input => {
+      const turn = begin(input)
+      opened.push(turn)
+      return turn
+    }
+
+    const previous = process.env['CODEBUDDY_AUTH_TOKEN']
+    process.env['CODEBUDDY_AUTH_TOKEN'] = 'token-abcdef123456'
+    try {
+      const running = runAsk(
+        { message: 'do the thing', working_dir: dir },
+        { agent: { id: 'session-dsh' } },
+        {
+          options: { ...baseOptions, binary: entry, allowedDirs: [dir] },
+          regions: [],
+          log: () => {},
+          live: board,
+          // The gate has its own suite; here it must simply not refuse.
+          gate: { tryEnter: () => ({ ok: true, release: () => {} }) } as never,
+        },
+      )
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalled()
+      })
+      initFrames(child)
+      child.emitFrame({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } })
+      child.emitFrame({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        num_turns: 1,
+        result: 'done',
+        session_id: 'cli-session-uuid',
+      })
+      const outcome = await running
+
+      expect(outcome.ok).toBe(true)
+      // The caller still gets the CLI's uuid, which is what resumes the CLI session.
+      expect(outcome.session_id).toBe('cli-session-uuid')
+      // The board row keeps the DSH id — the only value the pill can match.
+      expect(opened).toHaveLength(1)
+      expect(opened[0]?.sessionId).toBe('session-dsh')
+      // And the row is retired, so the pill stops claiming a turn.
+      expect(board.size()).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env['CODEBUDDY_AUTH_TOKEN']
+      else process.env['CODEBUDDY_AUTH_TOKEN'] = previous
+    }
+  })
+})
+
+/**
+ * Automatic session continuation (`cliBridge.sessionContinuity`).
+ *
+ * MEASURED BEFORE IT WAS WIRED, not assumed: against the installed CLI,
+ * `--session-id <existing>` really does resume the conversation (a number sent in
+ * turn 1 came back from turn 2, same id echoed both times), and an UNKNOWN id is
+ * NOT an error — the CLI silently opens a fresh session under it. That second
+ * fact is why a stale entry here costs one new conversation instead of a
+ * corrupted one, and it is also why these tests assert the ARGUMENT rather than
+ * pretending to assert the model's memory.
+ *
+ * The rule being locked: an explicit `session_id` argument always wins, because a
+ * caller may be deliberately branching; otherwise `auto` reuses what this DSH
+ * session ran last, and `off` reuses nothing.
+ */
+describe('automatic session continuation', () => {
+  const autoOptions: BridgeOptions = {
+    enabled: true,
+    binary: '',
+    model: '',
+    permissionMode: 'dontAsk',
+    effort: '',
+    maxTurns: 3,
+    timeoutSecs: 30,
+    regionOrder: [],
+    workingDir: '',
+    allowedDirs: [],
+    appendSystemPrompt: '',
+    allowUnattended: false,
+    maxReplyChars: 1_000,
+    injectResult: false,
+    sessionContinuity: 'auto',
+    maxTurnsPerSessionHour: 0,
+    maxTurnsPerHour: 0,
+  }
+
+  let previousToken: string | undefined
+
+  beforeEach(() => {
+    // Recording is unconditional (the setting decides what is READ, not kept), so
+    // a key shared with an earlier test would otherwise start this suite already
+    // pointing at a conversation.
+    forgetCliSession('session-cont')
+    previousToken = process.env['CODEBUDDY_AUTH_TOKEN']
+    process.env['CODEBUDDY_AUTH_TOKEN'] = 'token-abcdef123456'
+  })
+
+  afterEach(() => {
+    if (previousToken === undefined) delete process.env['CODEBUDDY_AUTH_TOKEN']
+    else process.env['CODEBUDDY_AUTH_TOKEN'] = previousToken
+  })
+
+  /** The argv of every real spawn (the Windows taskkill helper excluded). */
+  function spawnedArgs(): string[][] {
+    return spawnMock.mock.calls
+      .filter(call => !String(call[0]).endsWith('taskkill'))
+      .map(call => (Array.isArray(call[1]) ? (call[1] as string[]) : []))
+  }
+
+  /** Run one bridged turn against `child`, which reports `cliSessionId`. */
+  async function runTurn(
+    child: FakeChild,
+    args: Record<string, unknown>,
+    options: BridgeOptions,
+    cliSessionId: string,
+    agentId = 'session-cont',
+  ): Promise<Awaited<ReturnType<typeof runAsk>>> {
+    const running = runAsk(args, { agent: { id: agentId } }, {
+      options: { ...options, binary: entry, allowedDirs: [dir] },
+      regions: [],
+      log: () => {},
+      gate: { tryEnter: () => ({ ok: true, release: () => {} }) } as never,
+    })
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled())
+    initFrames(child)
+    child.emitFrame({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      num_turns: 1,
+      result: 'done',
+      session_id: cliSessionId,
+    })
+    return await running
+  }
+
+  it('threads the previous CLI session into the next call in the same DSH session', async () => {
+    const first = fakeChild(5001)
+    const second = fakeChild(5002)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    const one = await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1')
+    expect(one.ok).toBe(true)
+    expect(one.session_id).toBe('cli-uuid-1')
+
+    const two = await runTurn(second, { message: 'second', working_dir: dir }, autoOptions, 'cli-uuid-2')
+    expect(two.ok).toBe(true)
+
+    const args = spawnedArgs()
+    expect(args).toHaveLength(2)
+    // Turn one had nothing to continue, so it must NOT pass an id at all.
+    expect(args[0]).not.toContain('--session-id')
+    // Turn two continues the uuid turn one reported.
+    expect(args[1]).toContain('--session-id')
+    expect(args[1]?.[args[1].indexOf('--session-id') + 1]).toBe('cli-uuid-1')
+  })
+
+  it('lets an explicit session_id override the remembered one', async () => {
+    const first = fakeChild(5011)
+    const second = fakeChild(5012)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1')
+    await runTurn(
+      second,
+      { message: 'second', working_dir: dir, session_id: 'explicit-id' },
+      autoOptions,
+      'cli-uuid-2',
+    )
+
+    const args = spawnedArgs()
+    expect(args[1]?.[args[1].indexOf('--session-id') + 1]).toBe('explicit-id')
+  })
+
+  it('starts fresh every time when sessionContinuity is off', async () => {
+    const first = fakeChild(5021)
+    const second = fakeChild(5022)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    const off: BridgeOptions = { ...autoOptions, sessionContinuity: 'off' }
+    await runTurn(first, { message: 'first', working_dir: dir }, off, 'cli-uuid-1')
+    await runTurn(second, { message: 'second', working_dir: dir }, off, 'cli-uuid-2')
+
+    for (const args of spawnedArgs()) expect(args).not.toContain('--session-id')
+  })
+
+  it('keeps sessions apart: one DSH session never continues another', async () => {
+    const first = fakeChild(5031)
+    const second = fakeChild(5032)
+    spawnMock.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    await runTurn(first, { message: 'first', working_dir: dir }, autoOptions, 'cli-uuid-1', 'session-a')
+    await runTurn(second, { message: 'second', working_dir: dir }, autoOptions, 'cli-uuid-2', 'session-b')
+
+    const args = spawnedArgs()
+    expect(args[1]).not.toContain('--session-id')
   })
 })

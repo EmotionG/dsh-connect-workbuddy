@@ -587,6 +587,10 @@ describe('registerWorkBuddyStatusRoute', () => {
       '/plugins/dsh-connect-workbuddy/__save',
       '/plugins/dsh-connect-workbuddy/oauth',
       '/plugins/dsh-connect-workbuddy/transfer',
+      // The live board the composer pill polls (CLI route only). Read-only, and
+      // registered unconditionally so the pill can tell "no turn" from "no
+      // route" without the client having to know the switch's state.
+      '/plugins/dsh-connect-workbuddy/cli-live',
     ])
   })
 

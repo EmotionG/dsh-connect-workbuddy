@@ -152,6 +152,20 @@ export const WORKBUDDY_POOL_ACCOUNT_PARAM = 'accountId'
  */
 export const WORKBUDDY_TRANSFER_PATH = '/plugins/dsh-connect-workbuddy/transfer'
 
+/**
+ * The CLI route's live turns, for the composer readout.
+ *
+ * A GET with no parameters and no region: a live turn is not scoped to a
+ * credential region (it is one spawned process), and the chip polls this on an
+ * interval, so it must stay cheap — the handler reads an in-memory board and
+ * serializes it, touching no upstream and no disk.
+ *
+ * The document is `{ turns: LiveTurnView[], serverTime: number }`. `serverTime`
+ * is the host's clock at serialization so the browser can derive an age from
+ * `startedAt` without trusting the two clocks to agree.
+ */
+export const WORKBUDDY_CLI_LIVE_PATH = '/plugins/dsh-connect-workbuddy/cli-live'
+
 /** The transfer endpoint's steps. */
 export type WorkBuddyTransferAction = 'export' | 'preview' | 'import'
 

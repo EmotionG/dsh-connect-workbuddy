@@ -45,23 +45,27 @@ export const INJECT_TEXT_LIMIT = 200_000
 /**
  * The `source.kind` stamped on every message this module writes.
  *
- * The Host's `MessageSource` is a CLOSED union — `model | user | tool |
- * system-prompt` — and only `user` is available for a message that must be read
- * as an incoming turn: `tool` requires a `callId` from a real tool call this
- * plugin did not make, `model` claims a provider produced it, `system-prompt`
- * would put it in the system slot. So the tag cannot say "a plugin wrote this",
- * and pretending otherwise would mean shipping a type that lies.
+ * This used to be `'user'`, on the reading that `MessageSource` is a closed
+ * union and `'user'` is the only slot a plugin-written turn message can occupy.
+ * That reading was wrong. `MessageSourceMap` is MERGE-EXTENSIBLE — its own doc
+ * comment says "each producer declares its own `kind` in its own module; there
+ * is no shared catch-all `plugin` kind", and consumers fall through unknown
+ * kinds — so `'user'` was never the only option, it was the dishonest one: the
+ * transcript rendered the injected CodeBuddy result as a user bubble, and the
+ * UI had no way to label the row as a notification. `dsh-connect-atomcode`
+ * stamps `'atomcode-bridge'` for exactly this reason.
  *
- * WHAT COMPENSATES FOR IT: the message opens with `PROVENANCE_LINE`, a bracketed
- * line that names the plugin and the command. A human scanning the transcript
- * can tell an injected result from something they typed, and so can the model —
- * which matters because a model that mistakes it for a human instruction will
- * act on it as one.
+ * The declaration that makes the union accept it lives in
+ * `src/dsh-llm-augment.d.ts`.
+ *
+ * `PROVENANCE_LINE` still opens the text: the kind is what the UI and later
+ * readers key on, but the text is what the MODEL reads, and a model cannot see
+ * `source`.
  */
-export const INJECT_SOURCE_KIND = 'user'
+export const INJECT_SOURCE_KIND = 'codebuddy-bridge'
 
-/** The first line of every injected message. Not decoration: it is the only
- * provenance signal the closed `source` union leaves available. */
+/** The first line of every injected message. Not decoration: the model never
+ * sees `source.kind`, so this line is its only provenance signal. */
 export const PROVENANCE_LINE = '[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]'
 
 /**

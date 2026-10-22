@@ -911,4 +911,30 @@ export const WORKBUDDY_COMPOSER_CSS = `
 }
 .dsm-workbuddy-composer-panel-empty{margin:0;color:var(--dsw-alias-label-tertiary,GrayText)}
 .dsm-workbuddy-composer-panel-error{margin:8px 0 0;color:var(--dsw-alias-state-error-primary,#d92d20);font-size:11px;line-height:16px}
+
+/* The CLI live pill shares the composer dock row with the credit readout above
+   and the shell's own ContextMeter, so it takes ITS metrics from the same place
+   the credit trigger does: 12px/18px, label-tertiary, tabular numerals. Rendered
+   with inline styles it inherited the dock's body font and read as stray text
+   sitting next to two native-looking controls. */
+.dsm-workbuddy-cli-live{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:2px 6px;border-radius:6px;
+  font-size:12px;line-height:18px;
+  color:var(--dsw-alias-label-tertiary,#999);
+  white-space:nowrap;font-variant-numeric:tabular-nums;
+}
+/* A quiet pulse is the whole signal that the turn is still moving: the label's
+   second counter also advances, but at one tick a second it is easy to miss. */
+.dsm-workbuddy-cli-live-dot{
+  width:6px;height:6px;border-radius:50%;flex:0 0 auto;
+  background:var(--dsw-alias-brand-primary,#5686fe);
+  animation:dsm-workbuddy-cli-live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dsm-workbuddy-cli-live-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+/* Respect the OS setting: a blinking dot is decoration, the numbers are the
+   information, and they keep updating with the animation off. */
+@media (prefers-reduced-motion:reduce){
+  .dsm-workbuddy-cli-live-dot{animation:none;opacity:.8}
+}
 `

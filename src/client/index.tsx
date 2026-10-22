@@ -37,6 +37,7 @@ import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
 import { WorkBuddyModelLabel } from './WorkBuddyModelLabel.tsx'
+import { CodebuddyLive } from './CodebuddyLive.tsx'
 import { selectQuotaNoticeClaim, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
@@ -249,6 +250,45 @@ export function apply(ctx: WorkBuddyClientContext): void {
     }
 
     /**
+     * The live CodeBuddy turn pill, in the same ambient dock as the readout.
+     *
+     * `order` 11 puts it immediately after the credit readout (10) and still
+     * right of the shell's own pills (0): the two numbers a user glances at while
+     * a turn runs sit together. The component renders `null` whenever no turn is
+     * live, which is the normal case — the bridge is off by default — so an
+     * unused seat costs one poll interval and nothing on screen.
+     *
+     * THE SESSION ID IS THE PILL'S DISPLAY CONDITION. `conversation.composer.dock`
+     * is declared `scope: 'session'`, so the registration's `inject` receives the
+     * session id and the pill can keep only the rows that session started. The
+     * board itself is host-wide (one route for every session in the process), so
+     * without this the pill would describe whatever turn is newest anywhere —
+     * including one from another tab, about a directory the reader is not in.
+     * Unlike the credit readout there is deliberately no provider gate: the CLI
+     * route is model-independent, and a turn started from a DeepSeek session is
+     * exactly a case the readout has to cover.
+     */
+    const registerCliLive = (): (() => void) | undefined => {
+      try {
+        return ctx.slots.inject('conversation.composer.dock' as never, () => (ctx.slots as unknown as {
+          register(
+            options: { name: string; id: string; order: number; locale: string; inject: (sessionId: string) => { t: (key: WorkBuddySettingsKey, params?: Record<string, unknown>) => string; sessionId: string } },
+            component: unknown,
+          ): () => void
+        }).register({
+          name: 'conversation.composer.dock',
+          id: 'dsh-connect-workbuddy-cli-live',
+          order: 11,
+          locale: namespace,
+          inject: (sessionId: string) => ({ t, sessionId }),
+        }, CodebuddyLive))
+      } catch (error: unknown) {
+        console.error('[dsh-connect-workbuddy] cli live slot failed to register (host provider unaffected):', error)
+        return undefined
+      }
+    }
+
+    /**
      * The frame-wide quota notice, DECLINED so the host keeps its own Toast
      * (issue #63 follow-up, the maintainer's call on a screenshot).
      *
@@ -327,6 +367,7 @@ export function apply(ctx: WorkBuddyClientContext): void {
       ...WORKBUDDY_CARD_KEYS.map(key => registerCard('plugins.row.config', `${key}#${key}`)),
       registerComposerCredits(),
       registerStatsCredits(),
+      registerCliLive(),
       registerQuotaNotice(),
       registerModelLabel(),
     ].filter((disposer): disposer is () => void => disposer !== undefined)

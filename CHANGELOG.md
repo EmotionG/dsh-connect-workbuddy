@@ -57,8 +57,14 @@
 ## 5.3.0 (2026-10-22)
 
 > 新增能力属 **minor**，本次定版 **5.3.0**。**默认关闭，关闭时插件行为与 5.2.3 完全一致**：不多一个工具、不多一条指令、不多一个请求，provider 路由、模型、凭据与计费一律未变。
+> **实时胶囊是唯一的例外**：它的只读路由 `/plugins/dsh-connect-workbuddy/cli-live` 与客户端组件**无条件注册**（否则客户端无法把「没有回合」和「没有这条路由」区分开），所以开关关着时每个打开的页面仍会每 5 秒问一次这条本地路由——它不碰上游、不花额度，代价是一个空数组的 JSON。
 >
 > 这一版是 PR #104 按维护者 13 条评审逐条重做的结果，**不是原样重提**。改动分三类：把「原版会真的伤到用户」的地方修掉、把原版站不住的论证改掉、把 runner 这条从未被测过的路径补上测试。
+
+### Fixes（已合入的 #104 之后补的）
+
+- **回注不再冒充用户发言**：`source.kind` 从 `'user'` 改成 `'codebuddy-bridge'`。`MessageSourceMap` 本来就是**可扩展**的（每个生产者在自己模块里声明 kind，`dsh-connect-atomcode` 就是这么做的），只在宿主自己的闭集里挑一个「最像的」既没必要也没好处——副作用是 GUI 把这条回注渲染成**用户气泡**，看不出它是通知。声明放在 `src/dsh-llm-augment.d.ts`；`PROVENANCE_LINE` 仍然留在正文首行，因为模型看不见 `source`。
+- **胶囊改用 composer 共用的样式**：原来是内联 `fontSize: 0.85em` / `opacity: .85`，字号继承 dock 正文，和旁边的额度胶囊、ContextMeter 对不齐，看着像外挂。类定义进 `WORKBUDDY_COMPOSER_CSS`（`.dsm-workbuddy-cli-live` / `-dot`，12px、`label-tertiary`、tab-nums、`prefers-reduced-motion` 关掉脉冲），由组件自己幂等注入——额度胶囊被 gate 关掉时样式也得在。
 
 ### Features
 
@@ -67,8 +73,11 @@
   - **结论回注会话模型**（`injectResult`，默认开）：空闲则 `steer` 起一轮，运行中则 `inject` 排进下一步。回注文本首行带 `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]`，并明确写「不要为了再确认一次而重复调用」，防止「回注 → 模型再问 → 再回注」的烧额度循环。
   - **凭据复用**：`CODEBUDDY_AUTH_TOKEN` → 插件已维护的 vault，**不需要再登录一次**。区域优先于新鲜度，`regionOrder` 默认 `cn,global`。
   - **非破坏性装配**：`cliBridge.enabled` 默认 `false`；`tools` / `commands` 用 `ctx.inject([...])`（**不是** apply 期 `ctx.get()` 采样）等待宿主服务。
-  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
+  - **配置**：`cliBridge.{enabled,binary,model,permissionMode,effort,maxTurns,timeoutSecs,regionOrder,workingDir,allowedDirs,appendSystemPrompt,allowUnattended,maxReplyChars,injectResult,sessionContinuity,maxTurnsPerSessionHour,maxTurnsPerHour}`，逐键有默认值，硬上限 `maxTurns 100` / `timeoutSecs 1800` / `maxReplyChars 400000`。**`cliBridge` 是 volatile 字段**：改它只重建这一条路由，不 dispose 两个 provider 栈。
   - **开关在卡片里，不用手改 YAML**：账号卡片的偏好区新增一个**全局**勾选「允许调用本机 CodeBuddy CLI 干活」，默认关闭。勾上后 `/codebuddy` 与 `codebuddy_ask` 一起出现，取消后一起消失；**关着时两个入口根本不注册**，不是注册后藏起来。写的是顶层 `cliBridge.enabled`（全局，与 cn/global 分区无关），只重建这一条路由，不 dispose provider 栈、不打断在飞请求。读取走 Host 的已提交值而不是浏览器镜像——后者在本命名空间会 stale，一个「看起来开了」的假值在这里等于谎报消费能力。
+  - **跑的时候看得见（实时胶囊）**：`conversation.composer.dock` 上挂一颗 `CodeBuddy · 7 tools · 42s · last: Bash`，数据来自插件自己的只读路由 `/plugins/dsh-connect-workbuddy/cli-live`（序列化宿主侧的 live board）。宿主工具调用是一次性的，`execute()` 不返回界面就什么都不知道——这颗胶囊补的就是那几分钟的空白。5 秒轮询、秒数由 1 秒本地 tick 推、多会话共享一个在途请求；没有回合时渲染 `null`，那一行不动。路由**无条件注册**（开关关着也在），客户端才能把「没有回合」与「没有这条路由」分开。**胶囊只描述本会话的回合**：座位 `conversation.composer.dock` 声明成 `scope: 'session'`，`inject` 第一个参数就是 `sessionId`，组件按它过滤——live board 是**宿主级**的（一条路由回答进程里所有会话），不过滤就会在 A 会话的输入框下面描述 B 会话（甚至另一个标签页）的回合。宿主没给 `sessionId` 时不过滤；宿主拿不到 `agent.id` 而标成 `sessionId: ''` 的行也保留，那同样是「真有人在干活」的证据。**不按供应商门控**：额度胶囊只在 WorkBuddy 供应商下出现是因为它报那家的额度，这颗胶囊报的是一个本地进程，CLI 路线刻意与模型无关。
+
+- **连续调用默认续接同一条 CodeBuddy 对话**（`sessionContinuity`，默认 `auto`）。第一次调用报回的 CLI `session_id` 记在宿主进程里（按 DSH 会话分开，最多 256 条，FIFO），第二次调用没显式传 `session_id` 时自动用它走 `--session-id`。**先量过再接**：真机跑两轮，第一轮让 CLI 记住 `7391`，第二轮只传会话 id 问它数字，答出 `7391`，且两次回显同一个 id；另一个方向也量了——传一个**不存在**的 id 不报错，CLI 会静默开一条新会话，所以这条记忆丢掉或过期只会退化成「一次新对话」，不会串到别人的对话里。显式传 `session_id` 永远优先（可以故意开新线）；设 `off` 回到「每次独立」。
 
 ### Fixes（相对 PR #104 初版）
 
@@ -84,7 +93,20 @@
 - **不再回退 PATH。** 初版探测不到就 `spawn('codebuddy')`（Windows 上 `codebuddy.cmd` + `shell: true`）—— PATH 上的任意二进制都能拿到 vault 令牌。现在探测失败**拒绝运行**并提示用 `cliBridge.binary` 指绝对路径；显式 `.cmd` / `.bat` 在 Windows 上直接拒绝（会经 `cmd.exe` 解释）。`shell: false` 全路径覆盖，`--model` / `--append-system-prompt` 不再有被 cmd.exe 切词的面。
 - **探测清单补齐，且不再承诺 `cbc`。** 初版只覆盖 `%APPDATA%\npm` 等四条；现在加了 `~/.npm-global`、`/opt/homebrew`、`~/.local`、pnpm/yarn/volta 全局目录，以及 nvm / n / fnm 的 node 版本目录。文档不再写「自动探测 `codebuddy` / `cbc`」——`cbc` 是同一个 `bin/codebuddy` 的别名，探测的是包路径而不是命令名。
 - **论证改成事实。** 初版与 README 都写「跟网关说话的那个进程真的是登录着的 CodeBuddy CLI，没有身份要伪造，所以伪装那条路被封时它还能用」。实际上代码是用 `CODEBUDDY_AUTH_TOKEN` 把 plugin vault 里的**同一个 WorkBuddy 账号**交给 CLI，身份没变，`11140` 是账号级的 —— 逃掉的只有客户端指纹层。README / 顶部注释 / CHANGELOG 现在都这么写，不再把它当「封号之后的免死金牌」。
-- **`scratchDir()` 的固定共享目录只作为 `allow_unattended` 的最后一档**，不再是默认出路；`allowUnattended` 仍然默认 `false`。
+- **`scratchDir()` 改成每次调用一个新目录。** 原来是固定路径 `tmpdir()/dsh-codebuddy-scratch`：两个并发的无人值守回合会共用一块可读写空间，互相看得见、也改得掉对方的文件，上一轮留下的东西还在。现在用 `mkdtempSync`，每次拿到一个空的、名字唯一的目录，回合结束时（`finally`）尽力删除。`allowUnattended` 仍然默认 `false`。
+
+### Fixes（相对 PR #107 重做版）
+
+- **Windows 上自动探测 CLI 会 100% 失败（阻断级）。** #107 把清单写成「每个根目录都拼 `lib/node_modules`」，但 Windows 的 npm 全局前缀是 `%APPDATA%\npm`，包直接落在 `<prefix>\node_modules`，**没有 `lib` 这一层**。于是它探测的是 `%APPDATA%\npm\lib\node_modules\...` —— 那个目录在 Windows 上根本不存在，9 条候选全部落空，`resolveCliEntry('')` 直接报「没有找到本机安装的 CodeBuddy CLI」，用户必须手填 `cliBridge.binary` 才能用。修法：清单改成「每个根目录自带自己的布局」—— Windows 前缀拼 `node_modules`，POSIX 前缀拼 `lib/node_modules`，pnpm / yarn 的全局仓本身**就是** `node_modules` 根；volta 的镜像目录改成按版本展开（`tools/image/node/<version>/lib/node_modules`）。顺带去重：`%APPDATA%\npm` 与 `~/AppData/Roaming/npm` 在正常 Windows 上是同一个目录，原清单把它列了两遍。**为什么 CI 没拦住**：#107 的 runner spec 里没有任何一条针对 `cliEntryCandidates()` 的断言，所以 windows-latest 腿照样绿着 —— 绿的是测试，坏的是真机。现在补了 4 条。
+- **`/codebuddy` 的示例在自己的默认配置下必然失败。** hint 写「或写你的要求（如"修一下这个空指针"）」，但非评审调用**不传** `permission_mode`，于是走默认的 `dontAsk` = 写文件被拒。工具入口有 `permission_mode` 参数可按次覆盖，指令入口什么都没有 —— 这条不对称让 hint 举的那个例子只能是「这些工具被拒绝」。修法：新增 `--edit` 前缀（`/codebuddy --edit 修一下这个空指针`），只对这一次调用生效、不改默认值；`--edit` 单独用 = 评审并顺手修掉找到的问题。hint 与描述改成「留空 = 评审 / 写字 = 只读执行 / `--edit` 开头 = 允许改文件」，被拒时的提示也改成指向 `--edit`。`--edit` 会被剥掉，不会传给 CodeBuddy。
+- **同一类缺陷还有三处（一并补上）：pnpm / yarn / fnm 在 Windows 上的默认位置。** 清单原来只写 POSIX 路径（`~/.local/share/pnpm/global/5`、`~/.config/yarn/global`、`~/.fnm/node-versions`），而这三家在 Windows 上分别落在 `%LOCALAPPDATA%\pnpm\global\5`、`%LOCALAPPDATA%\Yarn\Data\global`、`%APPDATA%\fnm\node-versions`；pnpm 在 macOS 上还有 `~/Library/pnpm/global/5`。这些路径按各自工具文档的默认值补 —— 判错只多一次 `existsSync`，判漏就是「CLI not found」。**本机只能实测 npm 那条**（`%APPDATA%\npm\node_modules\@tencent-ai\codebuddy-code` 确认存在），其余三条没有对应的全局安装可验证。
+- **配额拒绝时会泄漏临时目录。** `resolveWorkingDir()` 在 `allow_unattended` 下**先**创建 scratch 目录，`gate.tryEnter()` 在它之后；被拒时直接 `return`，那个目录就留在 OS temp 里 —— 配额耗尽后反复重试，每次留一个空目录。实测本机 temp 里已经堆了 **9 个**。修法：拒绝分支里同样 `removeScratch`。测试是**先证明它会红**才留下的：把修复临时摘掉跑一次，报 `expected [ 'dsh-codebuddy-scratch-fVf7kZ' ] to deeply equal []`。
+- **`isReviewInvocation` 的注释过期。** 它还写着「empty line」，而 `--edit` 单独出现也会走评审分支。一行注释的事，但下一个读代码的人会按注释理解行为。
+- **胶囊的秒数会冻住（新增功能里的缺陷，被新测试当场逮到）。** 时钟偏移原本在**每次轮询返回**时重算（`offsetRef.current = next.serverTime - Date.now()`），但 `readLive` 会把同一份文档缓存到下一个轮询周期，而那份文档带的是**旧的** `serverTime` —— 于是每次命中缓存都把已经过去的时间从偏移里再减一遍，`Date.now() + offset - startedAt` 恒等于文档刚取到时的年龄，计数器永远显示同一个秒数（实测：过了 1.1 秒仍然显示 `0s`）。修法：只在 `serverTime` 变化（即真的拿到新文档）时重算偏移。测试是**先证明它会红**才留下的：把守卫临时改成恒真，报 `expected 'CodeBuddy · 3 tools · 0s · last: Read' to contain '1s'`。
+- **`serverTime` 缺校验时标签会印出 `NaNs`（独立复审发现的第二处）。** 路由是本插件自己的，但「自己人」不等于「永远对」：字段被改名、`undefined` 被 `JSON.stringify` 丢掉、以后换了 shape，都会让 `serverTime` 变成 `NaN`，偏移变 `NaN`，`Math.round(NaN)` 还是 `NaN`，而用户正好在这一行看「还要多久」。现在整份文档先过 `acceptDocument()`：`turns` 必须是数组、`serverTime` 必须是有限数字，单条回合缺 `startedAt`/`toolCalls` 时只丢那一条。测试同样是**先证明会红**：摘掉守卫跑一次，报 `expected 'CodeBuddy · 3 tools · NaNs · last: Read' to be ''`。
+- **路由连续失败时胶囊不会退场。** 原来的注释说「失败就继续显示上一份文档，等下一个 tick」——对一次掉包是对的，对一条开始返 500 的路由就是错的：胶囊会无限期描述一个早就结束的回合，秒数还在涨。现在连续三个周期（15s）拿不到文档就清空，长到能扛过一次重载，短到不会在输入框上留一颗幽灵。
+- **胶囊会把别人的回合算成自己的（新增功能里的缺陷）。** live board 是**宿主级**的，一条路由回答进程里所有会话；组件原来不加区分地画「最新的那条」，于是 A 会话输入框下面会描述 B 会话（甚至另一个标签页）的回合——一条关于你没在看的目录的字，计数器还在动。现在座位用 `scope: 'session'` 给的 `sessionId` 过滤，只留本会话的行；宿主没给 id 时不过滤，`sessionId: ''`（宿主拿不到 `agent.id`）的行也保留。
+- **板子上的 `sessionId` 被 CLI 自己的 uuid 覆盖。** `tool.ts` 在「finishing」阶段写过 `liveTurn.sessionId = outcome.sessionId`，但那是**两个不同的 id**：板子上的 `sessionId` 是回合所属的 DSH 会话（开行时取自 `execution.agent.id`，也是胶囊过滤用的那个），`outcome.sessionId` 是 CLI 自己的会话 uuid（结果里以 `session_id` 返回，用于续接 CLI 会话）。覆盖之后，每个回合在最后几秒都会显示成属于一个不存在的会话——加上本会话过滤后，胶囊会把自己的行丢掉。现在两个 id 各归各位；回归测试**先证明它会红**才留下：把那一行临时加回去，`expected 'cli-session-uuid' to be 'session-dsh'`。
 
 - **`killTree()` 不再把 `pid ≤ 1` 当进程组 —— 这条测试曾经会把评审者的整个登录会话打死。** 原来只挡 `pid === undefined`，而 `process.kill(-pid)` 拿到的 `pid` 一旦是 `1`（测试里为了区分两个假子进程写的 `fakeChild(1)`）就退化成 `kill(-1)`：不是杀子进程树，而是**给当前用户能 signal 的所有进程发 SIGTERM**，一秒后还升级成 SIGKILL。实测（macOS）跑 `vitest run tests/cli-bridge-runner.spec.ts` 会让 launchd 记录 `node[<pid>]` 向 Finder / Dock / WindowManager / ControlCenter / 用户正开着的微信 / DSH 宿主同时发 SIGTERM；DSH 的 renderer 作为受害者退出后又被 `DesktopFatalRecovery` relaunch，用户视角就是「DSH 反复重启，还把微信一起关了」。现在 group-kill 只对 `Number.isInteger(pid) && pid > 1` 开放，其余退化成单进程 `child.kill()`；测试里的假 pid 从 `1/2` 改成 `51_001/51_002`，并新增回归用例（spy `process.kill`，断言永不出现非正数信号目标）。
 
@@ -113,7 +135,7 @@
 
 ### Tests
 
-- 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（17 条），共 **86 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
+- 新增 `tests/cli-bridge.spec.ts`（75 条）与 `tests/cli-bridge-runner.spec.ts`（30 条），共 **105 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
 - 开关本身另有两条：`tests/cli-bridge-switch.spec.ts`（`__save` 的合并语义：显式 false 生效、同级 cap 不被冲掉）与 `tests/cli-bridge-card-switch.spec.tsx`（读取只认显式 true、写入先 Host 后 scope、卡片默认关且点击只 POST 全局字段）。
 - **`runner.ts` 第一次有测试。** 初版的 53 条全是纯逻辑与注册形状，`runOneTurn` / `runAgent` / `spawn` 一次都没被调用过 —— 而评审找到的第 5/6/7/8 条缺陷全在那个盲区里。新 spec 用 `vi.mock('node:child_process')` 造 fake child，断言的是模块自己声明的协议：
   - `control_request` 的回包形状（`subtype:'success'` / `request_id` 原样回传 / `allowed:false`），且拒绝理由不以 synthetic-deny 前缀开头、result 帧前 **stdin 不 close**（这一条在修复前必红）；`interrupt` 分两条：普通工具**不带**（带了会中止整轮）、`ExitPlanMode` **必带**（不带则 `plan` 挂死）
@@ -122,8 +144,11 @@
   - 换号：只有 401 才换、**超时/崩溃不换**、最后一条 401 也不重试、空凭据列表报 `no credential worked`
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
-- 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
+- 重做版补的 8 条：`cliEntryCandidates()` 的四条布局断言（Windows 的 npm 前缀下直接是 `node_modules`、**没有 `lib` 层**；POSIX 前缀仍拼 `lib/node_modules`；pnpm / yarn 的全局仓本身就是模块根；同一个目录只被探测一次）；Windows 上 pnpm / yarn / fnm 三个仓库位置一条（fnm 那条要真造一个版本目录，否则「按版本展开」根本没被执行）；`parseCommandInput` 的 `--edit` 一条（带正文 → `acceptEdits` 且正文剥掉前缀）；配额拒绝后临时目录不残留一条；以及一条**反向约束**：指令的 hint 里不得出现默认权限模式跑不起来的示例。
+- 全量：**121 文件 / 1998 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功。
+- **实时胶囊的测试（新增）**：`tests/cli-bridge-live.spec.ts`（12 条）锁宿主侧 live board —— 开/退休告、失败回合也退休、指令与工具两个入口的标签、`elapsedMs` 由宿主时钟算、无 board 时不告警、以及「目录校验拒绝的调用**不得**留下胶囊」（公告发生在所有前置条件之后，所以没开始的工作不会闪一下）；`tests/cli-bridge-live-pill.spec.tsx`（19 条）锁客户端 —— 空闲渲染 `null`、标签含工具数与秒数、`starting`/`finishing` 不显示秒、`+N`、**秒数在两次轮询之间本地前进且请求数不变**、宿主时钟偏移校正、路由失败/畸形文档/没有 `fetch` 都不抛、**`serverTime` 不是数字时整份文档作废（否则标签会印出 `NaNs`）**、**单条回合缺数字时只丢那一条**、**连续三个周期失败后胶囊自己退场**、目录只进 tooltip 不进标签、**只描述本会话的回合**（别会话的行既不出现在标签里也不计入 `+N`）、**只有别会话在跑时渲染 `null`**、**宿主标不成会话的行照样保留**、**座位不给 `sessionId` 时不过滤**，以及 `readLive` 的并发合并与缓存过期。另在 `cli-bridge-runner.spec.ts` 补一条「板子上的 `sessionId` 必须是 DSH 会话 id，不得被 CLI 自己的 uuid 覆盖」——**先证明它会红**才留下：把那一行临时加回去，报 `expected 'cli-session-uuid' to be 'session-dsh'`。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
+- **会话续接的 7 条**（`cli-bridge-runner.spec.ts` 4 条 + `cli-bridge.spec.ts` 3 条）：第二轮真的带上第一轮报回的 `--session-id`、**第一轮不带**（没有可续接的就不该传）、显式 `session_id` 盖过记忆、`off` 时两轮都不带、两个 DSH 会话互不串（记忆按会话分桶）、设置的默认值与错值回退、以及记忆本身的写入/覆盖/清空/空值不覆盖/256 条上限。跨会话那条第一版用的是固定 key，被记忆污染后改成每例独立 key + `forgetCliSession` —— 那不是「修测试」，是测试自己发现了一个真实的隔离缺口。
 
 ### Tests（同期并入 main：issue #102 / #108）
 

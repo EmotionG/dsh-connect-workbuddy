@@ -705,6 +705,11 @@ const cliBridgeConfig = z.object({
     'Hand a successful /codebuddy result to the session model so the conversation knows about it. '
     + 'That wake-up costs a real DSH turn; set false to keep results purely local.',
   ),
+  sessionContinuity: z.string().default('auto').description(
+    'Whether a second /codebuddy (or codebuddy_ask) in the same session continues the previous CodeBuddy '
+    + 'conversation: auto (default) resumes it via --session-id, off starts a fresh one every time. '
+    + 'An explicit session_id argument always wins over this setting.',
+  ),
   maxTurnsPerSessionHour: z.number().step(1).min(0).default(6).description(
     'Bridged calls allowed per hour in one session. 0 disables the limit.',
   ),
@@ -1570,6 +1575,16 @@ export function apply(ctx: Context, config: Config): void {
     // re-login instruction that would change nothing. Cached per account and
     // issuance time; only ever consulted after a rejection.
     accountUsable: accountUsabilityProbe,
+    /**
+     * The CLI route's live turns, for the composer readout.
+     *
+     * Read through `cliRuntime` rather than captured once: the runtime is rebuilt
+     * whenever `cliBridge` settings change, and the board belongs to the runtime.
+     * A captured board would keep answering for a runtime nothing drives any
+     * more. Switched off means `undefined`, which the route reports as an empty
+     * document.
+     */
+    cliLive: () => cliRuntime?.live.snapshot() ?? { turns: [], serverTime: Date.now() },
     /**
      * Why each of the region's accounts cannot serve right now, for the composer
      * panel's table.

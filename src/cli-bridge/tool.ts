@@ -23,11 +23,12 @@
  *
  * @module dsh-connect-workbuddy/cli-bridge/tool
  */
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { resolveCredentials, type BridgeCredentialRegion } from './credentials.ts'
 import { TurnGate, type GateLimits } from './gate.ts'
+import type { LiveBoard, LiveEntrance, LiveTurn } from './live.ts'
 import { runAgent } from './runner.ts'
 import type { BridgeLog, BridgeToolExecution, BridgeToolsService } from './services.ts'
 
@@ -48,6 +49,17 @@ export const TOOLS_CAP = 12
 
 /** Hard ceiling on the reply length, in characters. */
 export const MAX_REPLY_CHARS_CAP = 400_000
+
+/**
+ * What `cliBridge.sessionContinuity` accepts.
+ *
+ * `auto` threads the previous CLI session into the next call; `off` leaves every
+ * call independent unless the caller passes `session_id` itself. There is no
+ * `on`-with-a-different-mechanism value: the one that was measured to work is
+ * `--session-id <existing>`, and offering `--continue` (whatever ran last in the
+ * cwd) next to it would make two concurrent sessions race for one conversation.
+ */
+export const SESSION_CONTINUITY_MODES = ['auto', 'off'] as const
 
 /** The normalized bridge settings, derived from the plugin config. */
 export interface BridgeOptions {
@@ -72,6 +84,12 @@ export interface BridgeOptions {
   allowUnattended: boolean
   maxReplyChars: number
   injectResult: boolean
+  /**
+   * `auto` = a call with no explicit `session_id` continues the previous CLI
+   * session of the same DSH session. `off` = every call starts fresh unless the
+   * caller names a session itself.
+   */
+  sessionContinuity: (typeof SESSION_CONTINUITY_MODES)[number]
   /** Turns per hour in one session; 0 = unbounded. */
   maxTurnsPerSessionHour: number
   /** Turns per hour across the whole process; 0 = unbounded. */
@@ -132,11 +150,71 @@ function clampInt(value: unknown, fallback: number, cap: number): number {
   return Math.max(1, Math.min(cap, number))
 }
 
-/** The throwaway directory used when the caller explicitly allows no workspace. */
+/**
+ * Last CLI session id per DSH session, for automatic continuation.
+ *
+ * WHY A MAP AND NOT JUST A TOOL ARGUMENT. `--session-id <existing>` really does
+ * resume the conversation — measured against the installed CLI: a number sent in
+ * turn 1 came back from turn 2, and the CLI echoed the same id both times. But
+ * that id only reaches the CLI when the CALLER passes it back as `session_id`,
+ * which asks the model to copy a uuid out of the previous result. Best effort,
+ * not a guarantee. Remembering the id here makes continuation the default rather
+ * than a habit.
+ *
+ * IN MEMORY ON PURPOSE. The value is a uuid owned by the CLI, and an unknown id
+ * is not an error there — the CLI silently starts a fresh session under it. So
+ * the failure mode of a lost or stale entry is one new conversation, never a
+ * mixed-up one, which is the right trade for a file the plugin would otherwise
+ * have to garbage-collect. Bounded (FIFO) so a long-lived process cannot grow it
+ * without limit.
+ */
+const CLI_SESSION_MEMORY = new Map<string, string>()
+const CLI_SESSION_MEMORY_CAP = 256
+
+/** Remember the CLI session a DSH session should continue next time. */
+export function rememberCliSession(sessionKey: string, cliSessionId: string): void {
+  if (sessionKey === '' || cliSessionId === '') return
+  // Delete first so an updated key moves to the back of the insertion order.
+  CLI_SESSION_MEMORY.delete(sessionKey)
+  CLI_SESSION_MEMORY.set(sessionKey, cliSessionId)
+  while (CLI_SESSION_MEMORY.size > CLI_SESSION_MEMORY_CAP) {
+    const oldest = CLI_SESSION_MEMORY.keys().next()
+    if (oldest.done === true) break
+    CLI_SESSION_MEMORY.delete(oldest.value)
+  }
+}
+
+/** The CLI session to continue for this DSH session, or `''` for a fresh one. */
+export function recallCliSession(sessionKey: string): string {
+  return CLI_SESSION_MEMORY.get(sessionKey) ?? ''
+}
+
+/** Drop one session's memory (used by tests and by an explicit reset). */
+export function forgetCliSession(sessionKey: string): void {
+  CLI_SESSION_MEMORY.delete(sessionKey)
+}
+
+/**
+ * A throwaway directory for ONE unattended turn.
+ *
+ * ONE DIRECTORY PER CALL, not a fixed `dsh-codebuddy-scratch`. A single shared
+ * path meant two concurrent unattended turns ran in the same writable space —
+ * each could read and overwrite the other's files, and anything a previous turn
+ * left behind was still there. `mkdtemp` guarantees a fresh, empty, uniquely
+ * named directory, which is what makes the "exempt by construction" argument in
+ * `resolveWorkingDir` actually true.
+ */
 export function scratchDir(): string {
-  const dir = join(tmpdir(), 'dsh-codebuddy-scratch')
-  mkdirSync(dir, { recursive: true })
-  return dir
+  return mkdtempSync(join(tmpdir(), 'dsh-codebuddy-scratch-'))
+}
+
+/** Best-effort removal: a locked file must not turn a finished turn into an error. */
+function removeScratch(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // Left for the OS temp cleaner; the turn itself already succeeded.
+  }
 }
 
 /** Where a turn will run, or why it cannot run at all. */
@@ -354,6 +432,14 @@ export interface AskDeps {
   log: BridgeLog
   /** Shared by the tool and the command, so their budgets cannot drift apart. */
   gate?: TurnGate
+  /**
+   * Where live turns are announced for the composer readout.
+   *
+   * Optional so every existing caller (and every test that builds a `deps` by
+   * hand) keeps working with no board at all — a turn then simply runs
+   * unobserved, which is the pre-feature behaviour rather than an error.
+   */
+  live?: LiveBoard
 }
 
 /** The gate this call must pass, built once per normalized option set. */
@@ -379,13 +465,155 @@ function sessionKeyOf(execution: BridgeToolExecution | undefined, fallback: stri
  * same validation — a command that re-implemented this would drift from the tool
  * the first time either side gained a knob.
  */
+/**
+ * Everything `runAsk` decided before the turn started.
+ *
+ * Passed as one object rather than as eight parameters so the live-turn branch
+ * and the plain branch cannot drift apart: there is exactly one place that knows
+ * what a turn was asked for.
+ */
+interface TurnRunContext {
+  startedAt: number
+  dir: WorkingDirChoice
+  message: string
+  effort: string
+  mode: string
+  modelArg: string
+  effectiveMode: string
+  /** The budget slot this turn holds; released by the caller, never here. */
+  entry: { release(): void }
+  liveTurn?: LiveTurn
+}
+
+/** The part of a turn that runs once the budget and the directory are settled. */
+async function runAskTurn(
+  args: Record<string, unknown>,
+  execution: BridgeToolExecution | undefined,
+  deps: AskDeps,
+  context: TurnRunContext,
+): Promise<AskResult> {
+  const { startedAt, dir, message, effort, modelArg, effectiveMode, liveTurn } = context
+  const { options, regions, log } = deps
+
+  let credentials
+  try {
+    credentials = await resolveCredentials(regions, options.regionOrder, log)
+  } catch (error) {
+    return result({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+
+  const sessionIdArg = typeof args['session_id'] === 'string' ? args['session_id'].trim() : ''
+  const signal = execution?.signal
+
+  // Continuation: an explicit `session_id` always wins, because the caller may be
+  // deliberately branching to a different conversation. Otherwise `auto` picks up
+  // whatever this DSH session ran last, so `/codebuddy` twice in a row shares one
+  // CodeBuddy conversation without the model having to copy a uuid forward.
+  const sessionKey = sessionKeyOf(execution, 'codebuddy_ask')
+  const continuedSessionId =
+    sessionIdArg !== ''
+      ? sessionIdArg
+      : options.sessionContinuity === 'auto'
+        ? recallCliSession(sessionKey)
+        : ''
+
+  if (liveTurn !== undefined) liveTurn.phase = 'running'
+
+  const outcome = await runAgent(
+    {
+      prompt: message,
+      cwd: dir.dir,
+      binary: options.binary,
+      model: modelArg !== '' ? modelArg : options.model,
+      permissionMode: effectiveMode,
+      effort: effort !== '' ? effort : options.effort,
+      appendSystemPrompt: options.appendSystemPrompt,
+      maxTurns: clampInt(args['max_turns'], options.maxTurns, MAX_TURNS_CAP),
+      timeoutMs: clampInt(args['timeout_secs'], options.timeoutSecs, TIMEOUT_SECS_CAP) * 1000,
+      ...(continuedSessionId !== '' ? { sessionId: continuedSessionId } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      ...(liveTurn === undefined
+        ? {}
+        : {
+            onProgress: (progress: { toolCalls: number; lastTool: string; chars: number }) => {
+              // Written in place: the board serializes this object on the route's
+              // own thread, and copying it per frame would allocate for no reason.
+              liveTurn.toolCalls = progress.toolCalls
+              liveTurn.lastTool = progress.lastTool
+              liveTurn.chars = progress.chars
+            },
+          }),
+    },
+    credentials,
+    log,
+  )
+
+  // The CLI has answered; what is left is truncation and rendering, which is fast
+  // but not instant on a 400 KB reply. Saying `finishing` keeps the chip honest
+  // about the difference between "still working" and "about to disappear".
+  if (liveTurn !== undefined) {
+    liveTurn.phase = 'finishing'
+    // NOT `liveTurn.sessionId = outcome.sessionId`. Those are two different ids:
+    // the board's `sessionId` is the DSH session this turn belongs to (taken from
+    // `execution.agent.id` when the row was opened, and what the composer pill
+    // filters on), while `outcome.sessionId` is the CLI's OWN session uuid, which
+    // is reported in the tool result as `session_id`. Overwriting one with the
+    // other used to make every finished turn look like it belonged to a session
+    // that does not exist, so the pill dropped its own row the moment the turn
+    // started finishing.
+  }
+
+  let reply = outcome.text
+  let truncated = false
+  if (reply.length > options.maxReplyChars) {
+    const omitted = reply.length - options.maxReplyChars
+    reply =
+      `${reply.slice(0, options.maxReplyChars)}\n\n` +
+      `[truncated by dsh-connect-workbuddy: ${String(omitted)} more characters. ` +
+      'Have CodeBuddy write the full text to a file and read it back.]'
+    truncated = true
+  }
+
+  const tools = [...outcome.toolCounts.entries()]
+    .slice(0, TOOLS_CAP)
+    .map(([name, count]) => ({ name, count }))
+
+  // Recorded even when the turn failed: a session the CLI opened is resumable
+  // whether or not this particular turn reached a conclusion, and resuming it
+  // next time is strictly better than re-exploring the workspace from zero.
+  // Recorded regardless of `sessionContinuity`, because the setting decides what
+  // is READ, not what is kept — flipping it back to `auto` then picks up the most
+  // recent conversation instead of the one before the setting was turned off.
+  rememberCliSession(sessionKey, outcome.sessionId ?? '')
+
+  return result({
+    ok: outcome.ok,
+    reply,
+    session_id: outcome.sessionId ?? '',
+    tools,
+    denied_tools: [...outcome.deniedTools],
+    tool_calls: [...outcome.toolCounts.values()].reduce((sum, count) => sum + count, 0),
+    num_turns: outcome.numTurns ?? 0,
+    tokens_in: outcome.usage?.input_tokens ?? 0,
+    tokens_out: outcome.usage?.output_tokens ?? 0,
+    cache_read_tokens: outcome.usage?.cache_read_input_tokens ?? 0,
+    credential_region: outcome.credential.region,
+    working_dir: dir.dir,
+    unattended: dir.unattended,
+    elapsed_ms: Date.now() - startedAt,
+    truncated,
+    error: outcome.error ?? '',
+  })
+}
+
 export async function runAsk(
   args: Record<string, unknown>,
   execution: BridgeToolExecution | undefined,
   deps: AskDeps,
+  entrance: LiveEntrance = 'tool',
 ): Promise<AskResult> {
   const startedAt = Date.now()
-  const { options, regions, log } = deps
+  const { options, log } = deps
 
   const mode = typeof args['permission_mode'] === 'string' ? args['permission_mode'].trim() : ''
   if (mode !== '' && !(PERMISSION_MODES as readonly string[]).includes(mode)) {
@@ -410,75 +638,58 @@ export async function runAsk(
   // the user a decision to make it.
   const gate = deps.gate ?? gateFor(options)
   const entry = gate.tryEnter(sessionKeyOf(execution, 'codebuddy_ask'), message => log(message))
-  if (!entry.ok) return result({ ok: false, error: entry.error })
+  if (!entry.ok) {
+    // The directory above was already created for this turn. A refused turn must
+    // not leave it behind: a client retrying against a full quota would otherwise
+    // litter the OS temp directory with one empty directory per attempt — the
+    // same class of leak that per-call `mkdtemp` was introduced to close.
+    if (dir.unattended) removeScratch(dir.dir)
+    return result({ ok: false, error: entry.error })
+  }
 
   try {
-    let credentials
-    try {
-      credentials = await resolveCredentials(regions, options.regionOrder, log)
-    } catch (error) {
-      return result({ ok: false, error: error instanceof Error ? error.message : String(error) })
-    }
-
+    // Announced BEFORE the credential lookup: resolving across several regions
+    // can take seconds, and a chip that only appears at spawn makes that window
+    // look like the click was ignored. `phase` is what distinguishes the two.
     const modelArg = typeof args['model'] === 'string' ? args['model'].trim() : ''
-    const sessionIdArg = typeof args['session_id'] === 'string' ? args['session_id'].trim() : ''
-    const signal = execution?.signal
-
-    const outcome = await runAgent(
-      {
-        prompt: message,
-        cwd: dir.dir,
-        binary: options.binary,
-        model: modelArg !== '' ? modelArg : options.model,
-        permissionMode: mode !== '' ? mode : options.permissionMode,
-        effort: effort !== '' ? effort : options.effort,
-        appendSystemPrompt: options.appendSystemPrompt,
-        maxTurns: clampInt(args['max_turns'], options.maxTurns, MAX_TURNS_CAP),
-        timeoutMs: clampInt(args['timeout_secs'], options.timeoutSecs, TIMEOUT_SECS_CAP) * 1000,
-        ...(sessionIdArg !== '' ? { sessionId: sessionIdArg } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-      },
-      credentials,
-      log,
-    )
-
-    let reply = outcome.text
-    let truncated = false
-    if (reply.length > options.maxReplyChars) {
-      const omitted = reply.length - options.maxReplyChars
-      reply =
-        `${reply.slice(0, options.maxReplyChars)}\n\n` +
-        `[truncated by dsh-connect-workbuddy: ${String(omitted)} more characters. ` +
-        'Have CodeBuddy write the full text to a file and read it back.]'
-      truncated = true
-    }
-
-    const tools = [...outcome.toolCounts.entries()]
-      .slice(0, TOOLS_CAP)
-      .map(([name, count]) => ({ name, count }))
-
-    return result({
-      ok: outcome.ok,
-      reply,
-      session_id: outcome.sessionId ?? '',
-      tools,
-      denied_tools: [...outcome.deniedTools],
-      tool_calls: [...outcome.toolCounts.values()].reduce((sum, count) => sum + count, 0),
-      num_turns: outcome.numTurns ?? 0,
-      tokens_in: outcome.usage?.input_tokens ?? 0,
-      tokens_out: outcome.usage?.output_tokens ?? 0,
-      cache_read_tokens: outcome.usage?.cache_read_input_tokens ?? 0,
-      credential_region: outcome.credential.region,
-      working_dir: dir.dir,
+    const effectiveMode = mode !== '' ? mode : options.permissionMode
+    const liveTurn: LiveTurn | undefined = deps.live?.begin({
+      entrance,
+      workingDir: dir.dir,
       unattended: dir.unattended,
-      elapsed_ms: Date.now() - startedAt,
-      truncated,
-      error: outcome.error ?? '',
+      permissionMode: effectiveMode,
+      model: modelArg !== '' ? modelArg : options.model,
+      ...(execution?.agent?.id !== undefined ? { sessionId: execution.agent.id } : {}),
     })
-  } catch (error) {
-    return result({ ok: false, error: error instanceof Error ? error.message : String(error), elapsed_ms: Date.now() - startedAt })
+    try {
+      return await runAskTurn(args, execution, deps, {
+        startedAt,
+        dir,
+        message,
+        effort,
+        mode,
+        modelArg,
+        effectiveMode,
+        entry,
+        ...(liveTurn === undefined ? {} : { liveTurn }),
+      })
+    } catch (error) {
+      // A thrown turn is reported as a failed RESULT, not as a rejection: the
+      // tool contract is that the model reads why it failed and can retry, and a
+      // rejected `execute` would surface as a crashed tool call instead.
+      return result({ ok: false, error: error instanceof Error ? error.message : String(error), elapsed_ms: Date.now() - startedAt })
+    } finally {
+      // Retiring the turn is the LAST thing that happens, whatever path was
+      // taken: a chip left behind by a thrown turn would sit on the composer
+      // forever, describing work that already finished.
+      if (liveTurn !== undefined) deps.live?.end(liveTurn)
+    }
   } finally {
     entry.release()
+    // A scratch directory is this turn's alone and holds nothing worth keeping.
+    // Removing it here is also what stops a writable CLI turn from leaving
+    // files behind in the OS temp directory for the next process to find.
+    if (dir.unattended) removeScratch(dir.dir)
   }
 }
 
@@ -539,7 +750,10 @@ export function mountAskTool(tools: BridgeToolsService | undefined, deps: AskDep
           },
           session_id: {
             type: 'string',
-            description: '可选：指定 CLI 会话 id，让后续调用接着同一个会话。不传则每次开新会话。',
+            description:
+              '可选：要续接的 CLI 会话 id。留空 = 由插件自动续接本会话上一轮的 CodeBuddy 对话'
+              + '（cliBridge.sessionContinuity=auto 时；=off 时留空就是每次开新会话）。'
+              + '只有想故意开一条新对话、或切到另一条对话时才显式传。',
           },
           allow_unattended: {
             type: 'boolean',

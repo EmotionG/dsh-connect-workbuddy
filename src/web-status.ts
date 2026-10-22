@@ -55,6 +55,7 @@ import {
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_OAUTH_PATH,
   WORKBUDDY_BENEFIT_CLAIM_PATH,
+  WORKBUDDY_CLI_LIVE_PATH,
   WORKBUDDY_POOL_PATH,
   WORKBUDDY_POOL_ACCOUNT_PARAM,
   WORKBUDDY_PROBE_PATH,
@@ -232,6 +233,16 @@ export interface WorkBuddyStatusRouteOptions {
    * probe.
    */
   accountUsable?(region: WorkBuddyRegion, account: WorkBuddyRecoveryCandidate): Promise<boolean>
+  /**
+   * The CLI route's live turns, for the composer readout.
+   *
+   * A READ of the bridge's in-memory board, not a computation: the route exists
+   * so a turn that is still running has somewhere to be observed from, and the
+   * board is the only thing that knows. Absent (the bridge is switched off, or
+   * this Host mounted the status routes without it) means "no live turns", which
+   * the chip renders as nothing at all.
+   */
+  cliLive?(): unknown
   /**
    * Why each of the region's accounts cannot serve right now, keyed by account
    * id. Absent key (or an absent dep) means "no reason known" — the composer
@@ -1924,6 +1935,38 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         }
       },
     })
+    /**
+     * The CLI route's live turns.
+     *
+     * Registered even when the bridge is switched off, and answers an empty
+     * document in that case: the composer chip polls this path unconditionally
+     * (it cannot know the setting — the settings mirror is not readable from a
+     * session component), so "off" has to be a 200 with nothing in it rather
+     * than a 404 the chip would have to special-case.
+     *
+     * No region parameter: a live turn is not scoped to a credential region, and
+     * `requestRegion` would 400 a perfectly valid read.
+     *
+     * A 404 is not an option here, and that is a second reason for the
+     * unconditional registration: the chip keeps showing the last document it
+     * read while a poll fails (it cannot tell "the route is gone" from "the
+     * request dropped"), so a route that vanished on a settings change would
+     * leave a ghost pill describing a turn that already ended. Answering an
+     * empty document keeps "off" inside the same code path as "no turns".
+     */
+    const disposeCliLive = ctx.webServer.register({
+      kind: 'exact',
+      path: WORKBUDDY_CLI_LIVE_PATH,
+      handler: (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        try {
+          json(res, 200, deps.cliLive?.() ?? { turns: [], serverTime: Date.now() })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
     return () => {
       disposeRefresh()
       disposeCheckin()
@@ -1936,6 +1979,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       disposeOAuth()
       disposeTransfer()
       disposeDiagWrite()
+      disposeCliLive()
     }
   }, 'dsh-connect-workbuddy: Web status route')
 }

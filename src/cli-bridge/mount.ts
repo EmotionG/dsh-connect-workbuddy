@@ -27,9 +27,11 @@
  */
 import { mountCodebuddyCommand } from './command.ts'
 import type { BridgeCredentialRegion } from './credentials.ts'
+import { createLiveBoard } from './live.ts'
+import type { LiveBoard } from './live.ts'
 import type { BridgeCommandsService, BridgeLog, BridgeToolsService } from './services.ts'
 import { gateFor } from './tool.ts'
-import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
+import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, SESSION_CONTINUITY_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
 import type { AskDeps, BridgeOptions } from './tool.ts'
 
 /**
@@ -53,6 +55,7 @@ export interface CliBridgeSettings {
   allowUnattended?: boolean
   maxReplyChars?: number
   injectResult?: boolean
+  sessionContinuity?: string
   maxTurnsPerSessionHour?: number
   maxTurnsPerHour?: number
 }
@@ -83,6 +86,11 @@ export const CLI_BRIDGE_DEFAULTS = {
   allowUnattended: false,
   maxReplyChars: 60_000,
   injectResult: true,
+  // `auto`: a second `/codebuddy` in the same session continues the first one's
+  // conversation instead of re-exploring the workspace. Measured to work through
+  // `--session-id <existing>`. `off` restores one-shot calls for anyone who wants
+  // each turn to be independent.
+  sessionContinuity: 'auto',
   // Bounded by default: an unbounded default is how one curious model turns a
   // feature into a bill. 0 would mean "no limit" if a user insists.
   maxTurnsPerSessionHour: 6,
@@ -145,6 +153,16 @@ export function normalizeCliBridgeOptions(
   }
 
   const regionOrder = text(raw.regionOrder, CLI_BRIDGE_DEFAULTS.regionOrder)
+  const sessionContinuity = text(raw.sessionContinuity, CLI_BRIDGE_DEFAULTS.sessionContinuity)
+  const safeSessionContinuity = (SESSION_CONTINUITY_MODES as readonly string[]).includes(sessionContinuity)
+    ? (sessionContinuity as (typeof SESSION_CONTINUITY_MODES)[number])
+    : CLI_BRIDGE_DEFAULTS.sessionContinuity
+  if (safeSessionContinuity !== sessionContinuity) {
+    reject(
+      `sessionContinuity "${sessionContinuity}" 不是合法值，已回退到 ${CLI_BRIDGE_DEFAULTS.sessionContinuity}；` +
+        `合法值：${SESSION_CONTINUITY_MODES.join(', ')}`,
+    )
+  }
   return {
     enabled: raw.enabled === true,
     binary: text(raw.binary, CLI_BRIDGE_DEFAULTS.binary),
@@ -160,6 +178,7 @@ export function normalizeCliBridgeOptions(
     allowUnattended: raw.allowUnattended === true,
     maxReplyChars: clampInt(raw.maxReplyChars, CLI_BRIDGE_DEFAULTS.maxReplyChars, MAX_REPLY_CHARS_CAP),
     injectResult: raw.injectResult !== false,
+    sessionContinuity: safeSessionContinuity,
     maxTurnsPerSessionHour: clampQuota(raw.maxTurnsPerSessionHour, CLI_BRIDGE_DEFAULTS.maxTurnsPerSessionHour),
     maxTurnsPerHour: clampQuota(raw.maxTurnsPerHour, CLI_BRIDGE_DEFAULTS.maxTurnsPerHour),
   }
@@ -174,6 +193,16 @@ export function normalizeCliBridgeOptions(
 export interface CliBridgeRuntime {
   options: BridgeOptions
   deps: AskDeps
+  /**
+   * The live-turn board the composer readout polls.
+   *
+   * Owned by the runtime so it is rebuilt with it: a settings change replaces the
+   * runtime, and a board carried over would keep describing turns whose options
+   * no longer apply. It is NOT part of `deps` for the same reason the gate is
+   * built here — both surfaces must announce into the same board, and there must
+   * be exactly one.
+   */
+  live: LiveBoard
 }
 
 /**
@@ -189,9 +218,10 @@ export function createCliBridgeRuntime(
 ): CliBridgeRuntime | undefined {
   const options = normalizeCliBridgeOptions(settings, message => log(message))
   if (!options.enabled) return undefined
+  const live = createLiveBoard()
   // One gate for both surfaces: the budget must not depend on which entrance the
   // call arrived through.
-  return { options, deps: { options, regions, log, gate: gateFor(options) } }
+  return { options, deps: { options, regions, log, gate: gateFor(options), live }, live }
 }
 
 /** Mount `codebuddy_ask` on a tools service, returning its disposer. */

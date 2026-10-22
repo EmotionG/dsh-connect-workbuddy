@@ -54,31 +54,84 @@ const REVIEW_BRIEF =
   '哪些地方有问题、为什么、怎么改。只报你确实看见的问题，不要猜。'
 
 /**
- * What the composer line becomes.
+ * The opt-in prefix that lets ONE invocation write.
+ *
+ * WHY THIS EXISTS. The default permission mode refuses writes, which is the
+ * right default for a bridge that a model can drive. But the command's own hint
+ * used to invite `修一下这个空指针` while offering no way to grant the write
+ * half of that request, so the documented example could only ever end in
+ * "这些工具被拒绝". The tool entrance had `permission_mode` for this; the
+ * command entrance had nothing. `--edit` is that missing knob, and it is
+ * deliberately per-invocation rather than a config flip: a human typing it is
+ * the consent, and it does not loosen the default for every later turn.
+ */
+export const EDIT_FLAG = '--edit'
+
+/** The mode `--edit` selects for the one turn it appears on. */
+const EDIT_PERMISSION_MODE = 'acceptEdits'
+
+/** One parsed composer line. */
+export interface CommandInput {
+  /** What is actually sent to CodeBuddy. */
+  prompt: string
+  /** How the human's words were used, for the result label. */
+  label: string
+  /** True when this is the built-in review (empty line, or `--edit` alone). */
+  review: boolean
+  /** Permission mode to pass for this turn; '' means "use the configured one". */
+  permissionMode: string
+}
+
+/**
+ * Read the composer line.
  *
  * Empty → the review brief. Non-empty → the text verbatim, because a human who
  * typed something meant it, and silently prepending a review brief to "改一下
  * 这个 bug" is how a command does something other than what it was asked.
+ *
+ * `--edit` is stripped and remembered rather than forwarded: CodeBuddy must not
+ * see a flag that only means something to this bridge.
  */
-export function composeCommandPrompt(raw: string): string {
+export function parseCommandInput(raw: string): CommandInput {
   const note = raw.trim()
-  return note === '' ? REVIEW_BRIEF : note
+  if (note === '') {
+    return { prompt: REVIEW_BRIEF, label: '（未提交改动）', review: true, permissionMode: REVIEW_PERMISSION_MODE }
+  }
+
+  const edit = /^--edit(?:\s|$)/u.test(note)
+  const body = edit ? note.replace(/^--edit\s*/u, '').trim() : note
+
+  if (body === '') {
+    // `--edit` on its own: find the problems and fix them in the same turn.
+    return { prompt: REVIEW_BRIEF, label: '（未提交改动，可写）', review: true, permissionMode: EDIT_PERMISSION_MODE }
+  }
+
+  return {
+    prompt: body,
+    label: edit ? `（可写：${body}）` : `（指令：${body}）`,
+    review: false,
+    permissionMode: edit ? EDIT_PERMISSION_MODE : '',
+  }
+}
+
+/** What the composer line becomes. */
+export function composeCommandPrompt(raw: string): string {
+  return parseCommandInput(raw).prompt
 }
 
 /** A one-line label saying how the human's words were used. */
 export function commandScopeLabel(raw: string): string {
-  const note = raw.trim()
-  return note === '' ? '（未提交改动）' : `（指令：${note}）`
+  return parseCommandInput(raw).label
 }
 
-/** Whether this invocation is the built-in review (empty line). */
+/** Whether this invocation is the built-in review (empty line, or `--edit` alone). */
 export function isReviewInvocation(raw: string): boolean {
-  return raw.trim() === ''
+  return parseCommandInput(raw).review
 }
 
-/** The permission mode this invocation runs in. */
+/** The permission mode this invocation runs in; '' means "use the configured one". */
 export function permissionModeForInvocation(raw: string): string {
-  return isReviewInvocation(raw) ? REVIEW_PERMISSION_MODE : ''
+  return parseCommandInput(raw).permissionMode
 }
 
 /**
@@ -111,7 +164,8 @@ export function formatCommandOutcome(
   const denied =
     value.denied_tools.length > 0
       ? `\n\n[注意：CodeBuddy 请求过这些工具但被拒绝：${value.denied_tools.join(', ')}。` +
-        '评审类任务读到这些就该够了；要它真动手请写明要求并显式指定权限模式]'
+        '评审类任务读到这些就该够了；要它真动手，在指令前加 --edit（只影响这一轮），' +
+        '或在配置里设 cliBridge.permissionMode=acceptEdits（影响之后每一轮）]'
       : ''
   const footer =
     `\n\n[session_id=${value.session_id === '' ? '?' : value.session_id} turns=${String(value.num_turns)} ` +
@@ -152,11 +206,11 @@ export function mountCodebuddyCommand(commands: BridgeCommandsService | undefine
     return commands.register({
       name: COMMAND_NAME,
       description:
-        '用 CodeBuddy 在当前工作区跑一轮；留空 = 评审未提交改动。' +
+        '用 CodeBuddy 在当前工作区跑一轮；留空 = 评审未提交改动；以 --edit 开头 = 这一轮允许改文件。' +
         `注意：默认（cliBridge.injectResult=true）跑完会把结论回注给本会话的模型，那一次唤醒会真的消耗 DSH token；` +
         '设 injectResult=false 才完全不碰模型。CodeBuddy 那一侧的账号额度每次都会消耗。',
       input: {
-        hint: '可留空：直接评审当前工作区未提交的改动；或写你的要求（如"修一下这个空指针"）',
+        hint: '留空 = 评审未提交改动；写要求 = 只读执行（如"看一下这个函数为什么崩"）；要以 --edit 开头 = 允许改文件（如"--edit 修一下这个空指针"）',
       },
       handler: async (invocation: BridgeCommandInvocation) => {
         // The command has no tool-call context, so the workspace comes from the
@@ -171,22 +225,22 @@ export function mountCodebuddyCommand(commands: BridgeCommandsService | undefine
         }
 
         const raw = typeof invocation.rawInput === 'string' ? invocation.rawInput : ''
-        const message = composeCommandPrompt(raw)
-        const review = isReviewInvocation(raw)
+        const parsed = parseCommandInput(raw)
 
         const startedAt = Date.now()
         try {
           const value = await runAsk(
             {
-              message,
+              message: parsed.prompt,
               working_dir: cwd,
-              ...(review ? { permission_mode: permissionModeForInvocation(raw) } : {}),
+              ...(parsed.permissionMode !== '' ? { permission_mode: parsed.permissionMode } : {}),
             },
             {
               ...(invocation.agent !== undefined ? { agent: invocation.agent } : {}),
               ...(invocation.signal !== undefined ? { signal: invocation.signal } : {}),
             },
             deps,
+            'command',
           )
           log(`command /${COMMAND_NAME} finished in ${String(Date.now() - startedAt)}ms (ok=${String(value.ok)})`)
 
