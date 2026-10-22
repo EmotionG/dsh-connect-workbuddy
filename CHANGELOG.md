@@ -50,7 +50,15 @@
 - **不再回退 PATH。** 初版探测不到就 `spawn('codebuddy')`（Windows 上 `codebuddy.cmd` + `shell: true`）—— PATH 上的任意二进制都能拿到 vault 令牌。现在探测失败**拒绝运行**并提示用 `cliBridge.binary` 指绝对路径；显式 `.cmd` / `.bat` 在 Windows 上直接拒绝（会经 `cmd.exe` 解释）。`shell: false` 全路径覆盖，`--model` / `--append-system-prompt` 不再有被 cmd.exe 切词的面。
 - **探测清单补齐，且不再承诺 `cbc`。** 初版只覆盖 `%APPDATA%\npm` 等四条；现在加了 `~/.npm-global`、`/opt/homebrew`、`~/.local`、pnpm/yarn/volta 全局目录，以及 nvm / n / fnm 的 node 版本目录。文档不再写「自动探测 `codebuddy` / `cbc`」——`cbc` 是同一个 `bin/codebuddy` 的别名，探测的是包路径而不是命令名。
 - **论证改成事实。** 初版与 README 都写「跟网关说话的那个进程真的是登录着的 CodeBuddy CLI，没有身份要伪造，所以伪装那条路被封时它还能用」。实际上代码是用 `CODEBUDDY_AUTH_TOKEN` 把 plugin vault 里的**同一个 WorkBuddy 账号**交给 CLI，身份没变，`11140` 是账号级的 —— 逃掉的只有客户端指纹层。README / 顶部注释 / CHANGELOG 现在都这么写，不再把它当「封号之后的免死金牌」。
-- **`scratchDir()` 的固定共享目录只作为 `allow_unattended` 的最后一档**，不再是默认出路；`allowUnattended` 仍然默认 `false`。
+- **`scratchDir()` 改成每次调用一个新目录。** 原来是固定路径 `tmpdir()/dsh-codebuddy-scratch`：两个并发的无人值守回合会共用一块可读写空间，互相看得见、也改得掉对方的文件，上一轮留下的东西还在。现在用 `mkdtempSync`，每次拿到一个空的、名字唯一的目录，回合结束时（`finally`）尽力删除。`allowUnattended` 仍然默认 `false`。
+
+### Fixes（相对 PR #107 重做版）
+
+- **Windows 上自动探测 CLI 会 100% 失败（阻断级）。** #107 把清单写成「每个根目录都拼 `lib/node_modules`」，但 Windows 的 npm 全局前缀是 `%APPDATA%\npm`，包直接落在 `<prefix>\node_modules`，**没有 `lib` 这一层**。于是它探测的是 `%APPDATA%\npm\lib\node_modules\...` —— 那个目录在 Windows 上根本不存在，9 条候选全部落空，`resolveCliEntry('')` 直接报「没有找到本机安装的 CodeBuddy CLI」，用户必须手填 `cliBridge.binary` 才能用。修法：清单改成「每个根目录自带自己的布局」—— Windows 前缀拼 `node_modules`，POSIX 前缀拼 `lib/node_modules`，pnpm / yarn 的全局仓本身**就是** `node_modules` 根；volta 的镜像目录改成按版本展开（`tools/image/node/<version>/lib/node_modules`）。顺带去重：`%APPDATA%\npm` 与 `~/AppData/Roaming/npm` 在正常 Windows 上是同一个目录，原清单把它列了两遍。**为什么 CI 没拦住**：#107 的 runner spec 里没有任何一条针对 `cliEntryCandidates()` 的断言，所以 windows-latest 腿照样绿着 —— 绿的是测试，坏的是真机。现在补了 4 条。
+- **`/codebuddy` 的示例在自己的默认配置下必然失败。** hint 写「或写你的要求（如"修一下这个空指针"）」，但非评审调用**不传** `permission_mode`，于是走默认的 `dontAsk` = 写文件被拒。工具入口有 `permission_mode` 参数可按次覆盖，指令入口什么都没有 —— 这条不对称让 hint 举的那个例子只能是「这些工具被拒绝」。修法：新增 `--edit` 前缀（`/codebuddy --edit 修一下这个空指针`），只对这一次调用生效、不改默认值；`--edit` 单独用 = 评审并顺手修掉找到的问题。hint 与描述改成「留空 = 评审 / 写字 = 只读执行 / `--edit` 开头 = 允许改文件」，被拒时的提示也改成指向 `--edit`。`--edit` 会被剥掉，不会传给 CodeBuddy。
+- **同一类缺陷还有三处（一并补上）：pnpm / yarn / fnm 在 Windows 上的默认位置。** 清单原来只写 POSIX 路径（`~/.local/share/pnpm/global/5`、`~/.config/yarn/global`、`~/.fnm/node-versions`），而这三家在 Windows 上分别落在 `%LOCALAPPDATA%\pnpm\global\5`、`%LOCALAPPDATA%\Yarn\Data\global`、`%APPDATA%\fnm\node-versions`；pnpm 在 macOS 上还有 `~/Library/pnpm/global/5`。这些路径按各自工具文档的默认值补 —— 判错只多一次 `existsSync`，判漏就是「CLI not found」。**本机只能实测 npm 那条**（`%APPDATA%\npm\node_modules\@tencent-ai\codebuddy-code` 确认存在），其余三条没有对应的全局安装可验证。
+- **配额拒绝时会泄漏临时目录。** `resolveWorkingDir()` 在 `allow_unattended` 下**先**创建 scratch 目录，`gate.tryEnter()` 在它之后；被拒时直接 `return`，那个目录就留在 OS temp 里 —— 配额耗尽后反复重试，每次留一个空目录。实测本机 temp 里已经堆了 **9 个**。修法：拒绝分支里同样 `removeScratch`。测试是**先证明它会红**才留下的：把修复临时摘掉跑一次，报 `expected [ 'dsh-codebuddy-scratch-fVf7kZ' ] to deeply equal []`。
+- **`isReviewInvocation` 的注释过期。** 它还写着「empty line」，而 `--edit` 单独出现也会走评审分支。一行注释的事，但下一个读代码的人会按注释理解行为。
 
 - **`killTree()` 不再把 `pid ≤ 1` 当进程组 —— 这条测试曾经会把评审者的整个登录会话打死。** 原来只挡 `pid === undefined`，而 `process.kill(-pid)` 拿到的 `pid` 一旦是 `1`（测试里为了区分两个假子进程写的 `fakeChild(1)`）就退化成 `kill(-1)`：不是杀子进程树，而是**给当前用户能 signal 的所有进程发 SIGTERM**，一秒后还升级成 SIGKILL。实测（macOS）跑 `vitest run tests/cli-bridge-runner.spec.ts` 会让 launchd 记录 `node[<pid>]` 向 Finder / Dock / WindowManager / ControlCenter / 用户正开着的微信 / DSH 宿主同时发 SIGTERM；DSH 的 renderer 作为受害者退出后又被 `DesktopFatalRecovery` relaunch，用户视角就是「DSH 反复重启，还把微信一起关了」。现在 group-kill 只对 `Number.isInteger(pid) && pid > 1` 开放，其余退化成单进程 `child.kill()`；测试里的假 pid 从 `1/2` 改成 `51_001/51_002`，并新增回归用例（spy `process.kill`，断言永不出现非正数信号目标）。
 
@@ -79,7 +87,7 @@
 
 ### Tests
 
-- 新增 `tests/cli-bridge.spec.ts`（69 条）与 `tests/cli-bridge-runner.spec.ts`（17 条），共 **86 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
+- 新增 `tests/cli-bridge.spec.ts`（72 条）与 `tests/cli-bridge-runner.spec.ts`（21 条），共 **93 条**（含 `killTree` 的 `pid ≤ 1` 回归用例）。
 - 开关本身另有两条：`tests/cli-bridge-switch.spec.ts`（`__save` 的合并语义：显式 false 生效、同级 cap 不被冲掉）与 `tests/cli-bridge-card-switch.spec.tsx`（读取只认显式 true、写入先 Host 后 scope、卡片默认关且点击只 POST 全局字段）。
 - **`runner.ts` 第一次有测试。** 初版的 53 条全是纯逻辑与注册形状，`runOneTurn` / `runAgent` / `spawn` 一次都没被调用过 —— 而评审找到的第 5/6/7/8 条缺陷全在那个盲区里。新 spec 用 `vi.mock('node:child_process')` 造 fake child，断言的是模块自己声明的协议：
   - `control_request` 的回包形状（`subtype:'success'` / `request_id` 原样回传 / `allowed:false`），且拒绝理由不以 synthetic-deny 前缀开头、result 帧前 **stdin 不 close**（这一条在修复前必红）；`interrupt` 分两条：普通工具**不带**（带了会中止整轮）、`ExitPlanMode` **必带**（不带则 `plan` 挂死）
@@ -88,8 +96,9 @@
   - 换号：只有 401 才换、**超时/崩溃不换**、最后一条 401 也不重试、空凭据列表报 `no credential worked`
   - 脱敏：token 与 `Bearer …` 形态既不进正文也不进 errors
 - 主 spec 的新增/重写部分：`resolveWorkingDir` 的 9 条真目录断言（不存在 / 是文件不是目录 / 相对路径 / 允许根之外 / `allowedDirs` 放行 / 前缀相同的兄弟目录拒绝）、`TurnGate` 的 7 条（假时钟注入、并发 busy、配额拒绝、窗口滑过恢复、`0` = 不限、`clear()`）、`resolveCliEntry` 的新签名与「显式路径失败不得回退 PATH」、`looksLikeAuthFailure` 的新签名。
-- 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
+- 重做版补的 8 条：`cliEntryCandidates()` 的四条布局断言（Windows 的 npm 前缀下直接是 `node_modules`、**没有 `lib` 层**；POSIX 前缀仍拼 `lib/node_modules`；pnpm / yarn 的全局仓本身就是模块根；同一个目录只被探测一次）；Windows 上 pnpm / yarn / fnm 三个仓库位置一条（fnm 那条要真造一个版本目录，否则「按版本展开」根本没被执行）；`parseCommandInput` 的 `--edit` 一条（带正文 → `acceptEdits` 且正文剥掉前缀）；配额拒绝后临时目录不残留一条；以及一条**反向约束**：指令的 hint 里不得出现默认权限模式跑不起来的示例。
 - **另做了一轮真机联调**（`@tencent-ai/codebuddy-code` 2.171.0，真实 vault 账号，非 mock），六项全过：①`dontAsk` 默认 9.9 秒一轮，Glob/Bash 放行、Write 被拒且如实汇报；②`acceptEdits` 下 Bash 被拒后 CLI 换 PowerShell 完成任务（12.2 秒、`ok:true`），验证 `interrupt` 不能对所有工具开；③`plan` 的 `ExitPlanMode` 被带 `interrupt:true` 拒掉后 12.8 秒结束，不再挂满 `timeoutSecs`；④`acceptEdits` 真的写文件，且落在我们指定的 cwd（`hello.txt` 内容一字不差）；⑤6 秒超时 → 6.0 秒抛 `codebuddy exceeded its 6s budget`，**事后无残留 codebuddy 进程**（`taskkill /T` 生效）；⑥凭据链真实可用：global 令牌得到 `401 Authentication required`、换 cn 后 8.1 秒成功，且全程 token 未进正文/errors。
+- 全量：**118 文件 / 1935 条通过（另 2 条 skip）**；`tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json` 均 exit 0；`tsdown` build 成功（`lib/index.js` 451.31 kB）。
 
 ### Tests（同期并入 main：issue #102 / #108）
 

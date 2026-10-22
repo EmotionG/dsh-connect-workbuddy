@@ -23,7 +23,7 @@
  *
  * @module dsh-connect-workbuddy/cli-bridge/tool
  */
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { resolveCredentials, type BridgeCredentialRegion } from './credentials.ts'
@@ -132,11 +132,27 @@ function clampInt(value: unknown, fallback: number, cap: number): number {
   return Math.max(1, Math.min(cap, number))
 }
 
-/** The throwaway directory used when the caller explicitly allows no workspace. */
+/**
+ * A throwaway directory for ONE unattended turn.
+ *
+ * ONE DIRECTORY PER CALL, not a fixed `dsh-codebuddy-scratch`. A single shared
+ * path meant two concurrent unattended turns ran in the same writable space —
+ * each could read and overwrite the other's files, and anything a previous turn
+ * left behind was still there. `mkdtemp` guarantees a fresh, empty, uniquely
+ * named directory, which is what makes the "exempt by construction" argument in
+ * `resolveWorkingDir` actually true.
+ */
 export function scratchDir(): string {
-  const dir = join(tmpdir(), 'dsh-codebuddy-scratch')
-  mkdirSync(dir, { recursive: true })
-  return dir
+  return mkdtempSync(join(tmpdir(), 'dsh-codebuddy-scratch-'))
+}
+
+/** Best-effort removal: a locked file must not turn a finished turn into an error. */
+function removeScratch(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // Left for the OS temp cleaner; the turn itself already succeeded.
+  }
 }
 
 /** Where a turn will run, or why it cannot run at all. */
@@ -410,7 +426,14 @@ export async function runAsk(
   // the user a decision to make it.
   const gate = deps.gate ?? gateFor(options)
   const entry = gate.tryEnter(sessionKeyOf(execution, 'codebuddy_ask'), message => log(message))
-  if (!entry.ok) return result({ ok: false, error: entry.error })
+  if (!entry.ok) {
+    // The directory above was already created for this turn. A refused turn must
+    // not leave it behind: a client retrying against a full quota would otherwise
+    // litter the OS temp directory with one empty directory per attempt — the
+    // same class of leak that per-call `mkdtemp` was introduced to close.
+    if (dir.unattended) removeScratch(dir.dir)
+    return result({ ok: false, error: entry.error })
+  }
 
   try {
     let credentials
@@ -479,6 +502,10 @@ export async function runAsk(
     return result({ ok: false, error: error instanceof Error ? error.message : String(error), elapsed_ms: Date.now() - startedAt })
   } finally {
     entry.release()
+    // A scratch directory is this turn's alone and holds nothing worth keeping.
+    // Removing it here is also what stops a writable CLI turn from leaving
+    // files behind in the OS temp directory for the next process to find.
+    if (dir.unattended) removeScratch(dir.dir)
   }
 }
 

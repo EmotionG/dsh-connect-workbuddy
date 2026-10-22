@@ -148,44 +148,78 @@ export interface AgentOutcome {
 }
 
 /**
- * Roots a global npm install of the CLI can live under, most likely first.
+ * Directories that ARE a `node_modules` root a global install can live in,
+ * most likely first.
  *
  * WHY THE LIST IS THIS LONG. The first draft knew only about `%APPDATA%\npm`
  * and the two `/usr/*` prefixes, so every nvm, fnm, volta, pnpm, yarn, brew,
  * `~/.local` and `/opt/homebrew` user got "CLI not found" even though it was
  * installed. The version-manager roots cannot be listed statically (they carry
- * a version or a hash in the path), so `versionedCliEntries` globs one level.
+ * a version or a hash in the path), so `versionedCliRoots` globs one level.
+ *
+ * WHY EVERY ENTRY SPELLS OUT ITS OWN LAYOUT. A global npm prefix is not shaped
+ * the same way on every platform. On POSIX a prefix holds
+ * `<prefix>/lib/node_modules`; on Windows the prefix `%APPDATA%\npm` holds
+ * `<prefix>\node_modules` directly and has no `lib` level at all. Appending
+ * `lib/node_modules` to every root — which an earlier revision of this list
+ * did — produced paths that exist on no Windows machine, so auto-detection
+ * failed for every Windows user while the POSIX roots kept working. The
+ * pnpm and yarn stores are their own `node_modules` root for the same reason.
  *
  * None of these are probed through PATH, and `cbc` is not a separate target: it
  * is an alias of the same `bin/codebuddy` file inside the package.
  */
-function cliEntryRoots(): readonly string[] {
+function cliModuleDirs(): readonly string[] {
   const home = homedir()
-  const roots: string[] = []
+  const dirs: string[] = []
 
+  // Windows: the npm prefix is `%APPDATA%\npm`, packages sit directly under it.
   const appData = process.env['APPDATA']
-  if (typeof appData === 'string' && appData !== '') roots.push(join(appData, 'npm'))
-  // `npm config get prefix` output on macOS/Linux and Homebrew's default.
-  roots.push(join(home, '.npm-global'), '/usr/local', '/opt/homebrew', join(home, '.local'))
-  // Windows installations that predate the AppData redirect.
-  roots.push(join(home, 'AppData', 'Roaming', 'npm'))
-  // pnpm's and yarn's global stores.
-  roots.push(join(home, '.local', 'share', 'pnpm', 'global', '5'), join(home, '.config', 'yarn', 'global'))
-  // Volta.
-  roots.push(join(home, '.volta', 'tools', 'image'))
+  if (typeof appData === 'string' && appData !== '') dirs.push(join(appData, 'npm', 'node_modules'))
+  // Windows installations that predate the AppData redirect (same shape).
+  dirs.push(join(home, 'AppData', 'Roaming', 'npm', 'node_modules'))
 
-  return roots.map(root => join(root, 'lib', 'node_modules'))
+  // POSIX npm prefixes, including `npm config get prefix` and Homebrew's.
+  for (const prefix of [join(home, '.npm-global'), '/usr/local', '/opt/homebrew', join(home, '.local')]) {
+    dirs.push(join(prefix, 'lib', 'node_modules'))
+  }
+
+  // pnpm's and yarn's global stores are themselves the module root, and their
+  // default location is platform-specific: pnpm keeps its global dir under
+  // `%LOCALAPPDATA%\pnpm` on Windows and `~/Library/pnpm` on macOS, while yarn
+  // 1.x keeps it under `%LOCALAPPDATA%\Yarn\Data` on Windows. These are the
+  // defaults each tool documents; a wrong guess costs one `existsSync`, so the
+  // cost of listing them is zero and the cost of omitting them is "CLI not
+  // found" on a platform nobody tested.
+  dirs.push(join(home, '.local', 'share', 'pnpm', 'global', '5', 'node_modules'))
+  dirs.push(join(home, 'Library', 'pnpm', 'global', '5', 'node_modules'))
+  const localAppData = process.env['LOCALAPPDATA']
+  if (typeof localAppData === 'string' && localAppData !== '') {
+    dirs.push(join(localAppData, 'pnpm', 'global', '5', 'node_modules'))
+    dirs.push(join(localAppData, 'Yarn', 'Data', 'global', 'node_modules'))
+  }
+  dirs.push(join(home, '.config', 'yarn', 'global', 'node_modules'))
+
+  return dirs
 }
 
 /** Directories whose children are node version roots (`.../versions/node/<v>`). */
 function versionedCliRoots(): readonly string[] {
   const home = homedir()
-  return [
+  const roots: string[] = [
     join(home, '.nvm', 'versions', 'node'),
     join(home, 'n', 'versions', 'node'),
     join(home, '.fnm', 'node-versions'),
     join(home, '.local', 'share', 'fnm', 'node-versions'),
+    // Volta keeps one image per tool version, so its packages live one level
+    // deeper than a plain prefix: `tools/image/node/<version>/lib/node_modules`.
+    join(home, '.volta', 'tools', 'image', 'node'),
   ]
+  // fnm's default base directory is `%APPDATA%\fnm` on Windows; the two above
+  // are its POSIX and portable locations.
+  const appData = process.env['APPDATA']
+  if (typeof appData === 'string' && appData !== '') roots.push(join(appData, 'fnm', 'node-versions'))
+  return roots
 }
 
 /** Expand one directory's children into CLI entries, ignoring unreadable ones. */
@@ -201,12 +235,15 @@ function childrenOf(dir: string, separator: readonly string[]): readonly string[
 
 /** Every path a global install of the CLI could live at, most likely first. */
 export function cliEntryCandidates(): readonly string[] {
-  const out: string[] = [...cliEntryRoots().map(root => join(root, CLI_PACKAGE_PATH))]
+  const out: string[] = [...cliModuleDirs().map(dir => join(dir, CLI_PACKAGE_PATH))]
   for (const versions of versionedCliRoots()) {
     out.push(...childrenOf(versions, ['lib', 'node_modules', CLI_PACKAGE_PATH]))
-    out.push(...childrenOf(join(versions), ['installation', 'lib', 'node_modules', CLI_PACKAGE_PATH]))
+    out.push(...childrenOf(versions, ['installation', 'lib', 'node_modules', CLI_PACKAGE_PATH]))
   }
-  return out
+  // `%APPDATA%\npm` and `~/AppData/Roaming/npm` are the same directory on a
+  // normal Windows machine. Deduplicate so the list reports how many distinct
+  // places were actually probed, instead of listing one of them twice.
+  return [...new Set(out)]
 }
 
 /** Where the CLI entry was found, or why it was not. */

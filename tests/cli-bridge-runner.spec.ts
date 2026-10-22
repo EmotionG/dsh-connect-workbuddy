@@ -15,18 +15,27 @@
  * PROTOCOL this module speaks, and that is fully observable from the frames a
  * fake child emits.
  */
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spawnMock = vi.hoisted(() => vi.fn())
+const FAKE_HOME = vi.hoisted(() => 'C:\\Users\\tester')
 
 vi.mock('node:child_process', () => ({ spawn: spawnMock }))
 
+// The CLI-location list is built from `homedir()`, which must not be the machine
+// running the suite: otherwise the Windows-root assertion would pass on a
+// developer box and silently assert nothing on CI.
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return { ...actual, homedir: () => FAKE_HOME }
+})
+
 // Imported AFTER the mock is registered, which is what makes the module under
 // test pick up the fake `spawn`.
-import { isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
+import { cliEntryCandidates, isSyntheticDenyReason, looksLikeAuthFailure, runAgent, MAX_FRAME_BYTES } from '../src/cli-bridge/runner.ts'
 import type { BridgeCredential, TurnOptions } from '../src/cli-bridge/runner.ts'
 
 /** One fake child process, with the pieces `runner.ts` touches. */
@@ -473,5 +482,85 @@ describe('isSyntheticDenyReason', () => {
     expect(isSyntheticDenyReason('timeout waiting for user response')).toBe(true)
     expect(isSyntheticDenyReason('This is an unattended automated session.')).toBe(true)
     expect(isSyntheticDenyReason('dsh-connect-workbuddy runs this turn unattended')).toBe(false)
+  })
+})
+
+/**
+ * The CLI-location list, which had no test at all in the first draft — and that
+ * is exactly how a list that finds the CLI on no Windows machine shipped with a
+ * green windows-latest CI leg.
+ */
+describe('cliEntryCandidates', () => {
+  const PKG = join('@tencent-ai', 'codebuddy-code', 'bin', 'codebuddy')
+  const withAppData = (value: string | undefined, body: () => void): void => {
+    const previous = process.env['APPDATA']
+    if (value === undefined) delete process.env['APPDATA']
+    else process.env['APPDATA'] = value
+    try {
+      body()
+    } finally {
+      if (previous === undefined) delete process.env['APPDATA']
+      else process.env['APPDATA'] = previous
+    }
+  }
+
+  it('looks directly under the Windows npm prefix, with no lib level', () => {
+    withAppData('C:\\Users\\tester\\AppData\\Roaming', () => {
+      const candidates = cliEntryCandidates()
+      const prefix = join('C:\\Users\\tester\\AppData\\Roaming', 'npm')
+      // What actually exists on a Windows machine.
+      expect(candidates).toContain(join(prefix, 'node_modules', PKG))
+      // What does not, and what an earlier revision wrongly built.
+      expect(candidates).not.toContain(join(prefix, 'lib', 'node_modules', PKG))
+    })
+  })
+
+  it('keeps the lib/node_modules layout for POSIX prefixes', () => {
+    const candidates = cliEntryCandidates()
+    for (const prefix of ['/usr/local', '/opt/homebrew', join(FAKE_HOME, '.npm-global')]) {
+      expect(candidates).toContain(join(prefix, 'lib', 'node_modules', PKG))
+    }
+  })
+
+  it('treats the pnpm and yarn stores as module roots themselves', () => {
+    const candidates = cliEntryCandidates()
+    expect(candidates).toContain(join(FAKE_HOME, '.local', 'share', 'pnpm', 'global', '5', 'node_modules', PKG))
+    expect(candidates).toContain(join(FAKE_HOME, '.config', 'yarn', 'global', 'node_modules', PKG))
+  })
+
+  it('probes each distinct path once', () => {
+    // `%APPDATA%\npm` and `~/AppData/Roaming/npm` are the same directory on a
+    // normal Windows machine; the list must not claim to have tried it twice.
+    withAppData(join(FAKE_HOME, 'AppData', 'Roaming'), () => {
+      const candidates = cliEntryCandidates()
+      expect(new Set(candidates).size).toBe(candidates.length)
+    })
+  })
+
+  it('finds the Windows pnpm, yarn and fnm stores where those tools put them', async () => {
+    // The same defect as the npm prefix, one level down: every one of these
+    // stores moves under `%LOCALAPPDATA%` / `%APPDATA%` on Windows, and a list
+    // that only knows the POSIX path silently finds nothing there. fnm is a
+    // versioned root, so a real directory has to exist for it to be expanded.
+    const local = await mkdtemp(join(tmpdir(), 'cb-localappdata-'))
+    const roaming = await mkdtemp(join(tmpdir(), 'cb-appdata-'))
+    const previousLocal = process.env['LOCALAPPDATA']
+    const previousRoaming = process.env['APPDATA']
+    process.env['LOCALAPPDATA'] = local
+    process.env['APPDATA'] = roaming
+    try {
+      await mkdir(join(roaming, 'fnm', 'node-versions', 'v22.0.0', 'lib', 'node_modules'), { recursive: true })
+      const candidates = cliEntryCandidates()
+      expect(candidates).toContain(join(local, 'pnpm', 'global', '5', 'node_modules', PKG))
+      expect(candidates).toContain(join(local, 'Yarn', 'Data', 'global', 'node_modules', PKG))
+      expect(candidates).toContain(join(roaming, 'fnm', 'node-versions', 'v22.0.0', 'lib', 'node_modules', PKG))
+    } finally {
+      if (previousLocal === undefined) delete process.env['LOCALAPPDATA']
+      else process.env['LOCALAPPDATA'] = previousLocal
+      if (previousRoaming === undefined) delete process.env['APPDATA']
+      else process.env['APPDATA'] = previousRoaming
+      await rm(local, { recursive: true, force: true })
+      await rm(roaming, { recursive: true, force: true })
+    }
   })
 })

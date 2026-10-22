@@ -331,7 +331,7 @@ CLI 路线逃掉的是**客户端指纹层**，不是账号层。它用 `CODEBUD
 | `codebuddy_ask` 工具 | 模型自己决定调用 | 会话工作区；或调用方传的 `working_dir`；或 `cliBridge.workingDir` | CodeBuddy 的配额 + 那一次回注唤醒的 DSH token（`injectResult` 默认开） |
 | `/codebuddy` 指令 | 用户敲 | **自动取当前会话的工作区** | 同上——指令本身不经过模型，但默认会把结论回注给模型 |
 
-`/codebuddy` 后面**留空** = 让 CodeBuddy 评审当前工作区里未提交的改动（这种调用强制只读的 `dontAsk` 权限模式，并且要求它自己跑 `git diff`、只报确实看见的问题）；**写了字** = 原样把这句话发过去。
+`/codebuddy` 后面**留空** = 让 CodeBuddy 评审当前工作区里未提交的改动（这种调用强制只读的 `dontAsk` 权限模式，并且要求它自己跑 `git diff`、只报确实看见的问题）；**写了字** = 原样把这句话发过去；**以 `--edit` 开头** = 这一轮允许它改文件（`acceptEdits`，只影响这一次，不改变默认值，例如 `/codebuddy --edit 修一下这个空指针`；`--edit` 单独用 = 评审并顺手修掉找到的问题）。
 
 跑完之后结论会**回注给会话模型**（`cliBridge.injectResult`，默认开）：会话空闲时直接唤醒它起一轮，正在跑就排进它的下一步。**这一步真的花 DSH token**——把 `injectResult` 设成 `false` 才是「完全不碰模型」，那时 `/codebuddy` 的结论只显示给你看。回注的文本以一行 `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]` 开头，免得你（或者模型）把它当成自己打的字。
 

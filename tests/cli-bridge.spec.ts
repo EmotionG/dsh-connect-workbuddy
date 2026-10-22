@@ -17,6 +17,7 @@
  * Every one of those is asserted below rather than described.
  */
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -31,11 +32,14 @@ import { AUTH_TOKEN_ENV, resolveCredentials } from '../src/cli-bridge/credential
 import type { BridgeCredentialRegion } from '../src/cli-bridge/credentials.ts'
 import {
   COMMAND_NAME,
+  EDIT_FLAG,
   commandScopeLabel,
   composeCommandPrompt,
   formatCommandOutcome,
   isReviewInvocation,
   mountCodebuddyCommand,
+  parseCommandInput,
+  permissionModeForInvocation,
 } from '../src/cli-bridge/command.ts'
 import { composeContinuation, formatInjection, injectOutcome, INJECT_TEXT_LIMIT } from '../src/cli-bridge/inject.ts'
 import type { BridgeAgent } from '../src/cli-bridge/inject.ts'
@@ -409,6 +413,24 @@ describe('runAsk argument validation', () => {
     expect(value.ok).toBe(false)
     expect(value.error).toContain('working_dir')
   })
+
+  it('removes the scratch directory when the gate refuses the turn', async () => {
+    // The scratch directory is created while resolving the working directory,
+    // BEFORE the gate runs. A refusal used to return straight out of the
+    // function, leaving one empty `dsh-codebuddy-scratch-*` behind per attempt —
+    // so a client retrying against a full quota littered the OS temp directory.
+    const gate = new TurnGate({ perSessionPerHour: 1, globalPerHour: 1, allowConcurrentPerSession: false })
+    const spent = gate.tryEnter('codebuddy_ask', () => {})
+    if (spent.ok) spent.release()
+
+    const scratchPrefix = 'dsh-codebuddy-scratch-'
+    const before = new Set(readdirSync(tmpdir()).filter(name => name.startsWith(scratchPrefix)))
+    const value = await runAsk({ message: 'x', allow_unattended: true }, undefined, { ...deps, gate })
+    expect(value.ok).toBe(false)
+    expect(value.error).toContain('上限')
+    const leaked = readdirSync(tmpdir()).filter(name => name.startsWith(scratchPrefix) && !before.has(name))
+    expect(leaked).toEqual([])
+  })
 })
 
 describe('turn gate', () => {
@@ -722,6 +744,43 @@ describe('/codebuddy', () => {
     expect(isReviewInvocation('')).toBe(true)
     expect(isReviewInvocation('  ')).toBe(true)
     expect(isReviewInvocation('review')).toBe(false)
+  })
+
+  it('grants write permission for one turn only when --edit is typed', () => {
+    // The default refuses writes; the flag is the per-invocation consent.
+    expect(permissionModeForInvocation('修一下这个空指针')).toBe('')
+    expect(permissionModeForInvocation('')).toBe('dontAsk')
+
+    const edit = parseCommandInput(`${EDIT_FLAG} 修一下这个空指针`)
+    expect(edit.permissionMode).toBe('acceptEdits')
+    // The flag is bridge syntax, not something CodeBuddy should ever see.
+    expect(edit.prompt).toBe('修一下这个空指针')
+    expect(edit.label).toBe('（可写：修一下这个空指针）')
+    expect(edit.review).toBe(false)
+
+    // `--edit` alone is "review, and you may fix what you find".
+    const alone = parseCommandInput(`${EDIT_FLAG}   `)
+    expect(alone.prompt).toContain('未提交的改动')
+    expect(alone.permissionMode).toBe('acceptEdits')
+    expect(alone.label).toBe('（未提交改动，可写）')
+
+    // A word that merely starts with the flag is not the flag.
+    expect(parseCommandInput('--edit-something').prompt).toBe('--edit-something')
+    expect(parseCommandInput('--edit-something').permissionMode).toBe('')
+  })
+
+  it('does not advertise an example the default permission mode cannot run', () => {
+    const sink = captureCommands()
+    const dispose = mountCodebuddyCommand(sink.service, {
+      options: options(),
+      regions: [],
+      log: () => {},
+    })
+    const hint = sink.registered[0]?.input?.hint ?? ''
+    // Every "make it change something" example must carry the flag that permits it.
+    expect(hint).toContain(EDIT_FLAG)
+    expect(hint).toContain('允许改文件')
+    dispose()
   })
 
   it('registers under the documented name with a hint', () => {
