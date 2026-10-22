@@ -50,6 +50,28 @@
 import { useEffect, useRef, useState } from 'react'
 import { WORKBUDDY_CLI_LIVE_PATH } from '../status-paths.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
+import { WORKBUDDY_COMPOSER_CSS } from './styles.ts'
+
+/**
+ * Inject the dock stylesheet on module load, once.
+ *
+ * `ComposerCredits` injects the same sheet for its own classes, and in the
+ * shipped bundle both modules are static imports of the client entry, so in
+ * practice the sheet is already there. This block is not redundant: it makes the
+ * pill independent of whether the credit readout is mounted at all (the gate can
+ * hide it for a non-WorkBuddy model), and the `data-plugin-css` guard means the
+ * two never produce a second tag.
+ */
+if (typeof document !== 'undefined') {
+  const cssId = 'dsh-connect-workbuddy/composer-credits.css'
+  if (!document.querySelector(`style[data-plugin-css="${cssId}"]`)) {
+    const styleTag = document.createElement('style')
+    styleTag.dataset.plugin = 'dsh-connect-workbuddy'
+    styleTag.dataset.pluginCss = cssId
+    styleTag.textContent = WORKBUDDY_COMPOSER_CSS
+    document.head.appendChild(styleTag)
+  }
+}
 
 /** How often the route is asked. See the module comment for why 5s. */
 export const CLI_LIVE_POLL_MS = 5000
@@ -317,16 +339,12 @@ export function CodebuddyLive(props: CodebuddyLiveProps) {
       role="status"
       aria-label={t('cliLive.aria', { detail: label })}
       title={title}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '0.35em',
-        fontSize: '0.85em',
-        opacity: 0.85,
-        whiteSpace: 'nowrap',
-      }}
+      // Styled from the sheet, not inline: the dock row is shared with the
+      // credit readout and the shell's ContextMeter, and matching their 12px /
+      // label-tertiary metrics is what makes this read as one of them.
+      className="dsm-workbuddy-cli-live"
     >
-      <span aria-hidden="true" style={{ width: '0.5em', height: '0.5em', borderRadius: '50%', background: 'currentColor' }} />
+      <span aria-hidden="true" className="dsm-workbuddy-cli-live-dot" />
       {label}{extra}
     </span>
   )
