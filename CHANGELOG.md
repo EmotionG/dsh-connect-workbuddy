@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- **#102 没修完：`dsh-foreign` 的历史消息仍然把思考摊平成正文** —— 5.2.3 的 `alignAssistantIdentities()` 只改 `provider`，但 DSH 交给 pi-ai 的这条消息**根本到不了 provider 比较那一步之前就换了 api**。
+  - 真实链路：`dsh-llm-pi-ai` 的 `replayedAssistant()` 发现 `state.response.provider !== source.provider`（`workbuddy` vs `workbuddy-global`）就判定 replay 无效，改走 `foreignAssistant()`，而它把 `api` 写成 `dsh-foreign`、`provider` 取 `source.provider`（路由名）。于是 `isSameModel` 的两条比较**同时**失败；只补 `provider` 之后 `api` 仍然不等，thinking 照样被降级成 `text`。
+  - 实测（DSH 0.2.1-rc.2 + 本插件 5.2.3，真实 global 会话）：只改 `provider` 时，一条 1514 字符的 thinking 块变成 1514 字符的**正文**；两个字段都修后恢复成 `thinking`。
+  - 修法：`alignAssistantIdentities()` 在改 `provider` 之外，**仅当 `api === 'dsh-foreign'`**（宿主回退标记，插件自己从不会发这个值）时把它改回 `openai-completions`；其他任何 api 原样保留。
+  - **为什么这不算伪造签名**：`foreignAssistant()` 造的 thinking 块**没有 `thinkingSignature`**，而 pi-ai 的请求组装只有存在签名时才会写 `reasoning_content`，所以该块根本不会进请求——与现在一样不发，只是不再变成可见正文。另外 `api` 只取自 `model.api`（请求组装全文不读消息自带的 `api`），改它不改变线上形状。
+  - 真正的换模型仍然降级：`isSameModel` 还要求 model id 相等（有测试钉住）。
+
+### Tests
+
+- `tests/issue59-cross-region-thinking.spec.ts`：原「rewrites ONLY provider — api and model are untouched」用例改写为「只修宿主回退 api，原生 api 逐字节不动」。
+- 新增 2 条：宿主真实形状（`api:'dsh-foreign'` + 无签名 thinking）能保住 thinking（修复前必红）；provider 已对齐时 `dsh-foreign` 仍被单独修好（防止两个字段的修复互相短路）。
+- 已验证：撤回 `src/adapter.ts` 的改动后，新增用例立刻转红（2 failed / 12 passed）。
+
 ## 5.2.3 (2026-10-22)
 
 ### Fixes
