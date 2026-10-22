@@ -687,19 +687,27 @@ describe('the pool header states nothing twice', () => {
     await m.unmount()
   })
 
-  it('states the target model once, inside its own setting row', async () => {
-    // Provenance moved INTO the row, next to the control it describes. It used to
-    // be a separate note under the buttons AND in the header subtitle; the header
-    // copies are gone, so this row is now the single place it is stated.
-    const m = await mount(AccountPool, baseProps({
+  it('states the target model once — in its picker, not again beside it', async () => {
+    // This used to assert the opposite: the row printed "当前：X（你指定）" next to
+    // a select whose visible value IS X. That is the same id twice in one line of
+    // pixels, and a third copy sat in every table row ("模型 X" on each measured
+    // account) even though the pool has exactly one test model. A sentence now
+    // appears only when it says something the picker cannot: that the pool chose
+    // the model itself, so the user did not.
+    const preferred = await mount(AccountPool, baseProps({
       pool: poolOf({ targetModelSource: 'preferred', targetModelId: 'deepseek-v4.1-flash' }),
     }))
-    const texts = m.text()
-    expect(texts, 'the provenance is not shown at all').toContain('row.poolTargetCurrentPreferred')
-    // Exactly one occurrence: once in the row, nowhere else.
-    const matches = texts.split('row.poolTargetCurrentPreferred').length - 1
-    expect(matches, 'the target model is stated more than once').toBe(1)
-    await m.unmount()
+    const select = preferred.container.querySelector('select.dsm-workbuddy-pool-select') as HTMLSelectElement | null
+    expect(select, 'the picker is where the model is stated').not.toBeNull()
+    expect(select!.value, 'the picker must show the model the pool will use').toBe('deepseek-v4.1-flash')
+    expect(preferred.text(), 'the picker already shows this; the sentence restates it').not.toContain('row.poolTargetCurrentPreferred')
+    await preferred.unmount()
+
+    const free = await mount(AccountPool, baseProps({
+      pool: poolOf({ targetModelSource: 'free', targetModelId: 'free-1' }),
+    }))
+    expect(free.text(), 'a model the user did not choose still says so').toContain('row.poolTargetCurrentFree')
+    await free.unmount()
   })
 })
 
@@ -819,6 +827,25 @@ describe('the pool toolbar is one row of two clusters', () => {
     // It moved into the toolbar, so the old standalone row must not linger.
     const m = await mount(AccountPool, baseProps({ onRescan: () => {} }))
     expect(m.container.querySelector('.dsm-workbuddy-pool-rescan')).toBeNull()
+    await m.unmount()
+  })
+
+  it('hangs the bar under the member heading, above the rows it acts on', async () => {
+    // The buttons act on the CHECKED set. That set is described one line above
+    // it (「已选 N / M」 + 全选 / 全不选) and selected in the table one line
+    // below — so the bar belongs between the two. It used to sit ABOVE the whole
+    // member block, reading as a page-level toolbar with nothing to act on yet.
+    const m = await mount(AccountPool, baseProps({ onRescan: () => {} }))
+    const bar = m.container.querySelector('.dsm-workbuddy-pool-actions')!
+    const head = m.container.querySelector('.dsm-workbuddy-pool-members-head')!
+    const table = m.container.querySelector('.dsm-workbuddy-pool-table')!
+    expect(head.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the bar must come AFTER the member heading it acts for').toBeTruthy()
+    expect(bar.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the bar must come BEFORE the rows it acts on').toBeTruthy()
+    // And inside the member block, not a sibling of it: it is part of that block
+    // in the DOM, which is what makes it survive the block being re-ordered.
+    expect(bar.closest('.dsm-workbuddy-pool-members'), 'the bar escaped the member block').not.toBeNull()
     await m.unmount()
   })
 })
@@ -1384,7 +1411,7 @@ describe('manual priority: rows, rank badges and the up/down arrows', () => {
  * source to discover.
  */
 describe('ordering-rule disclosure in the settings panel', () => {
-  it('is rendered, collapsed, and sits above the member table', async () => {
+  it('is rendered, collapsed, and sits below the member table', async () => {
     stubFetch(() => ({ body: {} }))
     const m = await mount(AccountPool, baseProps())
     const rules = m.container.querySelector('details.dsm-workbuddy-pool-order-rules')
@@ -1392,11 +1419,17 @@ describe('ordering-rule disclosure in the settings panel', () => {
     // Collapsed by default: reference text must not push the controls down.
     expect(rules!.hasAttribute('open')).toBe(false)
     expect(rules!.querySelector('summary')!.textContent).toBe('row.poolOrderRulesTitle')
-    // Above the table in document order, so a reader meets the rule before the
-    // arrows it explains.
+    // BELOW the table and ABOVE the settings rows. It explains the 「第 N 位」
+    // badges and the ↑/↓ arrows in the data above it, so it belongs under the
+    // data: it used to sit between the member heading and the first row, which
+    // put a paragraph of annotation in front of the accounts themselves.
     const table = m.container.querySelector('.dsm-workbuddy-pool-table')!
-    expect(rules!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
-      'the rule must precede the table').toBeTruthy()
+    expect(table.compareDocumentPosition(rules!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the rule must follow the member table').toBeTruthy()
+    const modelSelect = m.container.querySelector(
+      'select.dsm-workbuddy-pool-select:not(.dsm-workbuddy-pool-account-select)')!
+    expect(rules!.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the rule must open the settings block, before its first control').toBeTruthy()
     await m.unmount()
   })
 

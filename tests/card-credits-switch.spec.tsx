@@ -292,18 +292,67 @@ describe('the readout renders as preference lines, not as the pool heading\'s ex
     expect(head?.querySelector('.dsm-workbuddy-pref')).toBeNull()
   })
 
-  it('renders the preference lines above the account pool', async () => {
+  /** Mount the CN fixture with the CN region tab ACTIVE.
+   *
+   * The section tabs only render for a signed-in region, and the card remembers
+   * which region tab was last used — the region-switch cases earlier in this
+   * file click the international one. Landing there leaves this fixture with no
+   * usage for that region, the card shows its signed-out screen, and the tab bar
+   * does not exist. Clicking CN first is what makes these cases independent of
+   * file order. */
+  const renderCapabilities = async () => {
     const m = await renderPool(usageWithPool('cn'), { regions: { cn: {} } })
-    const prefs = m.container.querySelector('.dsm-workbuddy-prefs')
-    expect(prefs).not.toBeNull()
-    // The readout is a display preference, so it belongs with the general
-    // settings above the account tables, not after them.
-    const pool = m.container.querySelector('.dsm-workbuddy-pool-head')
-    if (pool === null) throw new Error('pool head missing')
-    if (prefs === null) throw new Error('prefs block missing')
-    expect(prefs.compareDocumentPosition(pool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const cnTab = m.container.querySelectorAll('.dsm-workbuddy-tab')[0]
+    if (cnTab !== undefined && !cnTab.classList.contains('dsm-workbuddy-tab-active')) {
+      await m.click(cnTab)
+    }
+    return m
+  }
+
+  /* By ATTRIBUTE, not by `#id`: the card's ids are the tab panel wires
+     (`aria-controls` -> `aria-labelledby`), so an attribute selector states the
+     same fact and keeps working whichever side of the pair is renamed. */
+  const byId = (root: ParentNode, id: string): HTMLElement | null =>
+    root.querySelector<HTMLElement>(`[id="${id}"]`)
+
+  it('renders the preference lines inside the capability section', async () => {
+    const m = await renderCapabilities()
+    const panel = byId(m.container, 'dsm-workbuddy-panel-capabilities')
+    expect(panel).not.toBeNull()
+    // The switches authorize spend and register tools; the account section is
+    // about WHICH account serves the tab. Keeping them in different sections is
+    // also what leaves room for the sub-options each switch is due (a working
+    // directory for the CLI route, a size or price cap for the image tool) —
+    // in the flat list under the tab bar those had nowhere to go.
+    expect(panel?.querySelector('.dsm-workbuddy-prefs')).not.toBeNull()
+    const accounts = byId(m.container, 'dsm-workbuddy-panel-accounts')
+    expect(accounts?.querySelector('.dsm-workbuddy-prefs')).toBeNull()
     // Exactly one switch, never a second copy in a fallback site.
     expect(creditSwitches(m.container)).toHaveLength(1)
+  })
+
+  it('hangs the switches off a tab of their own, after the models tab', async () => {
+    const m = await renderCapabilities()
+    const tab = byId(m.container, 'dsm-workbuddy-tab-capabilities')
+    const panel = byId(m.container, 'dsm-workbuddy-panel-capabilities')
+    if (tab === null || panel === null) throw new Error('capabilities tab or panel missing')
+    expect(tab.textContent).toBe('row.panelCapabilities')
+    expect(tab.getAttribute('aria-controls')).toBe('dsm-workbuddy-panel-capabilities')
+    // Order is the information: an account, then what it may run, then what it
+    // is allowed to diagnose. The new tab sits BEFORE diagnostics, the fallback
+    // section, so the two actionable ones stay adjacent.
+    const models = byId(m.container, 'dsm-workbuddy-tab-models')
+    const diag = byId(m.container, 'dsm-workbuddy-tab-diag')
+    if (models === null || diag === null) throw new Error('sibling tabs missing')
+    expect(models.compareDocumentPosition(tab) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tab.compareDocumentPosition(diag) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // Collapsed on the accounts tab (the others stay mounted, so the draft and
+    // the switch state survive), and reachable on a click.
+    expect(panel.hasAttribute('hidden')).toBe(true)
+    await m.click(tab)
+    expect(panel.hasAttribute('hidden')).toBe(false)
+    expect(tab.getAttribute('aria-selected')).toBe('true')
   })
 
   it('renders the same lines when the pool section does not render', async () => {

@@ -1005,13 +1005,15 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
    * Returns null when there is nothing to say, so the caller can fall back to the
    * static explanation instead of rendering an empty "current:" prefix.
    */
-  const targetProvenance = pool.targetModelSource === 'preferred'
-    ? t('row.poolTargetCurrentPreferred', { model: pool.targetModelId ?? '' })
-    : pool.targetModelSource === 'free'
-      ? t('row.poolTargetCurrentFree', { model: pool.targetModelId ?? '' })
-      : pool.targetModelSource === 'stale'
-        ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' })
-        : pool.targetModelSource === 'none' ? t('row.poolTargetNone') : null
+  // "Which model, and did I choose it?" — but ONLY when the answer is not
+  // already on screen. The picker sits directly beside this sentence and shows
+  // the very same id, so `preferred` said the same thing twice in one row of
+  // pixels; `stale` gets a whole warning block of its own below. What survives
+  // is `free`, the one case the picker cannot express: the pool picked a model
+  // the user never chose.
+  const targetProvenance = pool.targetModelSource === 'free'
+    ? t('row.poolTargetCurrentFree', { model: pool.targetModelId ?? '' })
+    : null
 
   /**
    * The account the next request will start from.
@@ -1024,6 +1026,73 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
   const currentName = currentAccount === undefined
     ? undefined
     : currentAccount.accountName === '' ? t('row.accountUnnamed') : currentAccount.accountName
+
+  /**
+   * The manual-mode picker: shown ONLY with the pool off, and it is the whole of
+   * "manual mode" — with the pool off nothing else chooses who is billed.
+   *
+   * It lives in the HEAD line, sharing one slot with the 「current: X」 badge,
+   * instead of in a row of its own further down. That row said the same account
+   * name for the third time on one screen (badge, picker, member row), and the
+   * repetition is what made the page read as generated rather than designed.
+   * The two states are the two halves of one question — "who serves?" — so they
+   * get one place to answer it: a picker when the answer is yours, a badge when
+   * the pool decides.
+   */
+  const manualPicker = !poolRunning && onSelectAccount !== undefined && pool.accounts.length > 0
+    ? h('label', { className: 'dsm-workbuddy-pool-head-pick' },
+        h('span', { className: 'dsm-workbuddy-pool-head-pick-label' }, t('row.poolManualAccountLabel')),
+        h('select', {
+          className: 'dsm-workbuddy-pool-select dsm-workbuddy-pool-account-select',
+          value: currentAccount?.accountId ?? '',
+          disabled: selectingAccount === true,
+          onChange: (event: { currentTarget: { value: string } }) => {
+            onSelectAccount(event.currentTarget.value)
+          },
+        },
+          // "No account in effect" is a real state (an orphaned saved id, a
+          // failed refresh). Without a matching option the control would
+          // silently display the first account — the same "looks fine, but is
+          // not what runs" confusion this card keeps having to avoid.
+          pool.accounts.some(account => account.current)
+            ? null
+            : h('option', { value: '', disabled: true }, t('row.poolManualAccountNone')),
+          ...pool.accounts.map(account =>
+            h('option', { key: account.accountId, value: account.accountId },
+              account.accountName === '' ? t('row.accountUnnamed') : account.accountName)),
+        ),
+      )
+    : null
+
+  /**
+   * The full ordering rule, collapsed — pure reference text.
+   *
+   * It used to sit between 「本池包含的账号」 and the first account row, which put
+   * a paragraph of explanation ahead of the accounts it explains and pushed the
+   * table down. Reference text belongs BELOW the data it describes; here it is,
+   * at the top of 「更多设置」, next to the controls it explains.
+   *
+   * A <details>/<summary> pair rather than a stateful button: it is
+   * keyboard-operable and screen-reader-expanded natively, and cannot fall out
+   * of sync with what is on screen. `open` is controlled so a background refresh
+   * cannot collapse a section the user just opened.
+   */
+  const orderRules = h('details', {
+    className: 'dsm-workbuddy-pool-order-rules',
+    open: orderRulesOpen,
+    onToggle: (event: { currentTarget: { open: boolean } }) => setOrderRulesOpen(event.currentTarget.open),
+  },
+    h('summary', { className: 'dsm-workbuddy-pool-order-rules-summary' },
+      t('row.poolOrderRulesTitle')),
+    h('div', { className: 'dsm-workbuddy-pool-order-rules-body' },
+      h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderRulesIntro')),
+      h('ol', { className: 'dsm-workbuddy-pool-order-rules-list' },
+        ...ORDER_RULE_KEYS.map(key => h('li', { key }, t(key))),
+      ),
+      h('p', { className: 'dsm-workbuddy-pool-order-rules-why' }, t('row.poolOrderWhy')),
+      h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderBadgeNote')),
+    ),
+  )
 
   return h('section', { className: 'dsm-workbuddy-pool' },
     // The row veil: a removal writes the Host state, and the table only
@@ -1052,7 +1121,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
           hint: t('row.veilHintList'),
         })
       : null,
-    // The header is now just the title and the serving-account badge.
+    // The header is the title plus ONE answer to "who is serving?".
     //
     // The subtitle ("4 accounts in this region · target model X") and the
     // paragraph beside the badge are both GONE. Neither was wrong, but both
@@ -1063,124 +1132,91 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // before anything can be acted on.
     h('div', { className: 'dsm-workbuddy-pool-head' },
       h('h3', { className: 'dsm-workbuddy-pool-title' }, t('row.poolTitle')),
-      // Which account is serving, stated in the header rather than left to a row
-      // tint the user has to go looking for. The pool's whole job is deciding who
-      // gets billed, so "who is it right now" belongs where the eye lands first.
-      currentName === undefined
-        ? null
-        : h('span', { className: 'dsm-workbuddy-pool-current-badge' },
-            t('row.poolCurrentHeader', { account: currentName })),
+      // One slot, not two. With the pool off this is the picker — the name is
+      // there because the control carries it, so a badge repeating it would be
+      // the same fact twice in one row of pixels. With the pool on there is
+      // nothing to pick, so the slot falls back to the badge: the pool's whole
+      // job is deciding who gets billed, and a row tint alone answers "who is it
+      // right now" only for someone already looking.
+      manualPicker !== null
+        ? manualPicker
+        : currentName === undefined
+          ? null
+          : h('span', { className: 'dsm-workbuddy-pool-current-badge' },
+              t('row.poolCurrentHeader', { account: currentName })),
     ),
 
-    // Manual account selection, shown ONLY with the pool off.
+    // The mode switch, FIRST.
     //
-    // This is the whole of "manual mode": with the pool off the plugin does not
-    // pick the serving account, so the user must be able to — and no other
-    // control is left to do it (the card header's picker is gone on purpose,
-    // because with the pool ON it changed nothing while looking authoritative).
-    // Without this, "the pool is off" meant "you are stuck with whatever was
-    // selected before", which is not a mode anyone can use.
-    !poolRunning && onSelectAccount !== undefined && pool.accounts.length > 0
-      ? h('div', { className: 'dsm-workbuddy-pool-set' },
-          h('span', { className: 'dsm-workbuddy-pool-set-copy' },
-            h('b', null, t('row.poolManualAccountLabel')),
-            h('span', null, t('row.poolManualAccountHint')),
-          ),
-          h('span', { className: 'dsm-workbuddy-pool-set-ctl' },
-            h('select', {
-              className: 'dsm-workbuddy-pool-select dsm-workbuddy-pool-account-select',
-              value: currentAccount?.accountId ?? '',
-              disabled: selectingAccount === true,
-              onChange: (event: { currentTarget: { value: string } }) => {
-                onSelectAccount(event.currentTarget.value)
-              },
+    // It used to live at the bottom of the panel, inside the settings card —
+    // about 400px below the batch buttons it governs, and below the table whose
+    // every column changes meaning with it (「未入池」 only matters when the pool
+    // is what picks). This page has exactly two modes, "the plugin picks" and
+    // "you pick"; the control that selects between them has to come before the
+    // mode-specific controls, not after all of them.
+    //
+    // It deliberately keeps the `dsm-workbuddy-pool-settings` class: that is the
+    // settings-GROUP style (bordered, stacked rows), and the component tests
+    // locate the pool switch as the first checkbox inside it.
+    h('div', { className: 'dsm-workbuddy-pool-settings dsm-workbuddy-pool-modebar' },
+      h('div', { className: 'dsm-workbuddy-pool-modebar-row' },
+        h('label', { className: 'sw' },
+          h('input', {
+            type: 'checkbox',
+            checked: active.enabled,
+            disabled: !canEditPool,
+            onChange: (event: { currentTarget: { checked: boolean } }) => {
+              const next = event.currentTarget.checked
+              editDraft(current => ({ ...current, enabled: next }))
             },
-              // "No account in effect" is a real state (an orphaned saved id, a
-              // failed refresh). Without a matching option the control would
-              // silently display the first account — the same "looks fine, but
-              // is not what runs" confusion this card keeps having to avoid.
-              pool.accounts.some(account => account.current)
-                ? null
-                : h('option', { value: '', disabled: true }, t('row.poolManualAccountNone')),
-              ...pool.accounts.map(account =>
-                h('option', { key: account.accountId, value: account.accountId },
-                  account.accountName === '' ? t('row.accountUnnamed') : account.accountName)),
-            ),
-          ),
-        )
-      : null,
-
-    // One row, two clusters. Before this the rescan button sat on its own row
-    // pushed to the right edge while the batch buttons sat on the next row pushed
-    // to the left — two different alignments two lines apart, with nothing to
-    // explain the split. The grouping is by WHAT the buttons act on: on the left,
-    // things done TO the accounts you checked; on the right, re-reading which
-    // accounts exist at all.
-    //
-    // The batch buttons are MANUAL actions, so they are deliberately NOT gated on
-    // the pool switch: the switch decides whether the plugin picks the serving
-    // account by itself, not whether the user may act on the accounts they
-    // checked. Gating them on the switch made "switch the pool off" mean "you can
-    // no longer check in or test anything", which is the opposite of what the
-    // switch is for — and left a user with no manual path at all.
-    h('div', { className: 'dsm-workbuddy-pool-actions' },
-      h('div', { className: 'dsm-workbuddy-pool-actions-group' },
-        pool.checkinSupported
-          ? h('button', {
-              type: 'button',
-              className: 'dsm-btn dsm-btn-primary',
-              // Disabled with an EMPTY pool: the buttons act on checked accounts
-              // only, so a pool with nothing checked has nothing to run.
-              disabled: busy !== undefined || effectiveMembers.length === 0,
-              onClick: () => { void runAction('checkin') },
-            }, busy === 'checkin' ? t('row.poolCheckingIn') : t('row.poolCheckinAll'))
-          : null,
-        h('button', {
-          type: 'button',
-          className: 'dsm-btn dsm-btn-outline',
-          disabled: busy !== undefined
-            // Same criterion as the check-in button beside it. This one still
-            // counted the SAVED list, so a ghost id (a member whose sign-in is
-            // gone) left the button enabled while the batch ran on zero accounts
-            // — and the log then announced a test that never happened. The two
-            // buttons act on the same set and must gate on the same set.
-            || effectiveMembers.length === 0
-            // Refuse BOTH unresolvable-target states. Previously only 'none' was
-            // checked, so a saved id that had dropped out of the catalog enabled
-            // this button and the Host ran a batch against a model the region no
-            // longer offers.
-            || pool.targetModelSource === 'none'
-            || pool.targetModelSource === 'stale',
-          title: pool.targetModelSource === 'none'
-            ? t('row.poolTargetNone')
-            : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
-          onClick: () => { void runAction('test') },
-        }, busy === 'test' ? t('row.poolTesting') : t('row.poolTestAll')),
-        // The Host answers a batch only when it is done, so there is no per-row
-        // progress to report. The line therefore states the one thing that IS
-        // true while it runs — accounts are being handled one at a time — instead
-        // of naming an account that may not be the one in flight.
-        busy === undefined ? null
-          : h('span', { className: 'dsm-workbuddy-pool-hint' }, t('row.poolBusyHint')),
+          }),
+          h('span', { className: 'sw-track' }),
+        ),
+        h('b', { className: 'dsm-workbuddy-pool-modebar-label' }, t('row.poolEnabled')),
+        // The RUNNING mode, not the draft: the switch shows the pending edit and
+        // the dirty chip beside it says the edit is pending, so this chip is free
+        // to answer the different question — "what is the pool doing right now?".
+        // Reading the draft here would label the page 「自动挑号」 while the saved
+        // pool was still off and the manual picker below was still in charge,
+        // which is the "shows A, bills B" trap this section keeps guarding
+        // against (see `poolRunning`).
+        h('span', { className: 'dsm-workbuddy-pool-modebar-state' },
+          poolRunning ? t('row.poolModeAuto') : t('row.poolModeManual')),
+        // Unsaved state sits beside the switch because the switch is the first
+        // thing a user can dirty. It used to sit on the settings card's heading,
+        // i.e. below everything it warned about.
+        dirty ? h('span', { className: 'dsm-workbuddy-pool-dirty' }, t('row.poolDirty')) : null,
       ),
-      // Re-reading the local sign-ins. Beside the member table rather than in the
-      // card header: a sign-in that appeared externally shows up as a new row to
-      // tick, so this is the control that makes it appear.
-      onRescan === undefined
-        ? null
-        : h('div', { className: 'dsm-workbuddy-pool-actions-group' },
-            h('button', {
-              type: 'button',
-              className: 'dsm-btn dsm-btn-outline',
-              disabled: rescanning === true,
-              onClick: onRescan,
-            }, rescanning === true ? t('row.accountsScanning') : t('row.accountsRescan')),
-          ),
+      // ONE line, and only one: the same paragraph used to appear twice — once
+      // under the batch buttons and again under the switch at the bottom — which
+      // read as a developer comment that had leaked into the page, and made the
+      // page look longer than it is. The ranking rules it used to summarise have
+      // their own disclosure in the member block, where the ordering is actually
+      // edited; a second copy here would be the same duplication in a new place.
+      h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolEnabledHint')),
     ),
 
-    !poolRunning
-      ? h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolEnabledHint'))
+    // "In use" and "in the pool" are orthogonal, and the row cannot say both
+    // without looking self-contradictory: a green 「当前使用」 badge next to a grey
+    // 「未入池」 on the same line, under a count of 「已选 0 / 1」, reads as a bug.
+    // It is not — the account is serving right now and is not a rotation member —
+    // but the explanation has to exist SOMEWHERE, so it goes here, in one line,
+    // only in the state that needs it.
+    poolRunning && currentAccount !== undefined && !effectiveMembers.includes(currentAccount.accountId)
+      ? h('p', { className: 'dsm-workbuddy-pool-note dsm-workbuddy-pool-serving-note' },
+          t('row.poolServingOutside', { account: currentName ?? '' }))
       : null,
+
+    // The manual picker is NOT here any more: it moved into the header line,
+    // where it shares one slot with the 「current: X」 badge (see `manualPicker`).
+    // Two controls, one question — stating "who serves" in the title row and
+    // again in a row of its own further down was the third repetition of the
+    // same account name on one screen.
+
+    // (The long "what the switch does" paragraph that used to stand here is
+    // gone: the same text was rendered twice on one screen — here and under the
+    // settings card's switch — and the switch it explained is now the first
+    // control on the page, with a one-line hint beside it.)
 
     // Failover needs somewhere to go. With every member measured unusable (or
     // none checked at all) a failure is reported instead of retried, so say so
@@ -1192,7 +1228,12 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     // first instinct — switch accounts — is the one action that cannot help.
     // The model-wide branch is checked FIRST so it wins; the generic one stays
     // for the mixed and account-level cases it describes correctly.
-    poolRunning && usable.length === 0
+    // ...
+    // Gated on "there ARE members": with nothing checked, "no usable account"
+    // names the wrong cause and sends the user hunting for a blocked account
+    // when the actual fix is to tick a box. That case now gets the inline hint
+    // beside the batch buttons instead.
+    poolRunning && effectiveMembers.length > 0 && usable.length === 0
       ? allMembersBlockedByModel(pool?.accounts ?? [], effectiveMembers, active.memberAccountIds)
         ? h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
             `${t('row.poolModelWideBusy')} ${t('row.poolModelWideBusyHint')}`)
@@ -1228,36 +1269,90 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
           }, t('row.poolSelectNone')),
         ),
       ),
-      // The full ordering rule, where the ↑/↓ arrows are actually used. A user
-      // who sorts the pool is implicitly asking "so which one gets picked
-      // first?", and the answer is not "the one at the top" — usability and
-      // expiring credits both outrank the manual order. Collapsed by default
-      // so reference text does not push the table down, but present so nobody
-      // has to read the source to find out why a "No. 2" account was skipped.
+      // The batch bar sits HERE — under the member heading, above the rows —
+      // because every button on it acts on the set that heading describes: the
+      // 「已选 N / M」 count and 全选 / 全不选 are one line above, and the
+      // checkboxes they count are in the table one line below. It used to stand
+      // ABOVE the whole member block, where it read as a page-level toolbar and
+      // had the buttons asking "act on WHICH accounts?" a full block before the
+      // control that answers it.
       //
-      // A <details>/<summary> pair rather than a stateful button: it is
-      // keyboard-operable and screen-reader-expanded natively, survives the
-      // pool's frequent re-renders without state, and cannot fall out of sync
-      // with what is on screen. `open` is left uncontrolled deliberately.
-      h('details', {
-        className: 'dsm-workbuddy-pool-order-rules',
-        // Controlled so a refresh cannot collapse a section the user just
-        // opened (React would otherwise reset it), and so the toggle text stays
-        // in sync with the disclosure state.
-        open: orderRulesOpen,
-        onToggle: (event: { currentTarget: { open: boolean } }) => setOrderRulesOpen(event.currentTarget.open),
-      },
-        h('summary', { className: 'dsm-workbuddy-pool-order-rules-summary' },
-          t('row.poolOrderRulesTitle')),
-        h('div', { className: 'dsm-workbuddy-pool-order-rules-body' },
-          h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderRulesIntro')),
-          h('ol', { className: 'dsm-workbuddy-pool-order-rules-list' },
-            ...ORDER_RULE_KEYS.map(key => h('li', { key }, t(key))),
-          ),
-          h('p', { className: 'dsm-workbuddy-pool-order-rules-why' }, t('row.poolOrderWhy')),
-          h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolOrderBadgeNote')),
+      // Two clusters, one row: on the left, things done TO the accounts you
+      // checked; on the right, re-reading which accounts exist at all.
+      //
+      // The batch buttons are MANUAL actions, so they are deliberately NOT gated on
+      // the pool switch: the switch decides whether the plugin picks the serving
+      // account by itself, not whether the user may act on the accounts they
+      // checked. Gating them on the switch made "switch the pool off" mean "you can
+      // no longer check in or test anything", which is the opposite of what the
+      // switch is for — and left a user with no manual path at all.
+      h('div', { className: 'dsm-workbuddy-pool-actions' },
+        h('div', { className: 'dsm-workbuddy-pool-actions-group' },
+          pool.checkinSupported
+            ? h('button', {
+                type: 'button',
+                className: 'dsm-btn dsm-btn-primary',
+                // Disabled with an EMPTY pool: the buttons act on checked accounts
+                // only, so a pool with nothing checked has nothing to run.
+                disabled: busy !== undefined || effectiveMembers.length === 0,
+                onClick: () => { void runAction('checkin') },
+              }, busy === 'checkin' ? t('row.poolCheckingIn') : t('row.poolCheckinAll'))
+            : null,
+          h('button', {
+            type: 'button',
+            className: 'dsm-btn dsm-btn-outline',
+            disabled: busy !== undefined
+              // Same criterion as the check-in button beside it. This one still
+              // counted the SAVED list, so a ghost id (a member whose sign-in is
+              // gone) left the button enabled while the batch ran on zero accounts
+              // — and the log then announced a test that never happened. The two
+              // buttons act on the same set and must gate on the same set.
+              || effectiveMembers.length === 0
+              // Refuse BOTH unresolvable-target states. Previously only 'none' was
+              // checked, so a saved id that had dropped out of the catalog enabled
+              // this button and the Host ran a batch against a model the region no
+              // longer offers.
+              || pool.targetModelSource === 'none'
+              || pool.targetModelSource === 'stale',
+            title: pool.targetModelSource === 'none'
+              ? t('row.poolTargetNone')
+              : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
+            onClick: () => { void runAction('test') },
+          }, busy === 'test' ? t('row.poolTesting') : t('row.poolTestAll')),
+          // The Host answers a batch only when it is done, so there is no per-row
+          // progress to report. The line therefore states the one thing that IS
+          // true while it runs — accounts are being handled one at a time — instead
+          // of naming an account that may not be the one in flight.
+          busy !== undefined
+            ? h('span', { className: 'dsm-workbuddy-pool-hint' }, t('row.poolBusyHint'))
+            // Why both buttons are dead, right where the user is looking. This
+            // sentence used to be an amber banner under the member table — a whole
+            // screen away from the buttons it explained, and it made the only
+            // coloured thing on the page a footnote instead of an error.
+            : effectiveMembers.length === 0
+              ? h('span', { className: 'dsm-workbuddy-pool-hint' }, t('row.poolNoneSelectedHint'))
+              : null,
         ),
+        // Re-reading the local sign-ins. Beside the member table rather than in the
+        // card header: a sign-in that appeared externally shows up as a new row to
+        // tick, so this is the control that makes it appear.
+        onRescan === undefined
+          ? null
+          : h('div', { className: 'dsm-workbuddy-pool-actions-group' },
+              h('button', {
+                type: 'button',
+                className: 'dsm-btn dsm-btn-outline',
+                disabled: rescanning === true,
+                onClick: onRescan,
+              }, rescanning === true ? t('row.accountsScanning') : t('row.accountsRescan')),
+            ),
       ),
+
+      // The ordering rules are NOT here any more: this is reference text, and it
+      // used to sit between the member heading and the first account row, so a
+      // collapsed disclosure line was the last thing read before the accounts
+      // themselves — annotation before data. It now lives at the top of 「更多
+      // 设置」, below everything actionable (see `orderRules`).
       h('div', { className: `dsm-workbuddy-pool-table${pool.checkinSupported ? ' dsm-workbuddy-pool-table-checkin' : ''}` },
         h('div', { className: 'dsm-workbuddy-pool-row dsm-workbuddy-pool-row-head' },
           h('span', null, t('row.poolColumnAccount')),
@@ -1300,6 +1395,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
               targetHint: pool.targetModelSource === 'none'
                 ? t('row.poolTargetNone')
                 : pool.targetModelSource === 'stale' ? t('row.poolTargetStale', { model: pool.staleTargetModelId ?? '' }) : undefined,
+              // Compared against the SAVED resolution (`pool.targetModelId`), not
+              // the draft: a model the user is merely considering must not make
+              // every row suddenly reprint its model id.
+              poolModelId: pool.targetModelId ?? '',
               onTest: () => { void runRowTest(account.accountId) },
               onRemove: () => { void runRowRemove(account.accountId, account.accountName) },
               // Per-campaign claim, passed through as a factory: the button is
@@ -1323,10 +1422,10 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
           })
         })(),
       ),
-      effectiveMembers.length === 0
-        ? h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' },
-            `${t('row.poolNoneSelected')} ${t('row.poolNoneSelectedHint')}`)
-        : null,
+      // (The empty-pool amber banner that stood here is gone — the same fact is
+      // stated inline beside the two disabled buttons, which is where the user
+      // hits it. A second, louder copy 300px below only made the page look
+      // broken in two places.)
       // State the discrepancy instead of silently ignoring the stale ids: the
       // user's saved list still contains them, and they need to know why the
       // pool behaves as if they were absent — and WHICH they are (issue #60).
@@ -1390,7 +1489,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       t, pool, active, dirty, saving, siblingBusy: siblingBusy === true,
       saveError, settingsScope,
       onEdit: editDraft, onSave: () => { void save() }, onDiscard: discard,
-      appendLog, targetProvenance,
+      appendLog, targetProvenance, orderRules,
       ...accountTools === undefined ? {} : { accountTools },
     }),
 
@@ -1429,6 +1528,15 @@ function renderAccountRow(input: {
   /** The region cannot name a target model; the test button says why. */
   testDisabled: boolean
   targetHint: string | undefined
+  /**
+   * The model the pool would measure with RIGHT NOW.
+   *
+   * Every row shares one test model, so printing it on every row restated the
+   * same id N times and pushed each row onto a third line. The row prints a
+   * model only when its own measurement used a DIFFERENT one — which is the
+   * only case where the reader has something to learn.
+   */
+  poolModelId: string
   /** Run a single-account test against THIS account's target model. */
   onTest: () => void
     /** Forget this account's plugin-stored credential. */
@@ -1458,7 +1566,7 @@ function renderAccountRow(input: {
   const {
     t, account, checked, canEdit, checkinSupported, onToggle, busy, rowBusy, testDisabled,
     targetHint, onTest, onRemove, onClaim, rowBusyAction, claimBusy, orderIndex, orderIsManual, moveEnabled,
-    onMoveUp, onMoveDown, moveUpDisabled, moveDownDisabled,
+    onMoveUp, onMoveDown, moveUpDisabled, moveDownDisabled, poolModelId,
   } = input
   const name = account.accountName === '' ? t('row.accountUnnamed') : account.accountName
   const excluded = exclusionText(t, account.excludedBy)
@@ -1584,14 +1692,16 @@ function renderAccountRow(input: {
         account.current
           ? h('span', { className: 'dsm-workbuddy-pool-current-tag' }, t('row.poolCurrentBadge'))
           : null,
-        // Membership is stated on every row, because an unchecked account's
-        // empty credit/probe columns are otherwise indistinguishable from a
-        // checked account that simply has no data yet.
-        h('span', {
-          className: checked
-            ? 'dsm-workbuddy-pool-member'
-            : 'dsm-workbuddy-pool-not-member',
-        }, checked ? t('row.poolMember') : t('row.poolNotMember')),
+        // Stated in words ONLY for the accounts that are NOT in the pool.
+        //
+        // 「已在池中」 on a row whose checkbox is already ticked (and whose row is
+        // already tinted) said "in the pool" a third time and cost every member
+        // another line of name-block text. Absence is the half that needs words:
+        // an empty box with empty credit and probe columns is otherwise
+        // indistinguishable from a member whose data has not arrived yet.
+        checked
+          ? null
+          : h('span', { className: 'dsm-workbuddy-pool-not-member' }, t('row.poolNotMember')),
         excluded === undefined
           ? probe === undefined ? null : h('span', null, t('row.poolTestedAt', { at: formatShortClock(probe.atMs) }))
           : h('span', { className: 'dsm-workbuddy-pool-excluded' }, excluded),
@@ -1687,17 +1797,23 @@ function renderAccountRow(input: {
           ? null
           : h('span', { className: 'dsm-workbuddy-pool-prov-sep' }, '·'),
         age === undefined ? null : h('span', { className: 'dsm-workbuddy-pool-prov-age' }, age),
-        // WHICH MODEL the verdict above is about (issue #61). Printed on every
-        // measured row, because an `ok` with no scope is the false positive the
-        // reporter hit: the table said 可用 for accounts whose actual model was
-        // returning `429 / 6004`. A record written before the field existed says
-        // the scope is unknown instead of implying the row's current setting.
-        probe === undefined
-          ? null
-          : h('span', { className: 'dsm-workbuddy-pool-prov-model' },
+        // WHICH MODEL the verdict above is about (issue #61) — printed ONLY when
+        // this row was measured against something other than the pool's current
+        // test model. The pool has exactly one test model, so repeating it here
+        // was pure duplication: the same id on every row, three times on screen
+        // counting the picker and its provenance sentence, and it was the longest
+        // run on the line, which is what wrapped rows onto a third line.
+        //
+        // The #61 concern still holds in the case it is actually about: a verdict
+        // measured before the model changed must not look like it applies to the
+        // current one. That case is exactly `modelId !== poolModelId`, and it is
+        // still stated — including "unknown", which differs from any named model.
+        probe !== undefined && probe.modelId !== poolModelId
+          ? h('span', { className: 'dsm-workbuddy-pool-prov-model' },
               probe.modelId === undefined
                 ? t('row.poolProbeModelUnknown')
-                : t('row.poolProbeModel', { model: probe.modelId })),
+                : t('row.poolProbeModel', { model: probe.modelId }))
+          : null,
       ),
     ),
     checkinSupported
@@ -1766,56 +1882,54 @@ function renderSettings(input: {
    */
   targetProvenance: string | null
   accountTools?: ReactNode
+  /**
+   * The collapsed 「本池如何挑选账号」 reference block, already built by the panel
+   * that owns the disclosure state. Passed in so this renderer stays a pure
+   * function of its input — the open/closed state is component state, and a
+   * second copy of it here would drift.
+   */
+  orderRules: ReactNode
 }): ReturnType<typeof h> {
   const {
     t, pool, active, dirty, saving, siblingBusy,
     saveError, settingsScope,
-    onEdit, onSave, onDiscard, targetProvenance, accountTools,
+    onEdit, onSave, onDiscard, targetProvenance, accountTools, orderRules,
   } = input
   const canEdit = settingsScope !== undefined
 
-  const toggle = (
-    label: string,
-    hint: string,
-    checked: boolean,
-    onChange: (next: boolean) => void,
-    disabled = false,
-  ): ReturnType<typeof h> => h('div', { className: 'dsm-workbuddy-pool-set' },
-    h('span', { className: 'dsm-workbuddy-pool-set-copy' },
-      h('b', null, label),
-      h('span', null, hint),
-    ),
-    h('span', { className: 'dsm-workbuddy-pool-set-ctl' },
-      h('label', { className: 'sw' },
-        h('input', {
-          type: 'checkbox',
-          checked,
-          disabled: disabled || !canEdit,
-          onChange: (event: { currentTarget: { checked: boolean } }) => onChange(event.currentTarget.checked),
-        }),
-        h('span', { className: 'sw-track' }),
-      ),
-    ),
-  )
-
   return h('div', { className: 'dsm-workbuddy-pool-settings-wrap' },
-    h('div', { className: 'dsm-workbuddy-pool-head' },
-      h('h3', { className: 'dsm-workbuddy-pool-title' }, t('row.poolSettingsTitle')),
-      dirty ? h('span', { className: 'dsm-workbuddy-pool-dirty' }, t('row.poolDirty')) : null,
-    ),
-    // Account tools FIRST, and still under the heading so the block reads as
-    // one "account pool settings" area — but ABOVE the note, because what
-    // follows takes effect at once while the rows under the note are drafts.
+    // Account tools FIRST — ABOVE the 「更多设置」 heading, not under it.
+    //
+    // They used to sit just inside that block, above its note, on the argument
+    // that one bordered area should hold "everything about accounts". That read
+    // is wrong in the one place it matters: everything under this heading is a
+    // DRAFT that only takes effect when 「保存」 is pressed (the note under the
+    // heading says so), while signing in and importing apply immediately. A
+    // control that acts at once must not live inside a block that promises "点保存
+    // 才生效" — a user who reads the note first waits for a button that was never
+    // needed, and one who clicks first is surprised the table changed on its own.
+    // Above the heading, the dashed border and the absence of a save button say
+    // the truth: these are actions, the rows below are preferences.
     accountTools === undefined ? null : h('div', { className: 'dsm-workbuddy-pool-tools' }, accountTools),
+    // A SUBHEADING, not a second page title. This block is "the rest of the
+    // settings" — a target model and a probe size — not the panel's main event,
+    // so it must not compete with 「账号池」 at the top. The unsaved-changes chip
+    // that used to hang here now lives beside the switch, where the first
+    // editable control is.
+    h('div', { className: 'dsm-workbuddy-pool-card-head' },
+      h('h4', { className: 'dsm-workbuddy-pool-card-title' }, t('row.poolSettingsTitle')),
+    ),
+    // Reference text, at the top of the settings block and OUT of the member
+    // block: it explains the badges and arrows in the table above, so it belongs
+    // under the data rather than in front of it.
+    orderRules,
     h('p', { className: 'dsm-workbuddy-pool-note' }, t('row.poolSettingsHint')),
 
     h('div', { className: 'dsm-workbuddy-pool-settings' },
-      toggle(
-        t('row.poolEnabled'),
-        t('row.poolEnabledHint'),
-        active.enabled,
-        next => onEdit(current => ({ ...current, enabled: next })),
-      ),
+      // The 「启用账号池」 switch is NOT here any more: it is the page's mode
+      // selector and now stands directly under the title (see the mode bar). What
+      // remains below are the two settings a manual TEST needs, which is why they
+      // stay reachable with the pool off.
       h('div', { className: 'dsm-workbuddy-pool-set' },
         h('span', { className: 'dsm-workbuddy-pool-set-copy' },
           h('b', null, t('row.poolTargetLabel')),

@@ -61,6 +61,24 @@ export function promoBadgeLabel(promo: WorkBuddyPromo, language?: string): strin
 }
 
 /**
+ * The badge's wording where the chip has to fit a narrow row.
+ *
+ * The model picker's rows are one line wide and already carry the model name,
+ * the credit rate and the load icon, so a four-character label ("夜间折扣") can
+ * push the check mark out of the row. The upstream publishes a compact wording
+ * for exactly this case (`shortLabel`), and when it does not, the full label is
+ * still better than a cropped one: an ellipsis in a menu row reads as a
+ * truncated word, while the full label is at worst tight.
+ */
+export function promoBadgeShortLabel(promo: WorkBuddyPromo, language?: string): string {
+  const badge = promo.badge
+  const short = isEnglish(language)
+    ? (badge.shortLabelEn ?? badge.shortLabel)
+    : badge.shortLabel
+  return short ?? promoBadgeLabel(promo, language)
+}
+
+/**
  * The chip's colour, when the upstream published a usable one.
  *
  * Only a hex colour is accepted: the value reaches an inline style, and the

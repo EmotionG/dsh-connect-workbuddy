@@ -9,6 +9,13 @@
  * The split is deliberately three strings wide (title, button, unavailable), not
  * a full second copy of the section: everything else is about the flow rather
  * than the method, so keeping it shared is what stops the two regions drifting.
+ *
+ * The title is no longer PRINTED. It used to sit on its own line above the one
+ * button the section holds, restating it (「扫码添加账号」 over 「扫码登录」), so it
+ * now exists only as the section's `aria-label`. That moves the assertion off
+ * `textContent` — jsdom cannot see an attribute through `text()` — and onto the
+ * attribute itself, which is also what fails if someone deletes the name
+ * outright: `sectionName` then returns null instead of quietly passing.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OAuthSignIn } from '../src/client/OAuthSignIn.tsx'
@@ -16,13 +23,21 @@ import { mount, stubFetch, t } from './pool-render-helpers.tsx'
 
 afterEach(() => { vi.unstubAllGlobals() })
 
+/** The section's accessible name — the title's only home now that it is silent. */
+function sectionName(view: { container: HTMLElement }): string | null {
+  return view.container.querySelector('.dsm-workbuddy-bar')?.getAttribute('aria-label') ?? null
+}
+
 describe('the sign-in wording follows the region', () => {
   it('says QR on the domestic tab', async () => {
     stubFetch(() => ({ body: {} }))
     const view = await mount(OAuthSignIn, { t, region: 'cn' })
-    expect(view.text()).toContain('row.oauthTitle')
+    expect(sectionName(view)).toBe('row.oauthTitle')
     expect(view.text()).toContain('row.oauthStart')
-    expect(view.text()).not.toContain('row.oauthTitleGlobal')
+    // The name is a name, not a caption: nothing on screen repeats it, and the
+    // old caption class is gone from the DOM rather than merely emptied.
+    expect(view.text()).not.toContain('row.oauthTitle')
+    expect(view.container.querySelector('.dsm-workbuddy-bar-label')).toBeNull()
     expect(view.text()).not.toContain('row.oauthStartGlobal')
     await view.unmount()
   })
@@ -30,13 +45,12 @@ describe('the sign-in wording follows the region', () => {
   it('says web sign-in on the international tab', async () => {
     stubFetch(() => ({ body: {} }))
     const view = await mount(OAuthSignIn, { t, region: 'global' })
-    expect(view.text()).toContain('row.oauthTitleGlobal')
     expect(view.text()).toContain('row.oauthStartGlobal')
     // The QR wording must be GONE, not merely joined by the new one: both
-    // keys rendering would mean the region branch does nothing. Matched by the
-    // GLOBAL key's absence rather than the base key's, because 'row.oauthTitle'
-    // is a PREFIX of 'row.oauthTitleGlobal' and a substring check would pass
-    // even with both rendered.
+    // keys rendering would mean the region branch does nothing. The accessible
+    // name is compared for EQUALITY because 'row.oauthTitle' is a PREFIX of
+    // 'row.oauthTitleGlobal' — a substring check would pass with both present.
+    expect(sectionName(view)).toBe('row.oauthTitleGlobal')
     expect(view.text()).not.toMatch(/row\.oauthTitle(?![A-Za-z])/)
     expect(view.text()).not.toMatch(/row\.oauthStart(?![A-Za-z])/)
     await view.unmount()

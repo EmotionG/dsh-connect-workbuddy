@@ -22,6 +22,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { regionOfProvider, WorkBuddyModelLabel, resetBusyLevelCache } from '../src/client/WorkBuddyModelLabel.tsx'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { mount } from './pool-render-helpers.tsx'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -112,5 +113,101 @@ describe('the model label in the host picker', () => {
     const markup = renderToStaticMarkup(<WorkBuddyModelLabel {...props} />)
     expect(markup).toContain('Model A')
     expect(markup).not.toContain('dsm-workbuddy-busy')
+  })
+})
+
+/** A promotion in the shape the usage route carries it in (already parsed). */
+function promo(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'night-discount',
+    source: 'promotion',
+    modelIds: ['model-a'],
+    badge: { label: '夜间折扣', shortLabel: '夜间', color: '#009273' },
+    schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '00:00', end: '24:00' }] },
+    priority: 5,
+    ...overrides,
+  }
+}
+
+/** The same usage body, with promotions on the model. */
+function usageWithPromos(promos: readonly unknown[]): Record<string, unknown> {
+  const body = usageWithLevels({ 'model-a': 'normal' })
+  return { ...body, models: [{ id: 'model-a', name: 'Model A', promos }] }
+}
+
+/**
+ * The promotion badge, in the picker.
+ *
+ * The card has drawn these badges for a while; this is the SAME upstream fact
+ * rendered where the choice is actually made. Three properties matter, and all
+ * three are about not overstating the offer:
+ *
+ * 1. It is the upstream's own wording and colour, beside the name — the host's
+ *    contract keeps `model.name` as the text.
+ * 2. It is resolved against the CLOCK at render time, not frozen when the
+ *    snapshot was fetched, so an ended campaign cannot outlive itself.
+ * 3. A narrow row gets the upstream's compact wording, because a four-character
+ *    label would push the row's own controls out.
+ */
+describe('the promotion badge in the host picker', () => {
+  it('draws the upstream\'s chip beside the name, with its own colour', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => usageWithPromos([promo()]),
+    }))
+    const view = await mount(WorkBuddyModelLabel, { ...props, placement: 'option' })
+    await view.settle()
+    const html = view.html()
+    expect(view.text()).toContain('Model A')
+    expect(view.text()).toContain('夜间')
+    // The upstream's colour reaches the chip as a custom property, which is how
+    // the shared chip class picks it up.
+    expect(html).toContain('--dsm-workbuddy-promo-color')
+    expect(html).toContain('#009273')
+    // The load icon stays: a promotion says what it costs, the icon says how
+    // busy it is, and they are different questions.
+    expect(html).toContain('dsm-workbuddy-busy')
+    // The chip comes after the name, never instead of it.
+    expect(html.indexOf('Model A')).toBeLessThan(html.indexOf('dsm-workbuddy-model-label-promo'))
+    await view.unmount()
+  })
+
+  it('prefers the compact wording in a narrow row and the full one on the trigger', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => usageWithPromos([promo()]),
+    }))
+    const row = await mount(WorkBuddyModelLabel, { ...props, placement: 'option' })
+    await row.settle()
+    expect(row.text()).toContain('夜间')
+    expect(row.text()).not.toContain('夜间折扣')
+    await row.unmount()
+
+    // The composer trigger has the width for the upstream's full wording, and
+    // it is the line the user reads without opening anything.
+    resetBusyLevelCache()
+    const trigger = await mount(WorkBuddyModelLabel, { ...props, placement: 'trigger' })
+    await trigger.settle()
+    expect(trigger.text()).toContain('夜间折扣')
+    await trigger.unmount()
+  })
+
+  it('draws NOTHING once the promotion is over', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => usageWithPromos([
+        // A campaign that ended a minute ago: `validUntil` is exclusive, so it
+        // is over at that instant. A standing badge must not survive it.
+        promo({ schedule: { timezone: 'Asia/Shanghai', validUntil: Date.now() - 60_000 } }),
+      ]),
+    }))
+    const view = await mount(WorkBuddyModelLabel, { ...props, placement: 'trigger' })
+    await view.settle()
+    expect(view.text()).toContain('Model A')
+    expect(view.html()).not.toContain('dsm-workbuddy-model-label-promo')
+    await view.unmount()
   })
 })

@@ -20,6 +20,7 @@
     "src/dsh-llm-augment.d.ts",
     "tests/pool-render-helpers.tsx",
     "tests/pool-render.spec.tsx",
+    "tests/account-tools-placement.spec.tsx",
     "tests/pool-card-render.spec.tsx",
     "tests/probe-age.spec.tsx",
     "tests/remaining.spec.tsx",
