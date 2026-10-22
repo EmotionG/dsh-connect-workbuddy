@@ -246,6 +246,11 @@ export const WORKBUDDY_CARD_CSS = `
    scrolling to the end of a long model list. */
 .dsm-workbuddy-models-dirty{margin-left:8px;padding:1px 6px;border-radius:6px;background:var(--dsw-alias-state-warn-primary,#f59e0b);color:#1b1d22;font-size:11px;font-weight:600;line-height:16px;vertical-align:1px;white-space:nowrap}
 .dsm-workbuddy-models-summary{margin:2px 0 0;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
+/* The one grey line that states what a section is FOR, at the top of a panel.
+   Kept as its own class instead of reusing the models-summary class: the same
+   rule now heads the capability section, whose vocabulary has nothing to do with
+   models, and a shared name would send the next reader to the wrong panel. */
+.dsm-workbuddy-panel-note{margin:2px 0 0;color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:18px}
 /* The free-model quota warning (see the tabFreeQuotaWarn locale key). Bold on
    purpose, and it keeps the summary's own grey rather than the primary label
    colour: it has to stand out from the three lines around it WITHOUT reading as

@@ -458,7 +458,15 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    * attribute), so switching back never refetches, a half-filled draft
    * survives, and the pool keeps its log.
    */
-  const [panel, setPanel] = useState<'accounts' | 'models' | 'diag'>('accounts')
+  /* `capabilities` is a section of its own, not a corner of `accounts`: the
+   * switches it holds authorize SPEND and tool registration, they commit on the
+   * click (there is no Save button anywhere near them), and each is expected to
+   * grow sub-options — a working directory for the CLI route, a per-image price
+   * cap, an image size. Those have nowhere to go in a flat list under the tab
+   * bar, where every added control competes with the account table for the same
+   * screen.
+   */
+  const [panel, setPanel] = useState<'accounts' | 'models' | 'capabilities' | 'diag'>('accounts')
   const [busy, setBusy] = useState(false)
   const [settingsRevision, setSettingsRevision] = useState(0)
   /** Per-region unsaved model edits; a draft on one tab is never dropped by
@@ -1656,21 +1664,28 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const creditPositionDisabledCaption = t('row.creditPositionDisabledHint')
 
   /*
-   * THE CREDIT READOUT, AS TWO PREFERENCE LINES.
+   * THE CAPABILITY SWITCHES: what the plugin may DO for this tab (route work to
+   * the local CLI, let the model buy an image) and what it may SHOW (the credit
+   * readout and where it sits).
    *
-   * This block has been in three places on this card. It started as two boxes
-   * side by side under the tab bar, which read as ONE shared setting rather than
-   * as this tab's; that moved it into the ACCOUNT POOL's heading row as
-   * `headerExtra`, where it shared a baseline with 「账号池」 and the
-   * serving-account badge; that became a section with its own heading, whose
-   * far-right control column split one sentence into two objects with half a
-   * card of empty space between them.
+   * Order is deliberate and is not by region: SPEND first, display last. The
+   * first two cost credits without asking again; the last two only change what
+   * is drawn.
    *
-   * The reference card settles it: a preference is a checkbox on a line that
-   * commits on the click, the explanation sits UNDER its label (two lines, not
-   * one wrapped blob), and the picker that belongs to a switch is indented to
-   * that switch's label and sits beside the words that ask for it. No heading,
-   * no control column, nothing stretched to an edge. That is what this is.
+   * Placement history, because this block keeps drifting: it started as two
+   * boxes side by side under the tab bar (read as ONE shared setting rather than
+   * as this tab's), moved into the ACCOUNT POOL's heading row as `headerExtra`
+   * (shared a baseline with 「账号池」 and pushed the serving-account badge off to
+   * the far right), then became a headed section (its far-right control column
+   * split each sentence into a label at one edge and a control at the other).
+   * It now has a SECTION of its own — 「能力」 — because these are grants, not
+   * account facts, and because each is due sub-options (a working directory for
+   * the CLI route, a price cap or size for the image tool) that a flat list
+   * competing with the account table had no room for.
+   *
+   * The layout inside is still the reference card's: a checkbox on a line that
+   * commits on the click, the explanation UNDER its label, and the picker that
+   * belongs to a switch indented to that switch's label.
    *
    * It renders OUTSIDE AccountPool (below), not through `headerExtra`, so it
    * survives a Host that reports no pool state instead of vanishing with the
@@ -1872,6 +1887,17 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                     <button
                       type="button"
                       role="tab"
+                      id="dsm-workbuddy-tab-capabilities"
+                      aria-controls="dsm-workbuddy-panel-capabilities"
+                      aria-selected={panel === 'capabilities'}
+                      className={`dsm-workbuddy-panel-tab${panel === 'capabilities' ? ' dsm-workbuddy-panel-tab-active' : ''}`}
+                      onClick={() => { setPanel('capabilities') }}
+                    >
+                      {t('row.panelCapabilities')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
                       id="dsm-workbuddy-tab-diag"
                       aria-controls="dsm-workbuddy-panel-diag"
                       aria-selected={panel === 'diag'}
@@ -1909,28 +1935,13 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
               {!activeRegionOn
                 ? <p className="dsm-workbuddy-tab-off-notice">{t('row.tabOffNotice')}</p>
                 : null}
-              {/* The credit readout, as bare preference lines right under
-                  the tab block — the reference card's shape, and the right one
-                  here too: both switches describe THIS tab, so they belong to
-                  the tab block rather than to a section of their own with a
-                  heading that repeats 「积分」.
-
-                  This block has been in three places. Two boxes side by side
-                  under the tab bar read as ONE shared setting rather than as
-                  this tab's. Moving it into AccountPool as `headerExtra` put it
-                  on a baseline with 「账号池」 and the serving-account badge, and
-                  the picker — the widest of the three — pushed the badge to the
-                  far right where it read as the picker's label. Giving it its
-                  own headed section fixed the placement but then split each
-                  sentence into a label at the left edge and a control at the
-                  right edge.
-
-                  Rendering it here, outside AccountPool, also fixes a real
-                  hole: AccountPool returns null without Host pool state, and
-                  the switch went with it — so on an older Host the user could
-                  not turn the readout on at all, and the only cue was a missing
-                  line. */}
-              {creditPreferences}
+              {/* The credit/CLI/image preferences are NOT here any more: they
+                  moved to their own 「能力」 section, which is where a control
+                  that authorizes spending (or registers a tool) belongs. This
+                  panel is about WHICH account serves the tab; those switches are
+                  about WHAT the plugin may do with it, and every one of them is
+                  expected to grow sub-options that had no room in a flat list
+                  competing with the account table. */}
               {/* The signed-in status card is GONE: the account name and the
                   token expiry were both information the rest of the card already
                   carries, and this line was actively the wrong place for it.
@@ -2377,6 +2388,25 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                     </section>
               </div>
                 : null}
+              {/* CAPABILITIES — what the plugin is allowed to DO, as opposed to
+                  which account it does it with. Three switches, no Save button:
+                  each one commits on the click, which is exactly why they cannot
+                  sit inside a section whose note promises 「点保存才生效」.
+
+                  `signedIn &&` matches the accounts panel: a signed-out card has
+                  no tab bar, so the section must stay reachable (and it is the
+                  only place the CLI switch lives on an older Host that reports no
+                  pool state). */}
+              <div
+                className="dsm-workbuddy-panel"
+                role="tabpanel"
+                id="dsm-workbuddy-panel-capabilities"
+                aria-labelledby="dsm-workbuddy-tab-capabilities"
+                hidden={signedIn && panel !== 'capabilities'}
+              >
+                <p className="dsm-workbuddy-panel-note">{t('row.panelCapabilitiesHint')}</p>
+                {creditPreferences}
+              </div>
               {/* DIAGNOSTICS — the third section, and the one that earns its tab
                   by holding nothing the other two already say: the facts a bug
                   report needs (which region, which host, which account, which

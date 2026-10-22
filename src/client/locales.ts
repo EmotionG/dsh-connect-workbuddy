@@ -88,6 +88,11 @@ export const en = {
   // saves.
   'row.panelAccounts': 'Accounts',
   'row.panelModels': 'Models',
+  // Its own section because these switches GRANT capabilities (spend, tool
+  // registration) rather than pick an account, and because every one of them is
+  // due sub-options that a flat list under the tab bar had no room for.
+  'row.panelCapabilities': 'Capabilities',
+  'row.panelCapabilitiesHint': 'What the plugin may do on your behalf. Each switch takes effect on the click — there is no Save button in this section.',
   'row.panelDiag': 'Diagnostics',
   'row.panelAria': 'Card sections',
   'row.diagHint': 'What this card actually read, so a report can quote it. Nothing here changes a setting.',
@@ -559,6 +564,8 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.selectionLostMessage': '该区域保存的账号已不在本机登录列表中（WorkBuddy 更换了登录或清理了备份文件）。本机其他登录仍然可用——请在上方列表中重新选择一个当前账号。重新登录桌面端 App 无法修复此问题。',
   'row.panelAccounts': '账号',
   'row.panelModels': '模型',
+  'row.panelCapabilities': '能力',
+  'row.panelCapabilitiesHint': '插件可以替你做什么。这些开关点一下立即生效 —— 这一区里没有保存按钮。',
   'row.panelDiag': '诊断',
   'row.panelAria': '卡片分区',
   'row.diagHint': '这张卡片实际读到了什么，方便贴进问题反馈。这里没有任何会改动设置的控件。',
