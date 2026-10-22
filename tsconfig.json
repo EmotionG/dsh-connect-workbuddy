@@ -50,6 +50,7 @@
     "tests/cli-bridge-card-switch.spec.tsx",
     "tests/busy-icon-card.spec.tsx",
     "tests/model-label-slot.spec.tsx",
-    "tests/cli-bridge-live-pill.spec.tsx"
+    "tests/cli-bridge-live-pill.spec.tsx",
+    "tests/issue120-picker-rate-duplicate.spec.tsx"
   ]
 }

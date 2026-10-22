@@ -263,18 +263,61 @@ function WorkBuddyModelLabelInner(props: {
   // after this snapshot was cached still shows, and one that closed stops.
   const promo = snapshot === undefined ? undefined : selectPromoBadge(snapshot.promos[modelId], Date.now())
 
-  const baseRate = snapshot?.rates[modelId]
   // Same clock as the badge: a standing "night discount" entry outside its
   // hours must not change the price (issue #120).
   const discounted = snapshot === undefined ? undefined : selectPromoMultiplier(snapshot.promos[modelId], Date.now())
-  const rate = discounted ?? baseRate
+
+  // The host's `model.name` ALREADY ends in the catalog multiplier
+  // (`DeepSeek-V4.1-Flash · x0.11` — see `workBuddyDisplayName`), so appending
+  // another rate would print the figure twice (observed in the picker). The
+  // catalog figure is therefore STRIPPED from the name and drawn separately,
+  // and the discounted one takes its place: always exactly one number, and it
+  // is the one that holds right now.
+  const { base, rate } = splitCatalogRate(name, snapshot?.rates[modelId], discounted)
 
   return (
     <span className="dsm-workbuddy-model-label">
-      <span>{name}</span>
+      <span>{base}</span>
       {rate === undefined ? null : <span className="dsm-workbuddy-model-label-rate"> · x{rate.toFixed(2)}</span>}
       {promo === undefined ? null : <PromoBadge promo={promo} compact={compact} />}
       {level === undefined ? null : busyIcon(level, 'zh')}
     </span>
   )
 }
+
+/**
+ * Split the host's display name into "name" and "the multiplier to show".
+ *
+ * `workBuddyDisplayName` builds `"<name> · x<multiplier>"` and the host renders
+ * that string verbatim, so appending another rate next to it printed the figure
+ * twice in the picker (`DeepSeek-V4.1-Flash · x0.11 · x0.11`). The suffix is
+ * therefore pulled back OUT of the string and re-drawn in the span that can
+ * carry the discounted value — exactly one number, and it is the one that holds
+ * right now.
+ *
+ * The suffix is recognised by SHAPE, not by comparing against the snapshot's
+ * `baseRate`: the two can disagree (a promotion can change the catalog figure
+ * between the snapshot and this render), and leaving the suffix in place then
+ * prints two numbers again — the very defect this function removes.
+ *
+ * @param name - The host's rendered name, possibly ending in ` · x<rate>`.
+ * @param baseRate - The catalog multiplier, as the snapshot reports it.
+ * @param discounted - The rate to show instead, when a discount is running.
+ * @returns The name without its rate suffix, and the single rate to draw.
+ *          `undefined` means "draw no number" (the name had none and no
+ *          discount is running).
+ */
+export function splitCatalogRate(
+  name: string,
+  baseRate: number | undefined,
+  discounted: number | undefined,
+): { base: string, rate: number | undefined } {
+  const match = / · x(\d+(?:\.\d+)?)$/.exec(name)
+  const fromName = match === null ? undefined : Number(match[1])
+  const base = match === null ? name : name.slice(0, match.index)
+  // The discount wins; otherwise keep the number the name carried; otherwise
+  // fall back to the snapshot (a name with no suffix still gets its rate).
+  const rate = discounted ?? fromName ?? baseRate
+  return { base, rate }
+}
+
