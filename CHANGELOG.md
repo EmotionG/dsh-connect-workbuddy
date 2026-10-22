@@ -20,6 +20,11 @@
     - `.dsm-workbuddy-composer-panel-mark` 显式 `white-space:normal` + `overflow-wrap:anywhere`。这条针对**根因**：这一行是本行里唯一长度不受布局控制的文字（译文，两种语言相差 2 倍），所以它该**换行**而不是被切 —— 多一行是能读的结果，切断半个字不是。
   - 同栏另外两个偏长的结论（`credential-rejected` 39 字、`unavailable` 19 字）现在会正常折行，不再被切。
 
+- **（#108 后续）「被限流 · 约 2 小时后」补成「……后恢复」** —— 只有时长、没有动词，读者还得自己猜这两小时后会发生什么；而这一行整行的职责就是回答「这个账号现在能不能用」。
+  - 新增 `recoversInText()`（`src/client/remaining.ts`）与四个 `row.recovers*` 键，**数字、取整、空串契约与 `remainingText()` 完全一致**，只多一个动词：`约 2 小时后恢复` / `约 25 分钟后恢复` / `约 3 天后恢复` / `即将恢复`；英文 `recovers in about 2 h`。
+  - **只改面板，不改账号池卡片**，这是有意为之：卡片那句自带动词（`✗ 被限流 · 10/22, 14:47 之后可再用`），再叠「恢复」就成了 `之后可再用 · 约 2 小时后恢复`，一句话说两遍。所以两个函数并存，而不是给 `remainingText()` 加参数 —— 加了参数，那两个自带动词的调用点迟早会多长出一个。
+  - 随之调整了一条既有的跨界面契约用例：它原本断言两边「同一个 key 名逐字相同」，现在断言**同一测量算出同一个时长与取整**（把 `row.recovers*` 映射成 `row.remaining*` 后比对）。这才是那个测试真正要守的不变量：两面不会对「还剩多久」给出两个答案。
+
 ### Tests
 
 - `tests/issue59-cross-region-thinking.spec.ts`：原「rewrites ONLY provider — api and model are untouched」用例改写为「只修宿主回退 api，原生 api 逐字节不动」。
@@ -27,7 +32,10 @@
 - 已验证：撤回 `src/adapter.ts` 的改动后，新增用例立刻转红（2 failed / 12 passed）。
 - `tests/composer-credits-render.spec.tsx`（+3 条，`issue #108` 分节）：用**真实中文 locale**（不是回显 key 的桩）断言面板打印的是 `✗ 网关拦的是提示词` 且长度 < 20；完整解释仍在行 `title` 里（含「第三方 agent 过滤」）；样式表里 mark 一栏必须 `white-space:normal` + `overflow-wrap:anywhere`。
 - 变异验证：撤回 `account-state.ts` + `styles.ts` 的改动 → 2 条立刻转红；单独把 locale 里的长文案改短（模拟「删掉解释」）→ 第 2 条转红。三条都真的在守卫，不是空转。
-- 全量：**111 文件通过 / 1 跳过；1817 通过 / 2 跳过**；两个 tsconfig 均 exit 0；build 成功。
+- 全量：**111 文件通过 / 1 跳过；1819 通过 / 2 跳过**；两个 tsconfig 均 exit 0；build 成功。
+- `tests/remaining.spec.tsx`（+2 条）：`recoversInText()` 与 `remainingText()` 对同一批时刻给出**相同数字与单位**（只差前缀）；过去时刻返回空串。
+- `tests/composer-credits-render.spec.tsx`：`WAIT` 正则改指 `row.recovers*`；跨界面契约用例改为比较「时长」而非「key 名」，并注明卡片为何不该加「恢复」。
+- 变异验证：把 `availabilityMark` 里的 `recoversInText` 换回 `remainingText` → 上述 2 条立刻转红。
 
 ## 5.2.3 (2026-10-22)
 

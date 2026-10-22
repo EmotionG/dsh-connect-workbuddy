@@ -8,7 +8,7 @@
  * @module dsh-connect-workbuddy/tests/remaining
  */
 import { describe, expect, it } from 'vitest'
-import { remainingText } from '../src/client/remaining.ts'
+import { recoversInText, remainingText } from '../src/client/remaining.ts'
 import { t } from './pool-render-helpers.tsx'
 
 const NOW = 1_800_000_000_000
@@ -56,5 +56,33 @@ describe('remainingText', () => {
   it('switches to days at two days', () => {
     expect(remainingText(t, NOW + 48 * 60 * 60_000, NOW)).toBe('row.remainingDays|count=2')
     expect(remainingText(t, NOW + 7 * 24 * 60 * 60_000, NOW)).toBe('row.remainingDays|count=7')
+  })
+})
+
+/**
+ * The VERB half: "约 2 小时后恢复", not a bare "约 2 小时后".
+ *
+ * A duration alone leaves the reader to guess what happens when it elapses,
+ * on the one row whose whole job is answering "can this account serve now?".
+ * Same numbers and same rounding as `remainingText` — this suite pins that the
+ * two can never disagree about the DURATION, because a divergence there would
+ * have the card and the panel state two different waits for one measurement.
+ */
+describe('recoversInText', () => {
+  it('names the recovery, in the same unit and rounding as remainingText', () => {
+    const cases: number[] = [1_000, 59_999, 60_000, 25 * 60_000, 60 * 60_000, 69 * 60_000, 160 * 60_000, 48 * 60 * 60_000]
+    for (const delta of cases) {
+      const wait = remainingText(t, NOW + delta, NOW)
+      const recovers = recoversInText(t, NOW + delta, NOW)
+      // The unit and count are identical; only the key prefix (and the words it
+      // carries) differs. This is the invariant the two surfaces rely on.
+      expect(recovers.replace('row.recovers', 'row.remaining')).toBe(wait)
+    }
+  })
+
+  it('says nothing once the moment has passed, for the same reason remainingText does', () => {
+    expect(recoversInText(t, NOW, NOW)).toBe('')
+    expect(recoversInText(t, NOW - 1, NOW)).toBe('')
+    expect(recoversInText(t, NOW - 86_400_000, NOW)).toBe('')
   })
 })

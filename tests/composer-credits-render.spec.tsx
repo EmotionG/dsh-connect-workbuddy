@@ -515,16 +515,17 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
       ?.querySelector('.dsm-workbuddy-composer-panel-dot') ?? undefined
 
   it('prints the reason and the wait, but not the absolute instant', async () => {
-    // The owner's request, on this panel only: "被限流 · 约 6 小时后" stays, the
-    // "10/19, 01:32 之后可再用" in the middle goes. The wait answers the question
-    // a limited row raises ("how long?"); the date is the part nobody acts on,
-    // and in this column it read like a log line wrapped in a sentence.
+    // The owner's request, on this panel only: "被限流 · 约 6 小时后恢复" stays,
+    // the "10/19, 01:32 之后可再用" in the middle goes. The wait answers the
+    // question a limited row raises ("how long until it comes back?"); the date
+    // is the part nobody acts on, and in this column it read like a log line
+    // wrapped in a sentence.
     const m = await openPanel(poolUsage)
     const mark = markOf('A Two')
     expect(mark).toBeDefined()
     expect(mark).toContain('row.poolExcludedRateLimited')
     expect(mark, 'the reset instant must no longer be printed here').not.toContain('row.poolRetryAt')
-    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    const WAIT = /row\.recovers(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
     expect(WAIT.test(mark ?? ''), 'the wait must survive').toBe(true)
     await m.unmount()
   })
@@ -554,7 +555,7 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
     // And the WAIT stays visible. "01:32 之后可再用" alone makes the reader
     // subtract from the clock and does not say whether that is tonight or
     // tomorrow, which is why the visible half keeps the relative wait.
-    const WAIT = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
+    const WAIT = /row\.recovers(Imminent|Minutes|Hours|Days)(\|count=\d+)?/
     expect(WAIT.test(mark), 'the panel must print how long until it is usable').toBe(true)
 
     // Render the card from the SAME document, then compare the instants. The
@@ -571,9 +572,22 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
       .find(text => text.includes('row.poolExcludedRateLimited')) ?? ''
     const cardAt = INSTANT.exec(cardLine)?.[1]
     expect(cardAt, 'the card must print the same instant').toBe(panelAt)
-    // Same wait, word for word — the suffix is shared, not re-derived.
-    const cardWait = WAIT.exec(cardLine)?.[0]
-    expect(cardWait, 'the card must print the same wait').toBe(WAIT.exec(mark)?.[0])
+    // Same WAIT derived from the same number — but not the same sentence, and
+    // that is deliberate rather than drift.
+    //
+    // The card's sentence already carries its own verb earlier ("{at} 之后可再用"),
+    // so appending "约 2 小时后恢复" there would say it twice in one line:
+    // "10/22, 14:47 之后可再用 · 约 2 小时后恢复". The panel has no such verb —
+    // its line is "被限流 · …" — so it needs one, which is the whole reason
+    // `recoversInText` exists beside `remainingText`.
+    //
+    // What the shared rule must still guarantee is the NUMBER and its rounding:
+    // both surfaces read one instant through one rounding rule, so they can
+    // never disagree about how long is left. Compare those, not the key prefix.
+    const cardNum = /row\.remaining(Imminent|Minutes|Hours|Days)(\|count=\d+)?/.exec(cardLine)?.[0]
+    const panelNum = (WAIT.exec(mark)?.[0] ?? '').replace('row.recovers', 'row.remaining')
+    expect(panelNum, 'the panel must state a wait at all').not.toBe('')
+    expect(cardNum, 'the card must state the same wait, from the same instant').toBe(panelNum)
     await card.unmount()
     await m.unmount()
   })

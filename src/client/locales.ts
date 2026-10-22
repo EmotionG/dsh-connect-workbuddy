@@ -299,6 +299,13 @@ export const en = {
   'row.remainingMinutes': 'in about {count} min',
   'row.remainingHours': 'in about {count} h',
   'row.remainingDays': 'in about {count} d',
+  // The same duration WITH its verb (`recoversInText`). On an account row the
+  // bare "in about 2 h" states how long but not what happens then, which is the
+  // one thing the row exists to answer.
+  'row.recoversImminent': 'recovering any moment now',
+  'row.recoversMinutes': 'recovers in about {count} min',
+  'row.recoversHours': 'recovers in about {count} h',
+  'row.recoversDays': 'recovers in about {count} d',
   // How stale a measurement is, and which writer produced it. Two sites write
   // the same account's record and overwrite each other, so without these the
   // table cannot explain a change the user just watched happen.
@@ -751,6 +758,13 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.remainingMinutes': '约 {count} 分钟后',
   'row.remainingHours': '约 {count} 小时后',
   'row.remainingDays': '约 {count} 天后',
+  // 带动词的同一时长（`recoversInText`）：账号行上单独一句「约 2 小时后」只说了
+  // 时长，没说那一刻会发生什么 —— 读起来既可能是「限流解除」也可能是别的。
+  // 这一行整行的职责就是回答「这个账号现在能不能用」，所以动词不能省。
+  'row.recoversImminent': '即将恢复',
+  'row.recoversMinutes': '约 {count} 分钟后恢复',
+  'row.recoversHours': '约 {count} 小时后恢复',
+  'row.recoversDays': '约 {count} 天后恢复',
   // 记录有多旧、以及是谁写的。两个写入方会互相覆盖同一个账号的记录，
   // 没有这两项就无法解释用户亲眼看到的变化（测出 ok，过后变成被限流）。
   'row.poolProbeJustNow': '刚刚',

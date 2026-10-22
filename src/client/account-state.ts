@@ -23,7 +23,7 @@ import type {
 } from '../status-paths.ts'
 import { exclusionOf } from '../account-pool.ts'
 import type { Translate } from './searched-paths.ts'
-import { remainingText } from './remaining.ts'
+import { recoversInText, remainingText } from './remaining.ts'
 
 /**
  * The slice of an account this module reasons about.
@@ -199,10 +199,14 @@ export function availabilityMark(
   const probe = account.probe
   if (probe !== undefined) {
     if (probe.retryAtMs !== undefined) {
-      // The WAIT, never the instant. Once the moment has passed `remainingText`
-      // returns '' — then the reason alone is the honest line, because there is
-      // nothing left to wait for.
-      const left = remainingText(t, probe.retryAtMs, nowMs)
+      // The WAIT, never the instant, and WITH its verb: "被限流 · 约 2 小时后恢复"
+      // rather than a bare "约 2 小时后". The duration alone left the reader to
+      // guess what happens when it elapses — on a row whose whole job is "can
+      // this account serve", the verb is the answer, not the rounding.
+      //
+      // Once the moment has passed `recoversInText` returns '' — then the reason
+      // alone is the honest line, because there is nothing left to wait for.
+      const left = recoversInText(t, probe.retryAtMs, nowMs)
       return left === ''
         ? outcomeMarkText(t, probe.outcome)
         : `${outcomeMarkText(t, probe.outcome)} · ${left}`
