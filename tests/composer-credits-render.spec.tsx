@@ -652,6 +652,43 @@ describe('ComposerCredits panel agrees with the pool card about availability', (
     await swapped.unmount()
   })
 
+  it('marks the row the POOL is serving, even when the saved choice names another', async () => {
+    // The reported screenshot: the highlight sat on one account while
+    // 「当前选用」 sat on another. The row's highlight and its label were reading
+    // DIFFERENT answers — highlight from the credits endpoint's `selected` (the
+    // SAVED choice), label from `pool.accounts[].current` (what the shim bills).
+    // With the pool rotating, those two legitimately differ.
+    //
+    // One question, one answer: everything on the row must follow the pool
+    // document while it exists. `usageOf` here says a-1 is the saved choice;
+    // the pool says a-2 is serving.
+    const doc = {
+      ...usageOf('cn', 1072),
+      pool: {
+        enabled: true,
+        targetModelId: '',
+        checkinSupported: true,
+        modelId: 'deepseek-v4.1-flash',
+        accounts: [
+          { accountId: 'a-1', accountName: 'A One', credits: 1072, current: false, member: true, probe: { outcome: 'ok', atMs: Date.now() - 60_000 } },
+          { accountId: 'a-2', accountName: 'A Two', credits: 200, current: true, member: true, probe: { outcome: 'ok', atMs: Date.now() - 60_000 } },
+        ],
+      },
+    }
+    const m = await openPanel(() => doc)
+    // The LABEL follows the serving account…
+    expect(markOf('A Two'), 'the serving account is the one that says so').toBe('composer.current')
+    expect(markOf('A One'), 'the saved choice must not claim to be in use').toBeUndefined()
+    // …and so does the HIGHLIGHT. These are the two halves that disagreed.
+    // The panel is portalled out of the component tree, so it is found on
+    // `document.body` exactly like `markOf` above does.
+    const rowOf = (name: string): Element | undefined => Array.from(document.body.querySelectorAll('tr'))
+      .find(tr => (tr.querySelector('.dsm-workbuddy-composer-panel-name')?.textContent ?? '') === name)
+    expect(rowOf('A Two')!.className, 'the highlight follows the same answer as the label').toContain('row-current')
+    expect(rowOf('A One')!.className ?? '', 'the saved choice is not highlighted').not.toContain('row-current')
+    await m.unmount()
+  })
+
   it('paints a refusal red rather than amber', async () => {
     // A rate limit is a refusal, not a warning: the account cannot answer this
     // message, and amber ("mostly fine, look later") was the one thing the row

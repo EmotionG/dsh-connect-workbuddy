@@ -804,6 +804,16 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                       // the dot came from. OR-ing them would mark two rows live at
                       // once — which is how a "which one is in use?" question gets
                       // a wrong answer at exactly the moment it matters.
+                      //
+                      // AND `live` IS WHAT PAINTS THE ROW. The row highlight and
+                      // the switch button used `current` while the text used
+                      // `live`, so the two could visibly disagree: with the pool
+                      // rotating, the highlight sat on the serving account and
+                      // 「当前选用」 on the saved one (reported). One question, one
+                      // answer — everything on this row reads `live`; `current`
+                      // survives only where it is genuinely about the OTHER
+                      // question (which account this endpoint reports it can
+                      // switch FROM), i.e. the button's disabled state.
                       const live = poolRow === undefined ? current : poolRow.current
                       const availability = poolRow ?? {
                         excludedBy: row.excludedBy,
@@ -851,14 +861,14 @@ export function ComposerCredits(props: ComposerCreditsProps) {
                       return (
                         <tr
                           key={row.id}
-                          className={current ? 'dsm-workbuddy-composer-panel-row-current' : undefined}
+                          className={live ? 'dsm-workbuddy-composer-panel-row-current' : undefined}
                           title={spoken}
                         >
                           <th scope="row" aria-label={whoLabel}>
                             <button
                               type="button"
                               className="dsm-workbuddy-composer-panel-switch"
-                              disabled={!canSwitch || switchingId !== undefined || current}
+                              disabled={!canSwitch || switchingId !== undefined || live}
                               aria-label={t('composer.switchTo', { account: row.accountName })}
                               onClick={() => { void switchTo(row.id) }}
                             >
