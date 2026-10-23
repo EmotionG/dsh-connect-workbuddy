@@ -27,7 +27,7 @@
  * @module dsh-connect-workbuddy/upstream
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
 import { parseQueueAnswer } from './queue.ts'
@@ -499,6 +499,15 @@ const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
  * `/v3/config` as {@link PRODUCT_UA}.
  */
 const PRODUCT_UA = 'WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0'
+
+/**
+ * The app version inside {@link PRODUCT_UA}, for headers that need it alone.
+ *
+ * Derived from the UA instead of repeated as a literal: the `X-IDE-Version`
+ * header (issue #132) must agree with what the UA claims, and two independent
+ * literals is exactly how those two drift apart at the next version bump.
+ */
+const APP_VERSION = PRODUCT_UA.match(/WorkBuddy\/([^\s]+)/u)?.[1] ?? '5.8.3'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
 
@@ -1283,10 +1292,71 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  * @returns the three headers, every value distinct.
  */
 function conversationHeaders(): Record<string, string> {
+  // UUIDv7 in the 32-hex form the official client uses (issue #132), so the
+  // upstream's echoed id and the usage page's request id match what an official
+  // client produces. Every value is still generated per request.
+  const messageId = uuidv7()
   return {
-    'X-Conversation-ID': randomUUID(),
-    'X-Conversation-Request-ID': randomUUID(),
-    'X-Conversation-Message-ID': randomUUID(),
+    'X-Conversation-ID': uuidv7(),
+    'X-Conversation-Request-ID': uuidv7(),
+    'X-Conversation-Message-ID': messageId,
+    'X-Request-ID': messageId,
+  }
+}
+
+/**
+ * A 32-character lowercase UUIDv7, as the official client's request ids appear.
+ *
+ * WHY THE FORMAT MATTERS AT ALL (issue #132). The gateway echoes
+ * `X-Conversation-Message-ID` back as the SSE `id`, and the WorkBuddy usage page
+ * shows that value as the request id. Official traffic therefore shows
+ * `01a169…`-style 32-hex ids, while this plugin's `randomUUID()` produced
+ * hyphenated v4 ids — so the same account's usage page read as two different
+ * clients, and a reporter comparing them concluded the plugin was not the
+ * official client. Nothing upstream REJECTS a v4 id (measured: hyphenated v4
+ * ids answer 200), so this is a display-fidelity fix, not a gate.
+ *
+ * Only the FORMAT is aligned, never the value's meaning: the timestamp prefix
+ * is the moment this request was generated, which is exactly what a v7 id is
+ * for. It is NOT a claim that these ids correlate with an official session —
+ * the plugin still generates a fresh identity per request (see
+ * {@link conversationHeaders}).
+ */
+export function uuidv7(nowMs = Date.now()): string {
+  const bytes = randomBytes(16)
+  // 48-bit big-endian unix timestamp in milliseconds.
+  for (let index = 0; index < 6; index++) {
+    bytes[index] = Math.floor(nowMs / 2 ** (8 * (5 - index))) & 0xff
+  }
+  // Version 7 in the high nibble of byte 6, RFC 4122 variant in byte 8.
+  bytes[6] = ((bytes[6] as number) & 0x0f) | 0x70
+  bytes[8] = ((bytes[8] as number) & 0x3f) | 0x80
+  return bytes.toString('hex')
+}
+
+/**
+ * The IDE identity headers the official desktop client sends on chat (issue #132).
+ *
+ * WHY. The gateway records the usage page's 使用端 (client) column from
+ * `X-IDE-Name`, and it is EMPTY when the header is absent. The plugin has always
+ * spoken the CLI channel — {@link CLIENT_UA}, which is correct for the chat
+ * contract — but it sent no `X-IDE-*` at all, so every request this plugin made
+ * appeared on the user's own usage page as an unidentified client while the
+ * official app's requests read `WorkBuddy`. That is a reporting mismatch, not a
+ * gate: the reporter measured that adding the header changes the usage column
+ * and nothing else (HTTP 200, model unaffected).
+ *
+ * `X-IDE-Type` stays `CLI` on purpose. Claiming the desktop app's type as well
+ * would be a bigger identity claim than the one this fix needs, and the mixed
+ * CLI + WorkBuddy shape is what was actually measured. The version comes from
+ * {@link PRODUCT_UA} rather than a second hardcoded number, so the two cannot
+ * drift apart when the app version is bumped.
+ */
+function ideHeaders(): Record<string, string> {
+  return {
+    'X-IDE-Type': 'CLI',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': APP_VERSION,
   }
 }
 
@@ -1302,6 +1372,7 @@ function chatHeaders(credential: WorkBuddyCredential): Record<string, string> {
       : { 'X-Enterprise-Id': credential.enterpriseId },
     ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
     'X-Product': 'SaaS',
+    ...ideHeaders(),
     ...conversationHeaders(),
   }
   return headers
@@ -2000,6 +2071,114 @@ export function modelIdOfBody(bodyJson: string): string | undefined {
 }
 
 /**
+ * How a body should be prepared beyond the rules every request needs (issue #132).
+ *
+ * Both switches default to OFF, and that default is the point: each one changes
+ * bytes the upstream counts, so it must be a deliberate opt-in rather than a
+ * silent behaviour change on upgrade.
+ */
+export interface PrepareChatBodyOptions {
+  /**
+   * Move the harness's injected `user` messages above the real prompt.
+   *
+   * WHY. The usage page's 请求 column is filled from the LAST `user` message in
+   * the body. The DSH harness appends its runtime context (time samples,
+   * `Current runtime context.`, `<system-reminder>` blocks) AFTER the user's real
+   * prompt, as extra `user` messages — so the model reads the real prompt but the
+   * usage page records only the injected tail, and a user comparing their usage
+   * history with what they typed sees rows that look like noise.
+   *
+   * The move is ORDER-ONLY and only within the trailing run: the injected
+   * messages are lifted out and re-inserted immediately BEFORE the real prompt,
+   * which keeps every message, every word and every tool result intact. It is
+   * therefore invisible to the model's instruction order (a runtime-context block
+   * is context wherever it sits) and it is what makes the usage column show what
+   * the user actually typed.
+   *
+   * Only messages that MATCH the harness's own injected prefixes are moved. A
+   * body from any other client is untouched: this must never reorder a
+   * conversation whose trailing user messages are real turns.
+   */
+  keepPromptLast?: boolean
+}
+
+/**
+ * Prefixes the DSH harness uses for the context it injects as `user` messages.
+ *
+ * MEASURED shapes, not guesses: the harness's time-context provider appends
+ * `Time sampled while preparing turn N, step M: …`, its runtime-context
+ * provider appends `Current runtime context. …`, and its reminders arrive as
+ * `<system-reminder>` blocks. `billion-context` also prefixes some messages with
+ * an `<acp …>mNNNNN</acp>` marker, which is stripped when it leads an injected
+ * block so the recorded text starts at the sentence a reader recognises.
+ *
+ * A body whose trailing user message starts with none of these is left exactly
+ * as it arrived — the alternative (moving "the last non-empty user message")
+ * would reorder real conversations from other clients.
+ */
+const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
+
+/**
+ * The plain text of one message's content, for prefix matching only.
+ *
+ * Array-shaped content contributes its text parts joined by a newline; a
+ * non-text part is skipped rather than stringified, because `[object Object]`
+ * would make every prefix test miss.
+ */
+function textOfContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const part of content) {
+    if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+    const record = part as Record<string, unknown>
+    if (typeof record['text'] !== 'string') continue
+    parts.push(record['text'])
+  }
+  return parts.join('\n')
+}
+
+/** Whether this message is one of the harness's injected context blocks. */
+function isInjectedUserMessage(message: Record<string, unknown>): boolean {
+  if (message['role'] !== 'user') return false
+  return INJECTED_USER_PREFIX.test(textOfContent(message['content']).replace(/^\s+/u, ''))
+}
+
+/**
+ * Move the trailing injected `user` messages above the real prompt.
+ *
+ * Returns `true` when the order changed, so the caller can serialize only once.
+ * Never throws, and a body with nothing to move keeps its exact message order.
+ */
+function keepPromptLast(messages: unknown[]): boolean {
+  // Find the LAST user message that is NOT injected: that is the real prompt.
+  let promptIndex = -1
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const value = messages[index]
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+    const message = value as Record<string, unknown>
+    if (message['role'] !== 'user') continue
+    if (isInjectedUserMessage(message)) continue
+    if (textOfContent(message['content']).trim() === '') continue
+    promptIndex = index
+    break
+  }
+  if (promptIndex < 0) return false
+  const trailing = messages.slice(promptIndex + 1).filter(value =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? isInjectedUserMessage(value as Record<string, unknown>)
+      : false)
+  if (trailing.length === 0) return false
+  const kept = messages.filter((value, index) => !(index > promptIndex
+    && typeof value === 'object' && value !== null && !Array.isArray(value)
+    && isInjectedUserMessage(value as Record<string, unknown>)))
+  kept.splice(promptIndex, 0, ...trailing)
+  messages.length = 0
+  messages.push(...kept)
+  return true
+}
+
+/**
  * Normalize an OpenAI chat-completions body for the WorkBuddy upstream: force
  * `stream: true` (the upstream rejects non-streaming), flatten `tool_choice`
  * (the upstream's field is a string; object forms return 400), rewrite
@@ -2016,7 +2195,7 @@ export function modelIdOfBody(bodyJson: string): string | undefined {
  * upstream already answers keeps its prompt as close to byte-for-byte as these
  * rules allow.
  */
-export function prepareChatBody(source: string): string {
+export function prepareChatBody(source: string, options?: PrepareChatBodyOptions): string {
   let body: unknown
   try {
     body = JSON.parse(source)
@@ -2037,6 +2216,12 @@ export function prepareChatBody(source: string): string {
     }
   }
   ensureSystemHead(obj)
+  // AFTER the system head, so the injected blocks cannot displace it: the
+  // gateways require the conversation to OPEN with a system message, and this
+  // reorder only ever moves `user` messages among themselves.
+  if (options?.keepPromptLast === true && Array.isArray(obj['messages'])) {
+    keepPromptLast(obj['messages'])
+  }
   neutralizeChannelFingerprints(obj)
   normalizeToolChoice(obj)
   dropRefusedReasoning(obj)

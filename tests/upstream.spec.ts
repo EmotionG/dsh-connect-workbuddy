@@ -191,6 +191,107 @@ describe('classifyUpstreamError', () => {
   })
 })
 
+describe('prepareChatBody keepPromptLast (issue #132)', () => {
+  const injected = (text: string) => ({ role: 'user', content: text })
+  const real = (text: string) => ({ role: 'user', content: text })
+
+  /** Parse a prepared body back into its message list. */
+  function messagesOf(body: string): { role: string, content: unknown }[] {
+    return (JSON.parse(body) as { messages: { role: string, content: unknown }[] }).messages
+  }
+
+  it('leaves the order untouched when the option is off (the default)', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('推荐几个菜谱'),
+        injected('Current runtime context.\n\nTime sampled while preparing turn 3, step 1'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source))
+    expect(prepared.map(message => message.role)).toEqual(['system', 'user', 'user'])
+    expect(String(prepared[1]?.content)).toBe('推荐几个菜谱')
+  })
+
+  it('moves the injected blocks above the real prompt so the usage page records what was typed', () => {
+    // The upstream fills the usage 请求 column from the LAST user message, so the
+    // harness's appended runtime context is what appeared there instead of the
+    // user's own sentence.
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('推荐几个菜谱'),
+        injected('Time sampled while preparing turn 3, step 1: 2026-10-24T02:00:00+08:00'),
+        injected('Current runtime context.\n\nWorking directory: /tmp'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(prepared).toHaveLength(4)
+    // The real prompt is now LAST, and it is the only non-injected user message.
+    expect(String(prepared.at(-1)?.content)).toBe('推荐几个菜谱')
+    // Nothing was dropped or rewritten: the same four messages survive.
+    expect(prepared.map(message => String(message.content))).toEqual([
+      'prompt',
+      'Time sampled while preparing turn 3, step 1: 2026-10-24T02:00:00+08:00',
+      'Current runtime context.\n\nWorking directory: /tmp',
+      '推荐几个菜谱',
+    ])
+  })
+
+  it('recognises the system-reminder and acp-prefixed shapes', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('真实输入'),
+        injected('<acp x=\"1\">m00012</acp> <system-reminder>\n注意\n</system-reminder>'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(String(prepared.at(-1)?.content)).toBe('真实输入')
+  })
+
+  it('does NOT reorder a conversation whose trailing user message is a real turn', () => {
+    // This is the risk the option carries, so it is pinned: another client's
+    // ordinary conversation must keep its order byte-for-byte.
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('first question'),
+        { role: 'assistant', content: 'answer' },
+        real('follow-up question'),
+      ],
+    })
+    const before = messagesOf(prepareChatBody(source)).map(message => String(message.content))
+    const after = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+      .map(message => String(message.content))
+    expect(after).toEqual(before)
+  })
+
+  it('keeps the leading system message first, which both gateways require', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('hi'),
+        injected('Current runtime context.'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(prepared[0]?.role).toBe('system')
+  })
+
+  it('handles array-shaped content without stringifying objects', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('真实输入'),
+        { role: 'user', content: [{ type: 'text', text: 'Current runtime context.\nmore' }] },
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(String(prepared.at(-1)?.content)).toBe('真实输入')
+  })
+})
+
 describe('parseUpstreamErrorDetail', () => {
   it('lifts code, requestId, and the Chinese display message out of a 11140 body', () => {
     const detail = parseUpstreamErrorDetail(POLICY_REJECT_BODY)
@@ -1045,10 +1146,23 @@ describe('the conversation-identity triple (issue #66)', () => {
     expect(new Set(TRIPLE.map(name => seen[name])).size).toBe(3)
   })
 
-  it('sends a well-formed UUID in each, because a malformed id is refused upstream', async () => {
+  it('sends a well-formed 32-hex UUIDv7 in each, matching the official client (issue #132)', async () => {
+    // The gateway echoes `X-Conversation-Message-ID` back as the SSE id and the
+    // usage page shows it as the request id, so a hyphenated v4 id made official
+    // traffic and this plugin's traffic look like two different clients.
     const seen = await headersOf('www.workbuddy.ai')
-    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-    for (const name of TRIPLE) expect(seen[name]).toMatch(uuid)
+    const v7 = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(v7)
+  })
+
+  it('carries the X-IDE identity the usage page reads as 使用端 (issue #132)', async () => {
+    const seen = await headersOf('www.codebuddy.cn')
+    expect(seen['X-IDE-Name']).toBe('WorkBuddy')
+    expect(seen['X-IDE-Type']).toBe('CLI')
+    // The version must agree with the UA the plugin already claims, not a second
+    // hardcoded number.
+    expect(seen['X-IDE-Version']).toMatch(/^\d+\.\d+\.\d+/)
+    expect(seen['X-Request-ID']).toBe(seen['X-Conversation-Message-ID'])
   })
 
   it('generates fresh values per request rather than reusing one identity', async () => {

@@ -118,6 +118,18 @@ export interface WorkBuddyShimOptions {
    */
   channelPerturbation?: 'off' | 'failure' | 'always'
   /**
+   * Move the harness's injected `user` blocks above the real prompt (issue #132).
+   *
+   * The WorkBuddy usage page records the LAST `user` message as the request
+   * text, and the harness appends its runtime context after the user's real
+   * prompt — so the usage column shows injected noise instead of what was typed.
+   * The reorder is order-only (every message and every word survives) and it
+   * only ever moves messages that MATCH the harness's own injected prefixes.
+   *
+   * Default false: it changes bytes the upstream counts, so it is opt-in.
+   */
+  keepPromptLast?: boolean
+  /**
    * Pool failover for chat requests. Absent means no failover at all — the
    * pre-pool behaviour, where the selected account serves and its failure is
    * reported as-is.
@@ -1412,6 +1424,14 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const onRequestBody = options.onRequestBody
   const onUpstreamUsage = options.onUpstreamUsage
   const channelPerturbation = options.channelPerturbation ?? 'failure'
+  /**
+   * Whether the harness's injected `user` blocks are moved above the real prompt.
+   *
+   * OFF by default (issue #132): the reorder changes the message ORDER the
+   * upstream counts, so it must be the user's deliberate choice rather than a
+   * silent difference after an upgrade.
+   */
+  const keepPromptLastEnabled = options.keepPromptLast === true
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -1617,7 +1637,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     }
 
     const raw = (await readBody(req)).toString('utf8')
-    const prepared = prepareChatBody(raw)
+    const prepared = prepareChatBody(raw, { keepPromptLast: keepPromptLastEnabled })
     // The model this request is about, read from the body that goes upstream
     // (issue #61). Read ONCE, so every attempt — the first and each failover
     // retry — is remembered against the same model.
