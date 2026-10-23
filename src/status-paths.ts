@@ -1297,6 +1297,13 @@ export type WorkBuddyWebProbeOutcome =
   | 'credential-rejected'
   | 'policy-rejected'
   /**
+   * The upstream restricted this credential for unusual activity (issue #127).
+   *
+   * Separate from `policy-rejected`: a content refusal is about the request,
+   * while this is about the credential and needs re-authentication or an appeal.
+   */
+  | 'account-restricted'
+  /**
    * The gateway's channel gate refused the request itself (upstream code 11128).
    *
    * Kept apart from `failed` because its whole point is the question it answers:
@@ -1392,6 +1399,11 @@ export type WorkBuddyWebPoolExclusion =
   | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
+  /**
+   * The upstream restricted this account (issue #127); unlike a request policy
+   * refusal, another account can serve and this one should be benched.
+   */
+  | 'account-restricted'
   | 'not-found'
   | 'unavailable'
   | 'failed'
@@ -1425,6 +1437,14 @@ export interface WorkBuddyWebBenefit {
 export interface WorkBuddyWebPoolAccount {
   accountId: string
   accountName: string
+  /**
+   * The credential belongs to an enterprise/education tenant (issues #124/#129).
+   *
+   * Carried through the pool row so the card can render the two actions the
+   * upstream does not support for those accounts (daily check-in and benefit
+   * claiming) as explicitly unavailable rather than as pending work.
+   */
+  enterprise?: boolean
   /** Total remaining credits, absent when the credits route failed. */
   credits?: number
   /** Credits expiring within 3 days. */

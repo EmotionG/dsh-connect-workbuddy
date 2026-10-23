@@ -224,6 +224,13 @@ describe('exclusionOf', () => {
     // waiting out a fallback cooldown.
     expect(exclusionOf({ outcome: 'policy-rejected', atMs: NOW }, NOW + 1)).toBeUndefined()
   })
+
+  it('benches an upstream-restricted account until re-authentication (issue #127)', () => {
+    // Unlike a content refusal, 11140 restricted-account is a statement about
+    // THIS credential; another account is the remedy and this one must not be
+    // billed again before the user acts.
+    expect(exclusionOf({ outcome: 'account-restricted', atMs: NOW }, NOW)).toBe('account-restricted')
+  })
 })
 
 describe('rankPool', () => {

@@ -21,6 +21,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { preferredAccountName } from './auth.ts'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { isVaultAccountId } from './auth.ts'
 import { lastRefusalFor, offRefused } from './off-thinking.ts'
@@ -515,7 +516,7 @@ export interface WorkBuddyPoolDeps {
    * Every local sign-in the pool does NOT cover, so the card can offer them to
    * check in. Absent means the card lists only pool members.
    */
-  otherAccounts?(region: WorkBuddyRegion): Promise<readonly { id: string, accountName: string }[]>
+  otherAccounts?(region: WorkBuddyRegion): Promise<readonly { id: string, accountName: string, enterprise?: boolean }[]>
   /** The account currently billing traffic for the region, when known. */
   currentAccountId?(region: WorkBuddyRegion): Promise<string | undefined>
   /**
@@ -742,6 +743,8 @@ function toWebAccount(account: {
   source: 'desktop' | 'dsh'
   tokenExpiresAtMs: number
   selected: boolean
+  /** Credential belongs to an enterprise/education tenant (issue #129). */
+  enterprise?: boolean
 }): WorkBuddyWebAccount {
   return {
     id: account.id,
@@ -750,6 +753,7 @@ function toWebAccount(account: {
     source: account.source,
     tokenExpiresAtMs: account.tokenExpiresAtMs,
     selected: account.selected,
+    ...account.enterprise === true ? { enterprise: true } : {},
   }
 }
 
@@ -1015,7 +1019,7 @@ export async function workBuddyWebStatus(
     // The human name only; '' lets the card render its own placeholder. A bare
     // `uin`/`uid` is an identifier, not a name, and showing one made the account
     // read as "unknown user" instead of simply unnamed.
-    accountName: credential.nickname ?? '',
+    accountName: preferredAccountName(credential),
     ...credential.domain === '' ? {} : { domain: credential.domain },
     region,
     source: credential.source,
@@ -1172,7 +1176,7 @@ async function workBuddyWebPool(
     : await pool.benefits?.(region).catch(() => ({} as Record<string, readonly WorkBuddyBenefitView[]>))
       ?? {} as Record<string, readonly WorkBuddyBenefitView[]>
   const rows: readonly {
-    account: { id: string, accountName: string }
+    account: { id: string, accountName: string, enterprise?: boolean }
     member: boolean
     ranked?: (typeof ranked)[number]
   }[] = [
@@ -1202,6 +1206,7 @@ async function workBuddyWebPool(
     return {
       accountId: account.id,
       accountName: account.accountName,
+      ...account.enterprise === true ? { enterprise: true } : {},
       ...measured?.credits === undefined ? {} : {
         credits: measured.credits.total,
         expiringSoon: measured.credits.expiringSoon,
@@ -1461,6 +1466,13 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // happens to prefer at that moment.
           const credential = await deps.store(region).credentialFor(accountId)
           if (credential === undefined) return json(res, 404, { error: 'no credential for this account' })
+          // The upstream's READ endpoints advertise campaigns to enterprise
+          // members even though every WRITE answers `10001 企业账号不支持该操作`.
+          // Refuse here so the card cannot turn a known-unsupportable click into
+          // an opaque upstream 500 (issue #129).
+          if (credential.enterpriseId !== undefined && credential.enterpriseId !== '') {
+            return json(res, 409, { error: 'enterprise-account-unsupported' })
+          }
           // Re-read before writing. The status is read first so a stale card
           // cannot cause a pointless call, and so this route states the same
           // rule the card renders: claimable means inside the window and not yet

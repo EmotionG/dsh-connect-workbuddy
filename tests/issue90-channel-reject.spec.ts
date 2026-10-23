@@ -133,6 +133,14 @@ describe('classifying the channel gate', () => {
     expect(classifyUpstreamError(400, '{"code":11140,"msg":"request illegal"}')).toBe('policy_reject')
   })
 
+  it('does not let the shared `request illegal` msg swallow the channel gate (issue #127)', () => {
+    // Both the 11128 channel gate and the 11140 family spell `msg` as
+    // `request illegal`. The policy marker must key on the CODE, so this body
+    // reaches the channel classification and its rescue ladder.
+    const body = '{"code":11128,"msg":"request illegal","displayMsg":{"zh":"请求被拦截，请重新发送"}}'
+    expect(classifyUpstreamError(400, body)).toBe('channel_reject')
+  })
+
   it('is not swallowed by the quoted-key guard on a request id', () => {
     // Request ids are hexadecimal and can contain `11128` by coincidence; the
     // quoted-key form is what keeps that from classifying a healthy body.

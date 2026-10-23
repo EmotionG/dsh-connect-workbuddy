@@ -24,6 +24,7 @@ export function exclusionText(
     case 'model-busy': return t('row.poolExcludedModelBusy')
     case 'out-of-credit': return t('row.poolExcludedOutOfCredit')
     case 'credential-rejected': return t('row.poolExcludedRejected')
+    case 'account-restricted': return t('row.poolExcludedAccountRestricted')
     // These four used to be folded into 'credential-rejected', which made the
     // name column contradict the probe column right beside it: "被拒绝，请重新
     // 登录" next to "连不上上游——这是网络问题" (that probe label is now

@@ -173,6 +173,19 @@ describe('classifyUpstreamError', () => {
     expect(classifyUpstreamError(403, '{"code":11140,"msg":"request illegal"}')).toBe('policy_reject')
   })
 
+  it('does not classify the 11128 channel gate as a policy rejection (issue #127)', () => {
+    // Both bodies reuse `msg: "request illegal"`; only the CODE tells them apart.
+    const channel = '{"code":11128,"msg":"request illegal","displayMsg":{"zh":"请求被拦截，请重新发送"}}'
+    expect(classifyUpstreamError(400, channel)).toBe('channel_reject')
+  })
+
+  it('splits an upstream account restriction from the content-policy family (issue #127)', () => {
+    const restricted = '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}'
+    const restrictedEn = '{"code":11140,"msg":"request illegal","displayMsg":{"en":"Your account has been restricted due to unusual activity"}}'
+    expect(classifyUpstreamError(403, restricted)).toBe('account_restricted')
+    expect(classifyUpstreamError(403, restrictedEn)).toBe('account_restricted')
+  })
+
   it('keeps a benign 403 a generic client error', () => {
     expect(classifyUpstreamError(403, 'forbidden')).toBe('client')
   })

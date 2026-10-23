@@ -296,6 +296,7 @@ const KIND_STATUS: Readonly<Record<UpstreamErrorKind, number>> = {
   model_busy: 429,
   session_dead: 401,
   policy_reject: 403,
+  account_restricted: 403,
   // A 400, because that is what the gateway answered and the request really is
   // malformed from its point of view. See KIND_HOST_CODE for why the host must
   // not read this as a retryable transport failure.
@@ -1090,6 +1091,11 @@ function failoverReasonText(failure: WorkBuddyChatResult): string {
       return '登录已失效'
     case 'policy_reject':
       return '被服务端策略拒绝'
+    // An upstream restriction against THIS credential, not the request. It is
+    // kept out of `policy_reject`'s copy and its 403 remains failover-worthy:
+    // another account can serve, and this one must be benched (issue #127).
+    case 'account_restricted':
+      return '账号被上游限制使用'
     // The gateway's channel gate: it refuses the PROMPT, not the account or the
     // model. Its own `displayTips` blames "channel verification / an unofficial
     // client", which is what sent issues #87–#90's reporters through account
@@ -1925,6 +1931,25 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           undefined,
           NO_RETRY_HEADERS,
         )
+        return
+      }
+      if (result.kind === 'account_restricted') {
+        // The upstream names the CREDENTIAL, not the request: 11140 + 「账号存在
+        // 异常行为，已被限制使用」. Another account can serve, so this class is
+        // failover-worthy and the pool records it as a measurement. The appeal
+        // sentence is carried through because upstream offers no in-band path
+        // to lift it (issue #127).
+        const detail = result.detail
+        const meta: string[] = ['账号被上游限制使用']
+        if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
+        if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
+        const lead = detail?.displayMsg ?? clippedUpstreamText(result.message, 200)
+        const appeal = detail?.tips === undefined ? '' : `上游提示：${detail.tips}`
+        const message =
+          `${lead}（${meta.join('，')}）${note}${why}。该账号已被 WorkBuddy 上游按账号限制，`
+          + '与本次请求内容、网络和额度无关；插件会记录该测量并尝试其他可用账号，'
+          + `但该账号需要先在 WorkBuddy 官方渠道申诉或重新登录${appeal === '' ? '' : `（${appeal}）`}`
+        writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }
       if (result.kind === 'policy_reject') {

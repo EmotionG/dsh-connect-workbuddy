@@ -483,53 +483,32 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     if (settingsScope === undefined || !dirty || draft === null) return
     setSaving(true)
     setSaveError(undefined)
-    // Set only once the write VERIFIED *and* the fresh props are in.
-    // `discard()` must never run otherwise: the draft is the only copy of the
-    // user's edits, so throwing it away after a failed write would be
-    // unrecoverable — and throwing it away against a still-stale `saved` prop
-    // would show the values the user just replaced.
-    let committed = false
     try {
+      // Loading is deliberately bounded by the verified settings write, not by
+      // the upstream usage refresh. `refreshUsage` may wait on a billing route
+      // with a 30-second per-account timeout, and keeping the Save button in
+      // 「保存中…」 for that long made a completed save look stuck (issue #131).
       await writePoolPreferences(settingsScope, region, draft)
-      // Re-read the Host's answer BEFORE discarding the draft.
-      //
-      // `discard()` makes `active` fall back to the `saved` prop, which comes
-      // from the usage route — so discarding first and refreshing afterwards
-      // leaves a window where the panel shows the OLD values the user just
-      // replaced, with the controls live again. Awaiting the re-read first keeps
-      // the just-saved draft on screen (and `saving` true, so nothing is
-      // interactive) until the fresh props have actually arrived, and the
-      // discard that follows is then invisible: the draft and the new `saved`
-      // agree.
-      //
-      // The result is CHECKED, not ignored. The parent reports a re-read that
-      // did not deliver fresh props by resolving `false` — it cannot throw,
-      // because the card's `refreshUsage` answers a failed fetch by resolving.
-      // Inferring success from "did not throw" is what let a failed re-read
-      // discard the draft and revert the panel to the pre-edit values.
+      if (mounted.current) setSaving(false)
+      // Commit only after the write verifies. The old in-flight state is kept
+      // until the parent's refresh resolves: the draft still represents the
+      // saved values, so no edit is lost while the slow usage read catches up.
+      discard()
+      // The refresh is display-only: it is allowed to resolve undefined/throw
+      // without turning a successful save into an error or restoring a draft
+      // that the Host has already persisted.
       const refreshed = await onSaved?.()
-      if (refreshed === false) {
-        // The write verified, so this is a DISPLAY problem rather than data
-        // loss: the Host has the new preferences. Keep the draft (it equals
-        // what was just saved) and say so; the 60s poll repairs the panel.
-        if (mounted.current) setSaveError(t('row.poolSavedStaleRefresh'))
-        return
-      }
-      committed = true
+      if (refreshed === false && mounted.current) setSaveError(t('row.poolSavedStaleRefresh'))
     } catch (error: unknown) {
-      // A failed WRITE lands here — and so would a parent `onSaved` that threw.
-      // Either way the draft is the only copy of the user's edits, so it must
-      // be kept. (A failed RE-READ does not land here: it resolves `false`, and
-      // is handled above.)
+      // Only a failed settings write reaches here. The draft is the only copy
+      // of the user's edits, so it must be kept for a retry.
       if (mounted.current) {
         const reason = error instanceof Error ? error.message : t('row.requestFailed')
         // A contention refusal needs the remedy appended: the raw message names
         // a temp file and no cause. See `isFileContentionWriteError`.
         setSaveError(isFileContentionWriteError(error) ? `${reason}${t('row.saveContentionHint')}` : reason)
+        setSaving(false)
       }
-    } finally {
-      if (committed) discard()
-      if (mounted.current) setSaving(false)
     }
   }, [dirty, discard, draft, onSaved, region, settingsScope, t])
 
@@ -1742,7 +1721,7 @@ function renderAccountRow(input: {
       // A row-wide or pool-wide "claim all" is deliberately absent — the pool can
       // hold a dozen accounts, and a single click that silently spends all of
       // them is not a decision this card may make for the user.
-      account.benefits === undefined || account.benefits.length === 0
+      account.enterprise === true || account.benefits === undefined || account.benefits.length === 0
         ? null
         : h('span', { className: 'dsm-workbuddy-pool-benefits' },
             account.benefits.map((benefit, index) => h('span', {
@@ -1832,15 +1811,20 @@ function renderAccountRow(input: {
     ),
     checkinSupported
       ? h('span', { className: 'dsm-workbuddy-pool-checkin' },
-          // Three states, not two: an unread account says nothing rather than
-          // claiming "not checked in", which would contradict a check-in the user
-          // just watched succeed.
-          account.checkedInToday === undefined
-            ? h('span', { className: 'dsm-workbuddy-pool-unknown', title: t('row.poolNeverTested') },
-                t('row.poolCheckinUnknown'))
-            : account.checkedInToday
-              ? h('span', { className: 'dsm-workbuddy-pool-checked' }, t('row.poolCheckedIn'))
-              : t('row.poolNotCheckedIn'),
+          // Enterprise accounts have no consumer check-in at all (issue #129):
+          // showing 「未签到」 would tell them to perform an action the upstream
+          // already refuses with `10001`, which reads as their own mistake.
+          account.enterprise === true
+            ? h('span', { className: 'dsm-workbuddy-pool-unknown' }, t('row.poolCheckinEnterprise'))
+            // Three states, not two: an unread account says nothing rather than
+            // claiming "not checked in", which would contradict a check-in the user
+            // just watched succeed.
+            : account.checkedInToday === undefined
+              ? h('span', { className: 'dsm-workbuddy-pool-unknown', title: t('row.poolNeverTested') },
+                  t('row.poolCheckinUnknown'))
+              : account.checkedInToday
+                ? h('span', { className: 'dsm-workbuddy-pool-checked' }, t('row.poolCheckedIn'))
+                : t('row.poolNotCheckedIn'),
         )
       // Absent entirely where the region has no check-in: an empty column would
       // still imply the state exists and is merely unknown.

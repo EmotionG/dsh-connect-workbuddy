@@ -977,65 +977,33 @@ describe('the pool section and the card share one refresh path (M-4 / L-5)', () 
       .not.toMatch(/\.filter\(account => \w+\.has\(/u)
   })
 
-  it('awaits the re-read before discarding the draft, and only after a verified write (A-8)', async () => {
-    // The window: `discard()` makes `active` fall back to the `saved` prop, which
-    // arrives from the usage route. Discarding first and refreshing afterwards
-    // showed the OLD values (with live controls) until the re-read landed. The
-    // fix is to await the refresh FIRST and discard after, inside the same try.
+  it('commits the draft after the verified write and reports a stale refresh without blocking save (issue #131)', async () => {
+    // The settings write is what saves the user's edits; the upstream usage
+    // re-read is a DISPLAY concern and can wait on a billing timeout. The old
+    // contract kept `saving` and the draft alive across that re-read, which made
+    // a completed save look stuck (issue #131). This guard pins the new one:
+    // write -> discard -> await the refresh result -> warn if it was stale.
     const source = await sourceOf('client/AccountPool.tsx')
     const at = source.indexOf('const save = useCallback')
     expect(at, 'save moved — update this guard').toBeGreaterThan(-1)
     const end = source.indexOf('\n  }, [', at)
     const code = source.slice(at, end).replace(/\/\*[\s\S]*?\*\//gu, '').replace(/\/\/[^\n]*/gu, '')
+    const writeAt = code.indexOf('await writePoolPreferences')
+    const discardAt = code.indexOf('discard()')
     const refreshAt = code.indexOf('await onSaved?.()')
-    expect(refreshAt, 'onSaved is not awaited — A-8 stays open').toBeGreaterThan(-1)
-    // `committed` must START false. The first version of this guard never read
-    // the initialiser, so `let committed = true` — which discards the draft after
-    // a FAILED write, destroying the user's only copy — left the suite green.
-    const initAt = code.indexOf('let committed =')
-    expect(initAt, '`committed` moved — update this guard').toBeGreaterThan(-1)
-    expect(
-      code.slice(initAt, code.indexOf('\n', initAt)).trim(),
-      'committed starts true, so a failed write discards the user\'s edits',
-    ).toBe('let committed = false')
-    // The re-read's RESULT must be checked: `refreshUsage` reports a failed
-    // fetch by RESOLVING undefined, so "it did not throw" is not "the fresh
-    // props arrived" (N1). Without this, a failed re-read still discarded the
-    // draft against a stale `saved` prop — the very window A-8 closes.
-    const resultAt = code.indexOf('const refreshed = await onSaved?.()')
-    expect(resultAt, 'the re-read result is discarded (N1 stays open)').toBeGreaterThan(-1)
-    expect(code, 'a failed re-read still commits (N1)').toContain('if (refreshed === false)')
-    // The N1 bail-out must come BEFORE `committed = true`.
-    const commitAt = code.indexOf('committed = true')
-    const bailAt = code.indexOf('if (refreshed === false)')
-    expect(bailAt, 'the N1 bail-out does not precede the commit').toBeLessThan(commitAt)
-    // `discard()` must come AFTER the awaited refresh, and must be guarded by
-    // `committed` so a failed write never throws the only copy away.
-    const discardAt = code.indexOf('if (committed) discard()')
-    expect(discardAt, 'discard() is not gated on a committed write').toBeGreaterThan(refreshAt)
-    expect(code, 'a bare discard() would fire after a failed write').not.toMatch(/(?<!committed\) )discard\(\)/u)
-    // `committed = true` must be written EXACTLY ONCE, and never on the error
-    // path. The initialiser and the precedence were read above, but the `catch`
-    // block was not: adding `committed = true` as the handler's first statement
-    // restored the original A-8 defect — a failed WRITE discards the draft,
-    // which is the user's only copy of their edits — with this guard fully
-    // satisfied (N8, proven by the independent verification).
-    const commitWrites = [...code.matchAll(/committed = true/gu)].map(match => match.index ?? -1)
-    expect(commitWrites.length, 'committed is set more than once').toBe(1)
-    const handlerAt = code.indexOf('} catch')
-    expect(handlerAt, 'the catch handler moved — update this guard').toBeGreaterThan(-1)
-    expect(
-      commitWrites[0] as number,
-      'committed is set on the ERROR path, so a failed write discards the draft',
-    ).toBeLessThan(handlerAt)
-    // The parent must hand back the promise AND its outcome; `void` made the
-    // await a no-op, and a bare `refreshUsage(...)` still resolved to undefined
-    // on failure, which the section could not tell from success.
+    expect(writeAt, 'the verified write is not awaited').toBeGreaterThan(-1)
+    expect(discardAt, 'the draft is not committed after the write').toBeGreaterThan(writeAt)
+    expect(refreshAt, 'onSaved is not awaited — the stale-refresh notice would never render').toBeGreaterThan(discardAt)
+    expect(code, 'a stale refresh is not reported').toContain('if (refreshed === false')
+    expect(code, 'the save button stays busy during the usage re-read')
+      .toContain('if (mounted.current) setSaving(false)')
+    expect(code, 'the committed draft is not gated on the re-read anymore')
+      .not.toContain('if (committed) discard()')
+    // The parent still hands the promise and its boolean back, so the warning
+    // can distinguish a stale refresh from a failed write.
     const card = await sourceOf('client/WorkBuddyCard.tsx')
-    expect(card, 'onSaved swallows its promise, so the await resolves immediately')
+    expect(card, 'onSaved swallows its promise, so the stale-refresh notice is unreachable')
       .toContain('onSaved={async () => (await refreshUsage(activeRegion)) !== undefined}')
-    expect(card).not.toContain('onSaved={() => { void refreshUsage(activeRegion) }}')
-    expect(card).not.toContain('onSaved={() => refreshUsage(activeRegion)}')
   })
 
   it('declares every prop callback its useCallbacks read (D5, generalised)', async () => {

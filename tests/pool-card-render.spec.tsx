@@ -166,7 +166,7 @@ describe('the card implements the pool contract it hands down (M15, M18, M19)', 
     await m.unmount()
   })
 
-  it('does NOT discard the pool draft when the usage re-read FAILS (M15)', async () => {
+  it('keeps the saved draft usable when the usage re-read FAILS after a successful write', async () => {
     // Open with a healthy usage, then make the NEXT usage read fail — exactly
     // what happens when the user saves while the Host is unreachable.
     let usageOk = true
@@ -190,7 +190,9 @@ describe('the card implements the pool contract it hands down (M15, M18, M19)', 
     usageOk = false
     await m.click(m.button('row.poolSaved'))
     await m.settle()
-    expect(m.container.querySelector('.dsm-workbuddy-pool-save-buttons button:last-child')?.hasAttribute('disabled'), 'the edit is still pending — Save must be enabled').toBe(false)
+    // The write committed the draft, so no edit remains; the stale-refresh
+    // message tells the user the figures will catch up later (issue #131).
+    expect(m.container.querySelector('.dsm-workbuddy-pool-save-buttons button:last-child')?.hasAttribute('disabled'), 'nothing left to save — Save must be disabled').toBe(true)
     expect(m.text()).toContain('row.poolSaveFailed|message=row.poolSavedStaleRefresh')
     // A failed re-read must NOT blank the panel. The region keeps its last good
     // snapshot with a `refreshError` overlay, so the pool section the user was

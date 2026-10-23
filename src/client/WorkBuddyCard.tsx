@@ -442,6 +442,7 @@ function probeResultView(
         tone: 'bad',
       }
     case 'credential-rejected': return { text: t('row.probeCredentialRejected'), tone: 'bad' }
+    case 'account-restricted': return { text: t('row.probeAccountRestricted'), tone: 'bad' }
     case 'policy-rejected': return { text: t('row.probePolicyRejected'), tone: 'bad' }
     // `warn`, not `bad`: nothing about the account is wrong, and the row's own
     // job is to keep the user from reading this as "this account is broken".
@@ -1676,8 +1677,16 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
         offModelIds: [...activeOffIds],
         contextBudgets: activeContextBudgets,
       })
+      // Loading stops with the WRITE. Refreshing usage awaits the upstream
+      // billing route, which can wait on a 30-second per-account timeout, so
+      // including it in the save's loading state told a user their edits were
+      // still saving long after the verified write had landed (issue #131).
+      // The refresh may still fail, but that is a display freshness problem:
+      // the saved draft stays committed and the next poll repairs the figures.
+      if (mounted.current) setSaving(false)
       discardModels()
-      await refreshUsage(activeRegion)
+      void refreshUsage(activeRegion)
+      return
     } catch (error: unknown) {
       // Drafts stay dirty on failure, so the button remains pressable for a
       // retry; the reason is shown instead of a silent unhandled rejection.

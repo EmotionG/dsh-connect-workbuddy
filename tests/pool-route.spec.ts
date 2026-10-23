@@ -633,6 +633,24 @@ describe('the pool listing in the usage document', () => {
     expect((body() as { pool?: { memberAccountIds?: string[] } }).pool?.memberAccountIds)
       .toEqual(['a', 'b'])
   })
+
+  it('carries the enterprise marker through both member projections (issue #129)', async () => {
+    // The marker is produced by `accounts()` and must survive every pool-row
+    // projection. Losing it makes an enterprise account render a check-in
+    // column and claimable campaigns the upstream will always refuse with 10001.
+    const handler = await mountUsage(poolDeps({
+      members: async () => [
+        { account: { id: 'a', accountName: 'Alpha', enterprise: true }, credits: { total: 1, expiringSoon: 0 } },
+      ],
+      otherAccounts: async () => [{ id: 'b', accountName: 'Beta', enterprise: true }],
+    }))
+    const { res, body } = response()
+    await handler(request('GET', '/plugins/dsh-connect-workbuddy/usage?region=cn'), res)
+    const rows = (body() as { pool?: { accounts?: { accountId: string, enterprise?: boolean }[] } })
+      .pool?.accounts ?? []
+    expect(rows.find(row => row.accountId === 'a')?.enterprise).toBe(true)
+    expect(rows.find(row => row.accountId === 'b')?.enterprise).toBe(true)
+  })
 })
 
 describe('the check-in column must not lie', () => {
@@ -740,6 +758,63 @@ describe('the benefit claim route', () => {
   }
   const claimed = { ...claimable, claimed: true }
   const lapsed = { ...claimable, active: false }
+
+  it('refuses a claim for an enterprise account before touching the upstream (issue #129)', async () => {
+    const fetchBenefits = vi.fn(async () => [claimable])
+    const claimBenefit = vi.fn(async () => undefined)
+    const credential = {
+      accessToken: 'access',
+      refreshToken: 'refresh',
+      expiresAtMs: Date.now() + 86_400_000,
+      domain: 'www.codebuddy.cn',
+      uid: 'uid-ent',
+      enterpriseId: 'ent-1',
+      source: 'desktop',
+      filePath: '/tmp/ent.info',
+    }
+    const captured: CapturedEntry[] = []
+    const FakeWebServer = {
+      name: 'webServer',
+      inject: [] as const,
+      apply(ctx: Context) {
+        ctx.provide('webServer', {
+          register: (entry: { path: string }) => {
+            captured.push(entry as CapturedEntry)
+            return () => {}
+          },
+        })
+      },
+    }
+    const ctx = new Context()
+    await ctx.plugin(FakeWebServer)
+    const base = deps(poolDeps())
+    registerWorkBuddyStatusRoute(ctx, {
+      ...base,
+      store: () => ({
+        accounts: async () => [],
+        current: async () => credential,
+        resolve: async () => credential,
+        credentialFor: async () => credential,
+        selectionLost: async () => false,
+        status: async () => ({ accounts: 1, selected: true }),
+        hasExplicitSelection: async () => true,
+      }) as never,
+      client: { ...base.client, fetchBenefits, claimBenefit },
+    })
+    await ctx.fiber.dispose()
+    const claim = captured.find(entry => entry.path === CLAIM_PATH)
+    if (claim === undefined) throw new Error('claim route was not registered')
+    const out = response()
+    await (claim.handler as (req: unknown, res: unknown) => Promise<void> | void)(
+      request('POST', `${CLAIM_PATH}?region=cn&accountId=a&kind=compensation`),
+      out.res,
+    )
+
+    expect(out.status()).toBe(409)
+    expect(out.body()).toMatchObject({ error: 'enterprise-account-unsupported' })
+    expect(fetchBenefits).not.toHaveBeenCalled()
+    expect(claimBenefit).not.toHaveBeenCalled()
+  })
 
   it('claims one account and answers with the campaign as the gateway reports it AFTER the write', async () => {
     const claimBenefit = vi.fn(async () => undefined)

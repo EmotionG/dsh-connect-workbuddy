@@ -46,7 +46,7 @@ describe('save keeps the draft unless the write AND the re-read both verify (A-8
     await m.click(box)
   }
 
-  it('discards the draft only after onSaved resolves true (M16: committed must not be set in catch)', async () => {
+  it('discards the draft once the verified write succeeds, even before onSaved resolves', async () => {
     const onSaved = vi.fn(async () => true)
     const scope = fakeScope({})
     const props = baseProps({ settingsScope: scope, onSaved })
@@ -64,7 +64,7 @@ describe('save keeps the draft unless the write AND the re-read both verify (A-8
     await m.unmount()
   })
 
-  it('shows the busy veil for the whole save, and drops it only when the re-read lands', async () => {
+  it('drops the busy veil as soon as the write lands, while the usage re-read continues', async () => {
     // Saving is a write the user is waiting on, and the panel's values change
     // only after the Host answers. The veil must span BOTH halves — the write
     // and the re-read — which is exactly the window `saving` already covers.
@@ -79,10 +79,11 @@ describe('save keeps the draft unless the write AND the re-read both verify (A-8
     await makeDirty(m)
     await m.click(m.button('row.poolSaved'))
     await m.settle()
-    // The write is done, the re-read is NOT: the veil is still up.
+    // The write is done, so the user is no longer waiting on the save even
+    // though the billing re-read is still in flight (issue #131).
     expect(onSaved).toHaveBeenCalledTimes(1)
-    expect(m.container.querySelector('.dsm-workbuddy-veil')).not.toBeNull()
-    expect(m.text()).toContain('row.poolSaving')
+    expect(m.container.querySelector('.dsm-workbuddy-veil')).toBeNull()
+    expect(m.text()).not.toContain('row.poolSaving')
     release?.()
     await m.settle()
     // Now everything has landed, so nothing is being waited on.
@@ -90,15 +91,15 @@ describe('save keeps the draft unless the write AND the re-read both verify (A-8
     await m.unmount()
   })
 
-  it('keeps the draft and explains when onSaved resolves false (M14, M15: the N1 bail-out must return)', async () => {
+  it('explains a stale refresh after the write has committed the draft', async () => {
     const onSaved = vi.fn(async () => false)
     const scope = fakeScope({})
     const m = await mount(AccountPool, baseProps({ settingsScope: scope, onSaved }))
     await makeDirty(m)
     await m.click(m.button('row.poolSaved'))
-    // The draft is the only copy of what was just saved; discarding it against
-    // a still-stale `saved` prop would revert the panel to the pre-edit values.
-    expect(m.button('row.poolSaved').disabled, 'the edit is still pending — Save must be enabled').toBe(false)
+    // The write already committed the draft; the stale-refresh notice is only
+    // about the display catching up (issue #131).
+    expect(m.button('row.poolSaved').disabled, 'nothing left to save — Save must be disabled').toBe(true)
     // The stale-refresh notice names the DISPLAY problem (the write landed).
     expect(m.text()).toContain('row.poolSaveFailed|message=row.poolSavedStaleRefresh')
     await m.unmount()

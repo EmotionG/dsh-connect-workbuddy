@@ -192,6 +192,14 @@ export type WorkBuddyProbeOutcome =
   | 'out-of-credit'
   | 'credential-rejected'
   | 'policy-rejected'
+  /**
+   * The upstream restricted this credential for unusual activity (issue #127).
+   *
+   * Split from `policy-rejected` because the pool's response differs: this is
+   * an account-level exclusion, while a content-policy refusal is about the
+   * request and must not teach the pool that the credential is unusable.
+   */
+  | 'account-restricted'
   | 'channel-rejected'
   | 'unavailable'
   | 'not-found'
@@ -429,7 +437,9 @@ export function cooldownOf(input: {
  */
 export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOutcome {
   if (status === 401 || status === 403) {
-    if (classifyUpstreamError(status, body) === 'policy_reject') return 'policy-rejected'
+    const kind = classifyUpstreamError(status, body)
+    if (kind === 'policy_reject') return 'policy-rejected'
+    if (kind === 'account_restricted') return 'account-restricted'
     return 'credential-rejected'
   }
   switch (classifyUpstreamError(status, body)) {
@@ -437,6 +447,7 @@ export function outcomeOfFailure(status: number, body: string): WorkBuddyProbeOu
     case 'model_busy': return 'model-busy'
     case 'hard_credit': return 'out-of-credit'
     case 'session_dead': return 'credential-rejected'
+    case 'account_restricted': return 'account-restricted'
     case 'channel_reject': return 'channel-rejected'
     case 'not_found': return 'not-found'
     default: return status === 0 || status >= 500 ? 'unavailable' : 'failed'

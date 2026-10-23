@@ -88,6 +88,17 @@ export type UpstreamErrorKind =
   | 'session_dead'
   | 'policy_reject'
   /**
+   * The upstream restricted THIS account for unusual activity (issue #127).
+   *
+   * Kept separate from {@link policy_reject}, even though both arrive as the
+   * `11140` family with the same `msg: "request illegal"`: that one is a CONTENT
+   * decision and switching accounts cannot help, while this is a CREDENTIAL
+   * decision and switching is exactly the remedy. `displayMsg` is the only
+   * discriminator upstream provides ("账号存在异常行为，已被限制使用" / "restricted
+   * due to unusual activity").
+   */
+  | 'account_restricted'
+  /**
    * The gateway's channel gate refused the request itself (business code
    * 11128, "Illegal API invocation from an unapproved channel").
    *
@@ -565,8 +576,34 @@ const SESSION_DEAD_MARKERS: readonly string[] = ['Offline user session not found
  * Content-policy refusal markers from the chat gateway. The quoted-key form
  * avoids substring hits inside unrelated values (request ids are hex and can
  * contain `11140` by coincidence).
+ *
+ * `request illegal` is deliberately absent: the live `11128` channel-gate body
+ * uses the SAME `msg`, so this marker used to run first and classify that gate
+ * as `policy_reject`. The consequence was severe — the channel rescue ladder
+ * never ran, the reply changed 400 to 403, and users were told to switch
+ * accounts for a request-side refusal (issue #127).
  */
-const POLICY_REJECT_MARKERS: readonly string[] = ['request illegal', '"code":11140']
+const POLICY_REJECT_MARKERS: readonly string[] = ['"code":11140']
+
+/**
+ * Whether a failure body is the account-restriction member of the `11140`
+ * family (issue #127).
+ *
+ * Upstream reuses `msg: "request illegal"` for a content-policy refusal and an
+ * account restriction, so the code alone cannot choose a failover policy. Both
+ * measured `displayMsg` spellings are recognised: the Chinese sentence and its
+ * English translation. A body with neither spelling stays `policy_reject`,
+ * because inventing an account verdict from the shared code would bench an
+ * account over a request-side refusal.
+ */
+const ACCOUNT_RESTRICTED_MARKERS: readonly string[] = [
+  '账号存在异常行为',
+  'restricted due to unusual activity',
+]
+
+function isAccountRestrictedBody(body: string): boolean {
+  return ACCOUNT_RESTRICTED_MARKERS.some(marker => body.toLowerCase().includes(marker.toLowerCase()))
+}
 
 /**
  * Business code of the MODEL-scoped throttle (`14003`, "too many requests").
@@ -929,6 +966,14 @@ function clip(text: string, limit: number): string {
  * account, region or top-up can change.
  */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
+  // The account-restriction member of the `11140` family must be split BEFORE
+  // the content-policy marker: both reuse `msg: "request illegal"`, and only
+  // `displayMsg` distinguishes them. A restricted credential is an ACCOUNT
+  // problem (issue #127): another account is the only useful next move and the
+  // pool must bench this one. Treating it as `policy_reject` instead made every
+  // request burn a doomed attempt on the restricted account, then switch while
+  // being told the account itself was fine.
+  if (isAccountRestrictedBody(body)) return 'account_restricted'
   if (status === 402) return 'hard_credit'
   const lower = body.toLowerCase()
   for (const marker of HARD_CREDIT_MARKERS) {

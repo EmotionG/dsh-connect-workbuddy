@@ -387,6 +387,14 @@ describe('outcomeOfFailure', () => {
     expect(outcomeOfFailure(403, '{"code":11140,"msg":"request illegal"}')).toBe('policy-rejected')
   })
 
+  it('reports the account-restriction member of the 11140 family separately (issue #127)', () => {
+    const restricted = '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}'
+    expect(outcomeOfFailure(403, restricted)).toBe('account-restricted')
+    // A 11128 channel-gate body with the same msg must stay out of both 11140
+    // outcomes: it is a prompt problem and the pool must not bench the account.
+    expect(outcomeOfFailure(400, '{"code":11128,"msg":"request illegal"}')).toBe('channel-rejected')
+  })
+
   it('keeps an ordinary 403 body a credential rejection', () => {
     expect(outcomeOfFailure(403, '<html>blocked</html>')).toBe('credential-rejected')
   })

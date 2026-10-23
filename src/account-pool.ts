@@ -50,6 +50,15 @@ export interface WorkBuddyPoolAccount {
   id: string
   /** Human name, or `''` when the desktop app recorded none. */
   accountName: string
+  /**
+   * This account belongs to an enterprise/education tenant (issue #124/#129).
+   *
+   * A projection fact, carried from the credential's `enterpriseId` rather than
+   * inferred from any benefit or check-in response: upstream can advertise
+   * campaigns and `active:false` for enterprise members while refusing every
+   * write with `10001`.
+   */
+  enterprise?: boolean
 }
 
 /**
@@ -187,6 +196,14 @@ export type WorkBuddyPoolExclusion =
   | 'model-busy'
   | 'out-of-credit'
   | 'credential-rejected'
+  /**
+   * The upstream restricted this credential for unusual activity (issue #127).
+   *
+   * Unlike `policy-rejected`, this is an account-level decision. Another
+   * account may serve and this one should not be billed again until the user
+   * re-authenticates or appeals successfully.
+   */
+  | 'account-restricted'
   | 'not-found'
   | 'unavailable'
   | 'failed'
@@ -295,6 +312,12 @@ export function exclusionOf(
       return undefined
     case 'credential-rejected':
       return 'credential-rejected'
+    case 'account-restricted':
+      // The upstream explicitly identifies this credential as restricted, so a
+      // cooldown cannot repair it: the user must re-auth/appeal. Keep it out of
+      // failover rather than rotating through every known dead account (issue
+      // #127).
+      return 'account-restricted'
     case 'not-found':
       return 'not-found'
     case 'unavailable':

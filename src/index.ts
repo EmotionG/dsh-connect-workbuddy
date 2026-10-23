@@ -30,7 +30,7 @@ import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { workbuddyAccountId, WorkBuddyCredentialStore, type WorkBuddyCredential } from './auth.ts'
+import { preferredAccountName, workbuddyAccountId, WorkBuddyCredentialStore, type WorkBuddyCredential } from './auth.ts'
 import { deriveCatalog, fallbackModelsFor, withoutRouters, WorkBuddyCatalog } from './catalog.ts'
 import type { WorkBuddyContextBudget, WorkBuddyModelInfo } from './catalog.ts'
 import {
@@ -1918,7 +1918,11 @@ export function apply(ctx: Context, config: Config): void {
         const accounts = await stacks[region].store.accounts()
         return accounts
           .filter(account => !wanted.has(account.id))
-          .map(account => ({ id: account.id, accountName: account.accountName }))
+          .map(account => ({
+            id: account.id,
+            accountName: account.accountName,
+            ...account.enterprise === true ? { enterprise: true } : {},
+          }))
       },
       /**
        * Today's check-in state per account, for the pool table.
@@ -2001,6 +2005,11 @@ export function apply(ctx: Context, config: Config): void {
           }
           const credential = await store.credentialFor(account.id).catch(() => undefined)
           if (credential === undefined) return undefined
+          // Upstream's read endpoints advertise campaigns for enterprise/education
+          // members while every WRITE answers `10001 企业账号不支持该操作`. The UI
+          // must not present a button that is certain to fail (issue #129), so
+          // these accounts simply have no claimable benefits.
+          if (credential.enterpriseId !== undefined && credential.enterpriseId !== '') return [account.id, []] as const
           const read = await client.fetchBenefits(credential).catch(() => undefined)
           // A failed read is UNKNOWN, not "no benefits": caching an empty answer
           // would make one bad request look like a fully-claimed pool for half
@@ -2385,6 +2394,7 @@ export function apply(ctx: Context, config: Config): void {
       case 'out-of-credit': return '账号积分耗尽'
       case 'model-busy': return '账号撞上模型繁忙'
       case 'credential-rejected': return '账号登录已失效'
+      case 'account-restricted': return '账号被上游限制使用'
       case 'not-found': return '账号已不存在'
       case 'unusable': return '账号不可用'
       default: return '账号不可用'
@@ -2426,7 +2436,11 @@ export function apply(ctx: Context, config: Config): void {
     return accounts.map(account => {
       const reading = credits?.get(account.id)
       return {
-        account: { id: account.id, accountName: account.accountName },
+        account: {
+          id: account.id,
+          accountName: account.accountName,
+          ...account.enterprise === true ? { enterprise: true } : {},
+        },
         ...reading === undefined ? {} : { credits: reading },
         ...probes[account.id] === undefined ? {} : { probe: probes[account.id] as WorkBuddyPoolProbe },
         tokenExpiresAtMs: account.tokenExpiresAtMs,
@@ -2601,7 +2615,11 @@ export function apply(ctx: Context, config: Config): void {
         ? undefined
         : await client.fetchCredits(credential).catch(() => undefined)
       return {
-        account: { id: account.id, accountName: account.accountName },
+        account: {
+          id: account.id,
+          accountName: account.accountName,
+          ...account.enterprise === true ? { enterprise: true } : {},
+        },
         ...credits === undefined ? {} : {
           credits: {
             // The upstream client already aggregates these two, and the card
