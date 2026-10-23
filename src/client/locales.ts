@@ -514,6 +514,15 @@ export const en = {
   'composer.refreshFailed': 'Could not refresh credits',
   'composer.lastRefresh': 'Last refreshed',
   'composer.panelTitle': 'WorkBuddy credits',
+  // The "· N 新模型" segment. The wording MUST stay "first seen by this
+  // machine": this plugin has no upstream "listed since" field, so claiming the
+  // gateway added a model would be fabricating an upstream fact. The segment
+  // and its row render only when the count is non-zero.
+  'composer.newModels': 'new models',
+  'composer.newModelsRow': 'Models first seen by this machine',
+  'composer.newModelsTitle': 'Models first seen by this machine: ',
+  'composer.newModelsSep': ', ',
+  'composer.newModelsNote': '"New" means this machine recorded the model id for the first time; it says nothing about when the upstream listed it. Only models first seen within the last 7 days are shown.',
   'sidebar.creditsCn': 'WB CN credits',
   'sidebar.creditsGlobal': 'WB AI credits',
   'sidebar.refresh': 'Refresh',
@@ -994,6 +1003,14 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'composer.refreshFailed': '积分刷新失败',
   'composer.lastRefresh': '最近刷新',
   'composer.panelTitle': 'WorkBuddy 积分',
+  // 「· N 新模型」段的措辞。措辞必须停在「本机首次见到」：本插件拿不到上游
+  // 的「上架时间」字段，说「网关新增」就是在替上游编一个事实。段与面板行只在
+  // 数量非零时渲染。
+  'composer.newModels': '新模型',
+  'composer.newModelsRow': '本机首次见到的模型',
+  'composer.newModelsTitle': '本机首次见到的模型：',
+  'composer.newModelsSep': '、',
+  'composer.newModelsNote': '「新」指本机首次记到它，与上游何时上架无关。只列最近 7 天内首见的。',
   'sidebar.creditsCn': 'WB CN 积分',
   'sidebar.creditsGlobal': 'WB AI 积分',
   'sidebar.refresh': '刷新',

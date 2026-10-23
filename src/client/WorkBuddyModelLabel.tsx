@@ -46,6 +46,7 @@ import { busyIcon } from './busy-icon.tsx'
 import type { WorkBuddyBusyLevel } from '../busy.ts'
 import type { WorkBuddyPromo } from '../promo.ts'
 import { selectPromoBadge, selectPromoMultiplier } from '../promo.ts'
+import { normalizeNewModelIds } from './new-model-ids.ts'
 import { promoBadgeColor, promoBadgeLabel, promoBadgeShortLabel, promoBadgeTooltip, uiLanguage } from './promo-badge.ts'
 import { withWorkBuddyRegion, WORKBUDDY_USAGE_PATH } from '../status-paths.ts'
 import type { WorkBuddyWebModel, WorkBuddyWebRegion } from '../status-paths.ts'
@@ -87,6 +88,10 @@ interface StatusSnapshot {
   /** Each model's catalog multiplier, so the label can show the discounted
    *  price while a discount runs (issue #120). */
   rates: Readonly<Record<string, number>>
+  /** The ids THIS machine first saw inside the new-model window: the same
+   *  normalised list the composer pill's "· N 新模型" segment renders, so the
+   *  pill's count and the rows marked "新" here cannot disagree. */
+  newModelIds: readonly string[]
 }
 
 /** The snapshot per region, plus when it was read. */
@@ -114,6 +119,7 @@ async function statusNow(region: WorkBuddyWebRegion): Promise<StatusSnapshot | u
     const body = await response.json() as {
       busyLevels?: Record<string, WorkBuddyBusyLevel>
       models?: readonly WorkBuddyWebModel[]
+      newModelIds?: unknown
     }
     // Missing levels are an empty set, not an error: the promotions often ride
     // along on a response whose probe has not run, and losing them because the
@@ -124,7 +130,12 @@ async function statusNow(region: WorkBuddyWebRegion): Promise<StatusSnapshot | u
       if (model.creditMultiplier !== undefined) rates[model.id] = model.creditMultiplier
       if (model.promos !== undefined) promos[model.id] = model.promos
     }
-    const snapshot: StatusSnapshot = { levels: body.busyLevels ?? {}, promos, rates }
+    const snapshot: StatusSnapshot = {
+      levels: body.busyLevels ?? {},
+      promos,
+      rates,
+      newModelIds: normalizeNewModelIds(body.newModelIds),
+    }
     caches.set(region, { snapshot, at: Date.now() })
     return snapshot
   } catch {
@@ -200,6 +211,33 @@ function PromoBadge(props: { promo: WorkBuddyPromo, compact: boolean }): ReactEl
       style={style}
     >
       <span className="dsm-workbuddy-model-label-promo-text">{label}</span>
+    </span>
+  )
+}
+
+/**
+ * The "本机首次见到" marker, as the picker draws it.
+ *
+ * WHY IT IS HERE AT ALL. The pill's "· N 新模型" answers "how many" and its
+ * panel answers "which" — but only once the reader opens it. The picker is
+ * where the choice is actually made, and this is the SAME set marked on the
+ * row, so a newly seen model is visible the moment the picker opens, with no
+ * extra step. It reads the pill's normalised list (`normalizeNewModelIds`), not
+ * a second reading of the same field, so the two surfaces cannot disagree.
+ *
+ * MUTED, and muted further than the promotion chip: a promotion is a fact about
+ * price, "新" only says when this machine first recorded the id. The pill's ink
+ * (label-dimmed) is reused here for the same reason it is used there — the
+ * marker must not out-shout the model name or the chip beside it.
+ */
+function NewModelMark(): ReactElement {
+  const language = uiLanguage()
+  return (
+    <span
+      className="dsm-workbuddy-model-label-new"
+      title={language === 'zh' ? '本机首次见到的模型' : 'First seen by this machine'}
+    >
+      {language === 'zh' ? '新' : 'NEW'}
     </span>
   )
 }
@@ -281,6 +319,7 @@ function WorkBuddyModelLabelInner(props: {
       {rate === undefined ? null : <span className="dsm-workbuddy-model-label-rate"> · x{rate.toFixed(2)}</span>}
       {promo === undefined ? null : <PromoBadge promo={promo} compact={compact} />}
       {level === undefined ? null : busyIcon(level, 'zh')}
+      {(snapshot?.newModelIds.includes(modelId) ?? false) ? <NewModelMark /> : null}
     </span>
   )
 }

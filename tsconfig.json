@@ -34,6 +34,7 @@
     "tests/card-tps-button.spec.tsx",
     "tests/composer-credits-gate.spec.ts",
     "tests/composer-credits-render.spec.tsx",
+    "tests/composer-credits-new-models.spec.tsx",
     "tests/issue46-namespace-binding.spec.tsx",
     "tests/refresh-after-mutation.spec.tsx",
     "tests/oauth-wording.spec.tsx",

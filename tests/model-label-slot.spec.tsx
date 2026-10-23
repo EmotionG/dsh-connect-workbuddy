@@ -211,3 +211,47 @@ describe('the promotion badge in the host picker', () => {
     await view.unmount()
   })
 })
+
+describe('the "本机首次见到" marker in the host picker', () => {
+  it('marks a row whose id is in the first-seen list', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...usageWithLevels({}), newModelIds: ['model-a'] }),
+    }))
+    const view = await mount(WorkBuddyModelLabel, { ...props, placement: 'option' })
+    await view.settle()
+    // The name is still the text; the marker sits beside it.
+    expect(view.text()).toContain('Model A')
+    expect(view.html()).toContain('dsm-workbuddy-model-label-new')
+    await view.unmount()
+  })
+
+  it('draws NOTHING for a row that is not in the first-seen list', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...usageWithLevels({}), newModelIds: ['model-z'] }),
+    }))
+    const view = await mount(WorkBuddyModelLabel, { ...props, placement: 'option' })
+    await view.settle()
+    expect(view.text()).toContain('Model A')
+    expect(view.html()).not.toContain('dsm-workbuddy-model-label-new')
+    await view.unmount()
+  })
+
+  it('marks once per id: a duplicated first-seen list still yields one marker', async () => {
+    // The Host dedupes, but the client must not trust a peer — a duplicated id
+    // would turn one new model into two rows marked "新".
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...usageWithLevels({}), newModelIds: ['model-a', 'model-a'] }),
+    }))
+    const view = await mount(WorkBuddyModelLabel, { ...props, placement: 'option' })
+    await view.settle()
+    const html = view.html()
+    expect(html.indexOf('dsm-workbuddy-model-label-new')).toBe(html.lastIndexOf('dsm-workbuddy-model-label-new'))
+    await view.unmount()
+  })
+})
