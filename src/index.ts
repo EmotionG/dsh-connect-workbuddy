@@ -1700,6 +1700,15 @@ export function apply(ctx: Context, config: Config): void {
      */
     cliBridgeEnabled: () => unwrapVolatile(current().cliBridge)?.enabled === true,
     /**
+     * The model / reasoning effort the optional CodeBuddy CLI route runs on.
+     *
+     * `cliBridge` is volatile, hence the unwrap; absent keys read as `''` —
+     * "the CLI's own default" — because an empty pin is a COMMITTED value the
+     * card's pickers can render, not a missing one.
+     */
+    cliBridgeModel: () => unwrapVolatile(current().cliBridge)?.model ?? '',
+    cliBridgeEffort: () => unwrapVolatile(current().cliBridge)?.effort ?? '',
+    /**
      * WHERE the readout sits, resolved here rather than read from the browser
      * settings mirror, for the same measured reason as the flag above: on the
      * affected 0.1.7 deployments that mirror never picks up this plugin's

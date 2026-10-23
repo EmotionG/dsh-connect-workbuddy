@@ -165,6 +165,24 @@ export interface WorkBuddyStatusRouteOptions {
    */
   cliBridgeEnabled?(): boolean
   /**
+   * The model the OPTIONAL CodeBuddy CLI route runs on, or `''` for "the CLI's
+   * own default".
+   *
+   * GLOBAL like `cliBridgeEnabled` — one route, one pin, so no argument.
+   * Optional, and absent is the same as `''`: the route then runs on the CLI's
+   * default. The card carries it on the Host's answer for the same measured
+   * reason as `cliBridgeEnabled` — the browser's settings mirror is stale for
+   * this namespace on the affected 0.1.7 deployments, so a picker reading the
+   * mirror alone would keep showing a pin that had just been cleared.
+   */
+  cliBridgeModel?(): string
+  /**
+   * The reasoning effort the OPTIONAL CodeBuddy CLI route runs on, or `''` for
+   * "the CLI's own default". GLOBAL, optional, and absent-as-`''` for the same
+   * reasons as {@link cliBridgeModel}.
+   */
+  cliBridgeEffort?(): string
+  /**
    * The LIVE load level per model id, for the card's icon.
    *
    * Optional, and absent means "not measured": the card draws no badge rather
@@ -902,6 +920,12 @@ export async function workBuddyWebStatus(
   // region at a time, so the switch has to be present on whichever tab is open.
   // `=== true` for the same reason as `imageToolEnabled`: absent is not consent.
   const cliBridgeEnabled = deps.cliBridgeEnabled?.() === true
+  // The route's two quick-adjust pins. Absent reads as `''` (the CLI's own
+  // default), never as a made-up value: an older Host without the deps simply
+  // cannot answer, and the card's pickers then fall back to the settings
+  // snapshot for the same reason `cliBridgeEnabled` does.
+  const cliBridgeModel = deps.cliBridgeModel?.() ?? ''
+  const cliBridgeEffort = deps.cliBridgeEffort?.() ?? ''
   // The LIVE load levels, beside the model list rather than inside it: the
   // card's list is the SAVED roster, and a saved roster has no load level.
   const busyLevels = deps.busyLevels?.(region) ?? {}
@@ -915,7 +939,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, busyLevels }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, cliBridgeModel, cliBridgeEffort, busyLevels }
   }
   let credential
   try {
@@ -949,6 +973,8 @@ export async function workBuddyWebStatus(
       creditPosition,
       imageToolEnabled,
       cliBridgeEnabled,
+      cliBridgeModel,
+      cliBridgeEffort,
       busyLevels,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
@@ -976,6 +1002,8 @@ export async function workBuddyWebStatus(
     creditPosition,
     imageToolEnabled,
     cliBridgeEnabled,
+    cliBridgeModel,
+    cliBridgeEffort,
     busyLevels,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:

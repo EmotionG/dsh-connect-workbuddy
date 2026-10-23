@@ -197,6 +197,17 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-credit-position:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
 .dsm-workbuddy-credit-position:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
 .dsm-workbuddy-credit-position:disabled{opacity:.5;cursor:default}
+/* The quick-adjust pins of the CLI route (model, effort): two native selects
+   side by side, the same hairline-bordered rule as the seat picker — content-
+   sized, no chevron build, no own fill. The row rides the switch row's
+   dsm-workbuddy-pref-indent indent, because it answers a question the switch
+   above it poses. */
+.dsm-workbuddy-cli-bridge-pickers{flex-wrap:wrap}
+.dsm-workbuddy-cli-bridge-pick{display:flex;align-items:center;gap:6px;min-width:0}
+.dsm-workbuddy-cli-bridge-select{flex:none;max-width:none;margin-top:0;padding:3px 8px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:7px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-primary,#e6e6e6);font:inherit;font-size:12px;line-height:16px;cursor:pointer}
+.dsm-workbuddy-cli-bridge-select:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-cli-bridge-select:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-cli-bridge-select:disabled{opacity:.5;cursor:default}
 /* A card whose provider is switched OFF dims its LABEL AND DOT. The checkbox
  * beside them must stay at full strength, because that checkbox is the only
  * way to switch the region back on — dimming it would grey out the control

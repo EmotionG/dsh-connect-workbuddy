@@ -12,7 +12,7 @@
  * The server-side half of the merge is `cli-bridge-switch.spec.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cliBridgeEnabledOf, writeCliBridgeEnabled } from '../src/client/account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel } from '../src/client/account-selection.ts'
 import { WorkBuddyCard } from '../src/client/WorkBuddyCard.tsx'
 import { fakeScope, mount, stubFetch, t } from './pool-render-helpers.tsx'
 
@@ -32,6 +32,81 @@ describe('cliBridgeEnabledOf', () => {
 
   it('reads ON only for an explicit boolean true', () => {
     expect(cliBridgeEnabledOf({ cliBridge: { enabled: true } })).toBe(true)
+  })
+})
+
+describe('cliBridgeModelOf / cliBridgeEffortOf', () => {
+  it('read a pinned value, and "" for every shape that is not a string', () => {
+    // '' is the real "not pinned, the CLI runs on its own default" answer.
+    expect(cliBridgeModelOf(undefined)).toBe('')
+    expect(cliBridgeModelOf({})).toBe('')
+    expect(cliBridgeModelOf({ cliBridge: {} })).toBe('')
+    expect(cliBridgeModelOf({ cliBridge: { enabled: true } })).toBe('')
+    // A settings-file typo must not masquerade as a pinned model.
+    expect(cliBridgeModelOf({ cliBridge: { model: 42 } })).toBe('')
+    expect(cliBridgeModelOf({ cliBridge: { model: true } })).toBe('')
+    expect(cliBridgeModelOf({ cliBridge: { model: 'glm-5.3' } })).toBe('glm-5.3')
+    // An explicit empty string is the "back to the CLI default" answer, not a typo.
+    expect(cliBridgeModelOf({ cliBridge: { model: '' } })).toBe('')
+  })
+
+  it('reads the effort pin the same way', () => {
+    expect(cliBridgeEffortOf({ cliBridge: { effort: 'max' } })).toBe('max')
+    expect(cliBridgeEffortOf({ cliBridge: { effort: null } })).toBe('')
+    expect(cliBridgeEffortOf({ cliBridge: {} })).toBe('')
+  })
+})
+
+describe('writeCliBridgeModel / writeCliBridgeEffort', () => {
+  it('post the one-key patch to the Host and mirror its authoritative block', async () => {
+    const calls: { url: string, body: unknown }[] = []
+    vi.stubGlobal('fetch', async (url: unknown, init: { body?: string }) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init.body)) })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, value: { enabled: true, model: 'glm-5.3', maxTurns: 25 } }),
+      }
+    })
+    const setCalls: [string, unknown][] = []
+    const scope = {
+      getSnapshot: () => ({ value: {} }),
+      set: async (field: string, value: unknown) => {
+        setCalls.push([field, value])
+        return true
+      },
+    }
+    await writeCliBridgeModel(scope as never, 'glm-5.3')
+    // The patch carries ONLY the one key: the Host's one-level merge keeps the
+    // caps sitting next to it.
+    expect(calls[0]?.body).toEqual({ field: 'cliBridge', value: { model: 'glm-5.3' } })
+    // The mirror is the HOST's block, not a client-side re-merge.
+    expect(setCalls).toEqual([['cliBridge', { enabled: true, model: 'glm-5.3', maxTurns: 25 }]])
+  })
+
+  it('falls back to the settings scope, keeping the block sibling keys', async () => {
+    vi.stubGlobal('fetch', () => { throw new Error('offline') })
+    const store: { value: Record<string, unknown> } = {
+      value: { cliBridge: { enabled: true, maxTurns: 25 } },
+    }
+    const scope = {
+      getSnapshot: () => ({ value: store.value }),
+      set: async (field: string, value: unknown) => {
+        store.value = { ...store.value, [field]: value }
+        return true
+      },
+    }
+    await writeCliBridgeEffort(scope as never, 'max')
+    expect(store.value.cliBridge).toMatchObject({ enabled: true, effort: 'max', maxTurns: 25 })
+  })
+
+  it('throw when neither writer persists the value', async () => {
+    vi.stubGlobal('fetch', () => { throw new Error('offline') })
+    const scope = {
+      getSnapshot: () => ({ value: {} }),
+      set: async () => false,
+    }
+    await expect(writeCliBridgeModel(scope as never, 'glm-5.3')).rejects.toThrow(/cliBridge/)
   })
 })
 
@@ -91,8 +166,11 @@ describe('writeCliBridgeEnabled', () => {
   })
 })
 
-/** A signed-in usage body carrying the switch's committed value. */
-function usageOf(cliBridgeEnabled: boolean): Record<string, unknown> {
+/** A signed-in usage body carrying the route's committed values. */
+function usageOf(
+  cliBridgeEnabled: boolean,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     status: 'signed-in',
     region: 'cn',
@@ -106,13 +184,14 @@ function usageOf(cliBridgeEnabled: boolean): Record<string, unknown> {
     credits: { total: 10, expiringSoon: 0, packages: [] },
     enabled: true,
     cliBridgeEnabled,
+    ...overrides,
   }
 }
 
 describe('the card renders the global CLI switch', () => {
-  const render = async (cliBridgeEnabled: boolean) => {
+  const render = async (cliBridgeEnabled: boolean, overrides?: Record<string, unknown>) => {
     const calls = stubFetch((url: string) => ({
-      body: url.includes('__save') ? { ok: true, value: { enabled: true } } : usageOf(cliBridgeEnabled),
+      body: url.includes('__save') ? { ok: true, value: { enabled: true } } : usageOf(cliBridgeEnabled, overrides),
     }))
     const m = await mount(WorkBuddyCard, {
       t,
@@ -155,5 +234,75 @@ describe('the card renders the global CLI switch', () => {
     // carrying it would make every single-checkbox selector resolve wrongly.
     const shared = m.container.querySelectorAll('.dsm-workbuddy-pref-check')
     expect(shared).toHaveLength(1)
+  })
+
+  describe('the quick-adjust pickers under the switch', () => {
+    /** [0] is the model select, [1] the effort select. */
+    const selects = (container: HTMLDivElement): HTMLSelectElement[] =>
+      Array.from(container.querySelectorAll<HTMLSelectElement>('.dsm-workbuddy-cli-bridge-select'))
+
+    /** The option VALUES of a select, in order. */
+    const optionValues = (select: HTMLSelectElement): string[] =>
+      Array.from(select.options).map(option => option.value)
+
+    it('are hidden while the route is off, where they would configure nothing', async () => {
+      const { m } = await render(false)
+      expect(m.container.querySelector('.dsm-workbuddy-cli-bridge-select')).toBeNull()
+    })
+
+    it('offer the catalog model plus the explicit "CLI default" while the route is on', async () => {
+      const { m } = await render(true)
+      const [model] = selects(m.container)
+      expect(model).toBeDefined()
+      // No pin anywhere: the value is the explicit empty, not a missing option.
+      expect(model?.value).toBe('')
+      expect(optionValues(model as HTMLSelectElement)).toEqual(['', 'glm-5.3'])
+    })
+
+    it('keep a committed pin the catalog no longer lists, instead of dropping it', async () => {
+      const { m } = await render(true, { cliBridgeModel: 'custom-x' })
+      const [model] = selects(m.container)
+      expect(model?.value).toBe('custom-x')
+      expect(optionValues(model as HTMLSelectElement)).toEqual(['', 'glm-5.3', 'custom-x'])
+    })
+
+    it('post a one-key model patch when the model picker changes', async () => {
+      const { m, calls } = await render(true)
+      const [model] = selects(m.container)
+      await m.choose(model as HTMLSelectElement, 'glm-5.3')
+      await m.settle()
+      const save = calls.find(call => String(call.url).includes('__save') && String(call.init?.body).includes('"model"'))
+      expect(save).toBeDefined()
+      expect(String(save?.init?.body)).toContain('"field":"cliBridge"')
+      expect(String(save?.init?.body)).toContain('"model":"glm-5.3"')
+      // The picker then renders the pinned value it just committed.
+      expect(optionValues(selects(m.container)[0] as HTMLSelectElement)).toContain('glm-5.3')
+    })
+
+    it('narrow the effort picker to the pinned model\'s supported tiers', async () => {
+      const { m } = await render(true, {
+        cliBridgeModel: 'glm-5.3',
+        models: [{ id: 'glm-5.3', name: 'GLM-5.3', reasoning: { supportedEfforts: ['low', 'max'] } }],
+      })
+      const [, effort] = selects(m.container)
+      // The six CLI tiers, filtered to the ones the pinned model names.
+      expect(optionValues(effort as HTMLSelectElement)).toEqual(['', 'low', 'max'])
+    })
+
+    it('offer every CLI tier when the pinned model names none', async () => {
+      const { m } = await render(true)
+      const [, effort] = selects(m.container)
+      expect(optionValues(effort as HTMLSelectElement)).toEqual(['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    })
+
+    it('post a one-key effort patch when the effort picker changes', async () => {
+      const { m, calls } = await render(true)
+      const [, effort] = selects(m.container)
+      await m.choose(effort as HTMLSelectElement, 'high')
+      await m.settle()
+      const save = calls.find(call => String(call.url).includes('__save') && String(call.init?.body).includes('"effort"'))
+      expect(save).toBeDefined()
+      expect(String(save?.init?.body)).toContain('"effort":"high"')
+    })
   })
 })

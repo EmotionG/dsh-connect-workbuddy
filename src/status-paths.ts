@@ -1065,6 +1065,23 @@ export type WorkBuddyWebUsage =
      */
     cliBridgeEnabled?: boolean
     /**
+     * The model the OPTIONAL CodeBuddy CLI route runs on, or `''` for
+     * "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL like `cliBridgeEnabled`. Travels on the Host's answer for the
+     * same measured reason: on the stale-mirror 0.1.7 deployment a picker that
+     * read the settings mirror alone would keep showing a pin that had just
+     * been cleared (or had not landed yet).
+     */
+    cliBridgeModel?: string
+    /**
+     * The reasoning effort the OPTIONAL CodeBuddy CLI route runs on, or `''`
+     * for "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeEffort?: string
+    /**
      * The LIVE load level per model id, for the card's icon.
      *
      * A SEPARATE field from `models`, because the card's model list is the
@@ -1129,6 +1146,23 @@ export type WorkBuddyWebUsage =
      * must not be read as consent.
      */
     cliBridgeEnabled?: boolean
+    /**
+     * The model the OPTIONAL CodeBuddy CLI route runs on, or `''` for
+     * "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL like `cliBridgeEnabled`. Travels on the Host's answer for the
+     * same measured reason: on the stale-mirror 0.1.7 deployment a picker that
+     * read the settings mirror alone would keep showing a pin that had just
+     * been cleared (or had not landed yet).
+     */
+    cliBridgeModel?: string
+    /**
+     * The reasoning effort the OPTIONAL CodeBuddy CLI route runs on, or `''`
+     * for "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeEffort?: string
     /**
      * The LIVE load level per model id, for the card's icon.
      *

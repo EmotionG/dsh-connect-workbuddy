@@ -213,6 +213,115 @@ export async function writeCliBridgeEnabled(
 }
 
 /**
+ * Read the CodeBuddy-CLI route's PINNED model out of a settings snapshot.
+ *
+ * `''` is a real answer here, not a missing one: it means "nothing is pinned,
+ * the CLI runs on its own default". A non-string is a settings-file typo, and
+ * it reads as `''` for the same reason `cliBridgeEnabledOf` reads consent only
+ * out of an explicit `true` — garbage must never masquerade as a pinned model.
+ */
+export function cliBridgeModelOf(configured: unknown): string {
+  const bridge = (configured as { cliBridge?: unknown } | undefined)?.cliBridge
+  const model = typeof bridge === 'object' && bridge !== null
+    ? (bridge as { model?: unknown }).model
+    : undefined
+  return typeof model === 'string' ? model : ''
+}
+
+/**
+ * Read the CodeBuddy-CLI route's PINNED reasoning effort out of a settings
+ * snapshot, with the same `''`-means-CLI-default rule as
+ * {@link cliBridgeModelOf}.
+ */
+export function cliBridgeEffortOf(configured: unknown): string {
+  const bridge = (configured as { cliBridge?: unknown } | undefined)?.cliBridge
+  const effort = typeof bridge === 'object' && bridge !== null
+    ? (bridge as { effort?: unknown }).effort
+    : undefined
+  return typeof effort === 'string' ? effort : ''
+}
+
+/**
+ * Write ONE key of the GLOBAL CodeBuddy-CLI block, then confirm it landed.
+ *
+ * Same two-writer order as {@link writeCliBridgeEnabled}: the plugin's Host
+ * endpoint first (its merge is authoritative, so the tuned caps sitting next
+ * to the key survive a one-key patch), the settings scope second as fallback
+ * plus verification.
+ *
+ * The Host-side merge is one level deep, so a one-key patch can never drop the
+ * block's sibling keys. The empty string must still be a delivered VALUE, not
+ * "absent": it is the picker's "back to the CLI's own default" answer, and
+ * posting `{ model: '' }` is what makes that answer COMMITTED rather than
+ * merely forgotten.
+ *
+ * @param scope - the bound settings scope for this plugin's namespace.
+ * @param patch - the one key to write, e.g. `{ model: 'glm-5.3' }`.
+ * @param verify - confirms the patch landed on the committed value.
+ * @throws {WorkBuddySettingsWriteError} when neither writer persists the value.
+ */
+async function writeCliBridgePatch(
+  scope: WorkBuddyAccountScope,
+  patch: Record<string, unknown>,
+  verify: (configured: unknown) => boolean,
+): Promise<void> {
+  let hostError: unknown
+  try {
+    const authoritative = await saveViaHostEndpoint('cliBridge', undefined, patch)
+    if (authoritative !== undefined) {
+      // Mirror what the Host stored, never a client-side re-merge.
+      try { await scope.set('cliBridge', authoritative) } catch { /* optional */ }
+      return
+    }
+  } catch (error) {
+    hostError = error
+  }
+  const stored = unwrapVolatileDeep(
+    (scope.getSnapshot().value as Record<string, unknown> | undefined)?.cliBridge,
+  )
+  const next = {
+    ...typeof stored === 'object' && stored !== null ? stored as Record<string, unknown> : {},
+    ...patch,
+  }
+  let delivered = false
+  try {
+    delivered = (await scope.set('cliBridge', next)) !== false
+  } catch {
+    delivered = false
+  }
+  if (delivered && verify(scope.getSnapshot().value)) return
+  throw hostError instanceof Error
+    ? hostError
+    : new WorkBuddySettingsWriteError('cliBridge', 'neither the Host save endpoint nor the settings scope persisted the value')
+}
+
+/**
+ * Pin the model the local CodeBuddy CLI runs on — or `''` for "keep the CLI's
+ * own default" — through {@link writeCliBridgePatch}.
+ *
+ * The picker offers the active tab's live catalog, but any string is a legal
+ * write: a model the card's catalog does not list may still be valid for the
+ * CLI, and hand-configured values must not be refused by this writer.
+ */
+export async function writeCliBridgeModel(
+  scope: WorkBuddyAccountScope,
+  model: string,
+): Promise<void> {
+  await writeCliBridgePatch(scope, { model }, configured => cliBridgeModelOf(configured) === model)
+}
+
+/**
+ * Pin the reasoning effort the local CodeBuddy CLI runs on — or `''` for
+ * "keep the CLI's own default" — through {@link writeCliBridgePatch}.
+ */
+export async function writeCliBridgeEffort(
+  scope: WorkBuddyAccountScope,
+  effort: string,
+): Promise<void> {
+  await writeCliBridgePatch(scope, { effort }, configured => cliBridgeEffortOf(configured) === effort)
+}
+
+/**
  * Write one volatile field, then confirm the value actually landed.
  *
  * ORDER MATTERS, and getting it wrong DELETES DATA. The two writers do not have
