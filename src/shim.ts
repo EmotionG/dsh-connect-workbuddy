@@ -123,8 +123,9 @@ export interface WorkBuddyShimOptions {
    * The WorkBuddy usage page records the LAST `user` message as the request
    * text, and the harness appends its runtime context after the user's real
    * prompt — so the usage column shows injected noise instead of what was typed.
-   * The reorder is order-only (every message and every word survives) and it
-   * only ever moves messages that MATCH the harness's own injected prefixes.
+   * The reorder is order-only (every message and its text survive), and it only
+   * ever moves messages that MATCH the harness's own injected prefixes; the single
+   * textual edit is stripping the recorded prompt's own leading marker.
    *
    * Default false: it changes bytes the upstream counts, so it is opt-in.
    */

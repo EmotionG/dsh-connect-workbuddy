@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { WorkBuddyCredential } from '../src/auth.ts'
+import type { WorkBuddyWireIdentity } from '../src/upstream.ts'
 import {
   WorkBuddyUpstreamClient,
   WORKBUDDY_FALLBACK_SYSTEM_PROMPT,
@@ -277,6 +278,55 @@ describe('prepareChatBody keepPromptLast (issue #132)', () => {
     })
     const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
     expect(prepared[0]?.role).toBe('system')
+  })
+
+  it('removes the leading per-message marker from the recorded prompt only', () => {
+    // Without this the usage column still opens with `<acp …>m00042</acp>`, which
+    // is the half of #132's report that ordering alone does not fix.
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: '<acp id="a">m00001</acp>\n上一条真实输入' },
+        { role: 'assistant', content: 'answer' },
+        { role: 'user', content: '<acp id="b">m00042</acp>推荐几个菜谱' },
+        { role: 'user', content: 'Current runtime context.\n\nWorking directory: /tmp' },
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    const last = prepared.at(-1)
+    expect(String(last?.content)).toBe('推荐几个菜谱')
+    // The EARLIER message keeps its marker: only the recorded one is rewritten.
+    const earlier = prepared.find(message => String(message.content).includes('上一条真实输入'))
+    expect(String(earlier?.content)).toBe('<acp id="a">m00001</acp>\n上一条真实输入')
+    // The assistant turn is untouched too.
+    expect(String(prepared.find(message => message.role === 'assistant')?.content)).toBe('answer')
+  })
+
+  it('strips the marker from array-shaped prompt content in its first text part', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: [{ type: 'text', text: '<acp id="b">m00042</acp>真实输入' }] },
+        { role: 'user', content: 'Time sampled while preparing turn 2, step 3: now' },
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    const content = prepared.at(-1)?.content as { type: string, text: string }[]
+    expect(content[0]?.text).toBe('真实输入')
+  })
+
+  it('leaves the prompt untouched when there is nothing injected to move', () => {
+    // The rewrite is tied to the reorder, not to the option being on: a turn with
+    // no injected tail must not lose its marker, or the option would silently
+    // delete content from ordinary conversations too.
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        { role: 'user', content: '<acp id="b">m00042</acp>真实输入' },
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(String(prepared[1]?.content)).toBe('<acp id="b">m00042</acp>真实输入')
   })
 
   it('handles array-shaped content without stringifying objects', () => {
@@ -1107,13 +1157,16 @@ describe('the conversation-identity triple (issue #66)', () => {
   }
 
   /** Capture the headers one chat request actually went out with. */
-  async function headersOf(domain: string): Promise<Record<string, string>> {
+  async function headersOf(
+    domain: string,
+    identity?: WorkBuddyWireIdentity,
+  ): Promise<Record<string, string>> {
     const seen: Record<string, string> = {}
     vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
       Object.assign(seen, init.headers)
       return new Response('data: [DONE]\n\n', { status: 200 })
     })
-    await new WorkBuddyUpstreamClient().chatStream(credential(domain), '{}')
+    await new WorkBuddyUpstreamClient(undefined, identity).chatStream(credential(domain), '{}')
     return seen
   }
 
@@ -1146,23 +1199,33 @@ describe('the conversation-identity triple (issue #66)', () => {
     expect(new Set(TRIPLE.map(name => seen[name])).size).toBe(3)
   })
 
-  it('sends a well-formed 32-hex UUIDv7 in each, matching the official client (issue #132)', async () => {
-    // The gateway echoes `X-Conversation-Message-ID` back as the SSE id and the
-    // usage page shows it as the request id, so a hyphenated v4 id made official
-    // traffic and this plugin's traffic look like two different clients.
+  it('sends the shape it always sent, with the alignment off (issue #132)', async () => {
+    // The default is the shape every account has been answering since #66. #132's
+    // reporter measured the official-shaped one at HTTP 200, but that is a
+    // reporter's account and a 5.3.1 build, so it does not become the default here
+    // until this plugin has measured it itself.
     const seen = await headersOf('www.workbuddy.ai')
-    const v7 = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/
-    for (const name of TRIPLE) expect(seen[name]).toMatch(v7)
+    const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(hyphenated)
+    expect(seen['X-IDE-Name']).toBeUndefined()
+    expect(seen['X-Request-ID']).toBeUndefined()
   })
 
-  it('carries the X-IDE identity the usage page reads as 使用端 (issue #132)', async () => {
-    const seen = await headersOf('www.codebuddy.cn')
+  it('adopts the official usage identity on the chat path when asked (issue #132)', async () => {
+    // The gateway echoes `X-Conversation-Message-ID` as the SSE id and the usage
+    // page shows that value as the request id, so a hyphenated v4 made one
+    // account's rows look like two different clients.
+    const seen = await headersOf('www.workbuddy.ai', { usageIdentity: true })
+    const v7 = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(v7)
     expect(seen['X-IDE-Name']).toBe('WorkBuddy')
     expect(seen['X-IDE-Type']).toBe('CLI')
     // The version must agree with the UA the plugin already claims, not a second
     // hardcoded number.
     expect(seen['X-IDE-Version']).toMatch(/^\d+\.\d+\.\d+/)
     expect(seen['X-Request-ID']).toBe(seen['X-Conversation-Message-ID'])
+    // The channel identity behind the billing is NOT part of the alignment.
+    expect(seen['User-Agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
   })
 
   it('generates fresh values per request rather than reusing one identity', async () => {
@@ -1187,6 +1250,28 @@ describe('the conversation-identity triple (issue #66)', () => {
     })
     await new WorkBuddyUpstreamClient().probeChat(credential('www.workbuddy.ai'), '{}')
     for (const name of TRIPLE) expect(seen[name]).toBeTruthy()
+  })
+
+  it('keeps the IMAGE path on the id shape it was measured with, not the chat one (issue #132)', async () => {
+    // Deliberate split: #132's reporter measured CHAT (HTTP 200, 32-hex UUIDv7
+    // echoed as the SSE id), and the image endpoint was measured on 2026-10-21
+    // with hyphenated v4 ids at BOTH entrances. The id format is not what the
+    // image gate asks about, so a display-fidelity change must not sweep that
+    // path into bytes nobody tested it with.
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient(undefined, { usageIdentity: true })
+      .generateImage(credential('www.codebuddy.cn'), { model: 'hunyuan-image-alpha', prompt: 'p' })
+      // The stubbed envelope carries no image, so the parse is expected to fail —
+      // the headers had already gone out, which is the whole subject here.
+      .catch(() => undefined)
+    const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(hyphenated)
+    // `X-Request-ID` is the chat usage-page alignment; the image path never had it.
+    expect(seen['X-Request-ID']).toBeUndefined()
   })
 
   it('does not carry them on the billing endpoint, which is not chat', async () => {

@@ -27,7 +27,7 @@
  * @module dsh-connect-workbuddy/upstream
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
 import { parseQueueAnswer } from './queue.ts'
@@ -1291,16 +1291,31 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  *
  * @returns the three headers, every value distinct.
  */
-function conversationHeaders(): Record<string, string> {
-  // UUIDv7 in the 32-hex form the official client uses (issue #132), so the
-  // upstream's echoed id and the usage page's request id match what an official
-  // client produces. Every value is still generated per request.
-  const messageId = uuidv7()
+function conversationHeaders(
+  shape: 'chat' | 'image',
+  identity: WorkBuddyWireIdentity = {},
+): Record<string, string> {
+  // CHAT sends UUIDv7 in the 32-hex form the official client uses (issue #132),
+  // plus `X-Request-ID` mirroring the message id: the gateway echoes that value
+  // as the SSE `id` and writes it into the usage page, so a hyphenated v4 id
+  // made one account's rows look like two different clients. Every value is
+  // still generated per request.
+  //
+  // IMAGE keeps the hyphenated v4 it was measured with (2026-10-21: HTTP 200 at
+  // both `copilot.tencent.com` and `www.workbuddy.cn`). #132's reporter measured
+  // CHAT, not the image endpoint, and id FORMAT is not what the image gate asks
+  // about — so that path keeps the bytes known to answer instead of being swept
+  // into an untested shape by a display-fidelity change.
+  // The v7 shape travels with the same switch as `X-IDE-*`: both are the
+  // usage-page alignment the reporter measured, and neither is a gate.
+  const officialIds = shape === 'chat' && identity.usageIdentity === true
+  const id = officialIds ? uuidv7 : randomUUID
+  const messageId = id()
   return {
-    'X-Conversation-ID': uuidv7(),
-    'X-Conversation-Request-ID': uuidv7(),
+    'X-Conversation-ID': id(),
+    'X-Conversation-Request-ID': id(),
     'X-Conversation-Message-ID': messageId,
-    'X-Request-ID': messageId,
+    ...officialIds ? { 'X-Request-ID': messageId } : {},
   }
 }
 
@@ -1335,6 +1350,31 @@ export function uuidv7(nowMs = Date.now()): string {
 }
 
 /**
+ * How the plugin should identify itself where the upstream only RECORDS the
+ * request (issue #132). One switch, because the two halves are one decision.
+ */
+export interface WorkBuddyWireIdentity {
+  /**
+   * Adopt the official client's usage-page identity on chat requests.
+   *
+   * ON adds `X-IDE-Type` / `X-IDE-Name` / `X-IDE-Version` and switches the
+   * conversation-identity triple to the 32-hex UUIDv7 shape the official client
+   * uses (plus `X-Request-ID`, which mirrors the message id there).
+   *
+   * OFF by default, and the reason is the evidence tier, not the mechanism: the
+   * reporter measured HTTP 200 on their own 5.3.1, and this plugin has not
+   * reproduced that against the live gateway. Nothing in either gate is documented
+   * as reading these headers — `11128`'s three doors are the message openings,
+   * the missing conversation id and a non-system first message, none of which a
+   * header can change — but this gateway has repeatedly refused requests for
+   * reasons visible only in the answer, so a display-only alignment ships behind a
+   * switch rather than as a silent upgrade for every account. `User-Agent` and the
+   * request BODY are untouched either way.
+   */
+  usageIdentity?: boolean
+}
+
+/**
  * The IDE identity headers the official desktop client sends on chat (issue #132).
  *
  * WHY. The gateway records the usage page's 使用端 (client) column from
@@ -1351,8 +1391,12 @@ export function uuidv7(nowMs = Date.now()): string {
  * CLI + WorkBuddy shape is what was actually measured. The version comes from
  * {@link PRODUCT_UA} rather than a second hardcoded number, so the two cannot
  * drift apart when the app version is bumped.
+ *
+ * Sent only when {@link WorkBuddyWireIdentity.usageIdentity} is on — see that
+ * field for the evidence tier behind the default.
  */
-function ideHeaders(): Record<string, string> {
+function ideHeaders(identity: WorkBuddyWireIdentity): Record<string, string> {
+  if (identity.usageIdentity !== true) return {}
   return {
     'X-IDE-Type': 'CLI',
     'X-IDE-Name': 'WorkBuddy',
@@ -1361,7 +1405,10 @@ function ideHeaders(): Record<string, string> {
 }
 
 /** Chat request headers, including the X-No-* conventions the official CLI uses. */
-function chatHeaders(credential: WorkBuddyCredential): Record<string, string> {
+function chatHeaders(
+  credential: WorkBuddyCredential,
+  identity: WorkBuddyWireIdentity = {},
+): Record<string, string> {
   const headers: Record<string, string> = {
     ...commonHeaders(credential),
     'Content-Type': 'application/json',
@@ -1372,8 +1419,8 @@ function chatHeaders(credential: WorkBuddyCredential): Record<string, string> {
       : { 'X-Enterprise-Id': credential.enterpriseId },
     ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
     'X-Product': 'SaaS',
-    ...ideHeaders(),
-    ...conversationHeaders(),
+    ...ideHeaders(identity),
+    ...conversationHeaders('chat', identity),
   }
   return headers
 }
@@ -1416,7 +1463,11 @@ function billingHeaders(credential: WorkBuddyCredential): Record<string, string>
  * 探针当时没带，带了只是多一个可能被网关拒掉的变量，没有收益。
  *
  * 复用 {@link conversationHeaders}：官方 CLI 的 ImageService 也是每次现生成
- * 一组会话 UUID，且两个区走同一条代码路径（见该函数的注释）。
+ * 一组会话 UUID。但这里**传 `'image'`，且刻意不跟 `usageIdentity` 开关走**：
+ * issue #132 的实测只覆盖 chat，而生图这两个入口在 2026-10-21 是用带连字符的
+ * v4 答的 200，而 id 的**格式**从来不是生图那道闸问的事。把对齐「顺手统一」到
+ * 这里，等于用一条没人测过的字节去换一次显示对齐——`tests/upstream.spec.ts` 里
+ * 那条生图守卫钉的就是这一点（把 `'image'` 改成 `'chat'` 会红）。
  */
 function imageHeaders(credential: WorkBuddyCredential): Record<string, string> {
   return {
@@ -1431,7 +1482,7 @@ function imageHeaders(credential: WorkBuddyCredential): Record<string, string> {
       ? { 'X-No-Enterprise-Id': '1' }
       : { 'X-Enterprise-Id': credential.enterpriseId },
     ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
-    ...conversationHeaders(),
+    ...conversationHeaders('image'),
   }
 }
 
@@ -2090,10 +2141,16 @@ export interface PrepareChatBodyOptions {
    *
    * The move is ORDER-ONLY and only within the trailing run: the injected
    * messages are lifted out and re-inserted immediately BEFORE the real prompt,
-   * which keeps every message, every word and every tool result intact. It is
+   * which keeps every message, its text and every tool result intact (the one
+ * textual edit is the recorded prompt's leading marker, documented at
+ * {@link ACP_LEADING_TAG}). It is
    * therefore invisible to the model's instruction order (a runtime-context block
    * is context wherever it sits) and it is what makes the usage column show what
    * the user actually typed.
+   *
+   * It also removes the leading `<acp …>mNNNNN</acp>` marker from THAT prompt and no
+   * other message, because otherwise the recorded row still opens with the marker
+   * instead of the user's sentence. Marker only — no text is touched.
    *
    * Only messages that MATCH the harness's own injected prefixes are moved. A
    * body from any other client is untouched: this must never reorder a
@@ -2116,6 +2173,20 @@ export interface PrepareChatBodyOptions {
  * as it arrived — the alternative (moving "the last non-empty user message")
  * would reorder real conversations from other clients.
  */
+/**
+ * The per-message marker `billion-context` puts in front of every message.
+ *
+ * Stripped from the REAL prompt only (issue #132), because the usage page takes
+ * that message verbatim and the recorded row would otherwise open with
+ * `<acp …>m00042</acp>` instead of what the user typed. Only the marker is
+ * removed, never any text: the earlier messages keep theirs, so a model that
+ * cites a past message by its `mNNNNN` id can still do it — the one id lost is
+ * the message being answered right now, which is the only reference that cannot
+ * matter. Done only under the same opt-in as the reorder, since it deletes bytes
+ * the upstream counts.
+ */
+const ACP_LEADING_TAG = /^<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?/u
+
 const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
 
 /**
@@ -2136,6 +2207,30 @@ function textOfContent(content: unknown): string {
     parts.push(record['text'])
   }
   return parts.join('\n')
+}
+
+/**
+ * Drop the leading `billion-context` marker from one message's content.
+ *
+ * Handles both shapes (a bare string, or array content whose first `text` part
+ * carries the marker) and leaves everything else untouched. Returns whether it
+ * changed anything, so a body with no marker is not re-serialized for nothing.
+ */
+function stripLeadingAcpTag(content: unknown): { value: unknown, changed: boolean } {
+  if (typeof content === 'string') {
+    if (!ACP_LEADING_TAG.test(content)) return { value: content, changed: false }
+    return { value: content.replace(ACP_LEADING_TAG, ''), changed: true }
+  }
+  if (!Array.isArray(content)) return { value: content, changed: false }
+  for (const part of content) {
+    if (typeof part !== 'object' || part === null || Array.isArray(part)) continue
+    const record = part as Record<string, unknown>
+    if (record['type'] !== 'text' || typeof record['text'] !== 'string') continue
+    if (!ACP_LEADING_TAG.test(record['text'])) continue
+    record['text'] = record['text'].replace(ACP_LEADING_TAG, '')
+    return { value: content, changed: true }
+  }
+  return { value: content, changed: false }
 }
 
 /** Whether this message is one of the harness's injected context blocks. */
@@ -2173,6 +2268,14 @@ function keepPromptLast(messages: unknown[]): boolean {
     && typeof value === 'object' && value !== null && !Array.isArray(value)
     && isInjectedUserMessage(value as Record<string, unknown>)))
   kept.splice(promptIndex, 0, ...trailing)
+  // The prompt is now the LAST `user` message, which is the one the usage page
+  // records — so its own leading marker is what still shows up there.
+  const prompt = kept[promptIndex + trailing.length]
+  if (typeof prompt === 'object' && prompt !== null && !Array.isArray(prompt)) {
+    const message = prompt as Record<string, unknown>
+    const stripped = stripLeadingAcpTag(message['content'])
+    if (stripped.changed) message['content'] = stripped.value
+  }
   messages.length = 0
   messages.push(...kept)
   return true
@@ -2792,7 +2895,10 @@ export class WorkBuddyUpstreamClient {
    * `ctx.logger.warn` in; without a host the event is dropped, which is the
    * same silence the previous single-source reader had.
    */
-  constructor(private readonly onFallback?: (message: string) => void) {}
+  constructor(
+    private readonly onFallback?: (message: string) => void,
+    private readonly identity: WorkBuddyWireIdentity = {},
+  ) {}
 
   /** POST the chat endpoint; a successful answer is the raw SSE response. */
   async chatStream(
@@ -2817,7 +2923,7 @@ export class WorkBuddyUpstreamClient {
     try {
       response = await fetch(`${chatBase(credential)}/v2/chat/completions`, {
         method: 'POST',
-        headers: { ...chatHeaders(credential), 'Authorization': `Bearer ${credential.accessToken}` },
+        headers: { ...chatHeaders(credential, this.identity), 'Authorization': `Bearer ${credential.accessToken}` },
         body: bodyJson,
         ...signal === undefined ? {} : { signal },
       })
@@ -2874,7 +2980,7 @@ export class WorkBuddyUpstreamClient {
     try {
       response = await fetch(`${chatBase(credential)}/v2/chat/completions`, {
         method: 'POST',
-        headers: { ...chatHeaders(credential), 'Authorization': `Bearer ${credential.accessToken}` },
+        headers: { ...chatHeaders(credential, this.identity), 'Authorization': `Bearer ${credential.accessToken}` },
         body: bodyJson,
         signal: signal === undefined ? ceiling.signal : AbortSignal.any([signal, ceiling.signal]),
       })

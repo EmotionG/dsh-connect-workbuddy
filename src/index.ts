@@ -528,6 +528,16 @@ export interface Config {
    */
   channelPerturbation?: 'off' | 'failure' | 'always'
   /**
+   * Adopt the official client's usage-page identity on chat requests (issue #132).
+   *
+   * Adds `X-IDE-Name: WorkBuddy` (which is what fills the upstream's 使用端
+   * column) and sends the conversation-identity triple in the 32-hex UUIDv7
+   * shape the official client uses. Off by default: the reporter measured it at
+   * HTTP 200, this plugin has not reproduced that against the live gateway, and a
+   * display-only change should not be the reason an account starts failing.
+   */
+  usageIdentity?: boolean
+  /**
    * Move the harness's injected context above the real prompt (issue #132).
    *
    * The WorkBuddy usage page records the last `user` message as the request
@@ -775,10 +785,18 @@ export const Config: z<Config> = z.object({
       .default('failure')
       .description('When to perturb scanned messages with invisible characters: "off" only rescues after a channel-gate refusal, "failure" (default) learns from a successful rescue and starts later requests perturbed, "always" starts every request with the dense rescue for a gateway whose plain attempt is guaranteed to fail.'),
   ) as unknown as z<'off' | 'failure' | 'always'>,
+  usageIdentity: asVolatile(
+    z.boolean()
+      .default(false)
+      .description("Make the upstream's usage page record these calls like the official client's: " + "add the X-IDE-* identity headers (which fill the 使用端 column) and send the conversation " + "ids as 32-hex UUIDv7. Off by default — it is a display alignment measured by a reporter, not by " + "this plugin, and the chat channel identity (User-Agent) and request body never change."),
+  ) as unknown as z<boolean>,
   keepPromptLast: asVolatile(
     z.boolean()
       .default(false)
-      .description('Move the harness-injected runtime context above the real prompt, so the WorkBuddy usage page records what you actually typed instead of the injected block. Order-only: every message and word survives. Off by default because it changes the message order the upstream counts.'),
+      .description("Move the harness-injected runtime context above the real prompt, so the " +
+        "WorkBuddy usage page records what you actually typed instead of the injected block. " +
+        "Message count and text are preserved; the one edit is the recorded prompt's own leading " +
+        "<acp> marker. Off by default because it changes the message order the upstream counts."),
   ) as unknown as z<boolean>,
 }) as unknown as z<Config>
 
@@ -934,9 +952,12 @@ export function apply(ctx: Context, config: Config): void {
   // A fallback is worth a line in the log: it means the card's roster may no
   // longer match the app's prices, which is a user-visible difference rather
   // than a purely internal degradation.
-  const client = new WorkBuddyUpstreamClient(message => {
-    ctx.logger.warn(`dsh-connect-workbuddy: ${message}`)
-  })
+  const client = new WorkBuddyUpstreamClient(
+    message => {
+      ctx.logger.warn(`dsh-connect-workbuddy: ${message}`)
+    },
+    { usageIdentity: unwrapVolatile(config.usageIdentity) === true },
+  )
 
   /**
    * How long a check-in reading is reused before asking the upstream again.
