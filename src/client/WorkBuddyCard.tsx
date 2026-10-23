@@ -56,7 +56,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -115,6 +115,18 @@ const POLL_INTERVAL_MS = 60_000
  * constant — a drifted list here would offer a tier the CLI rejects.
  */
 const CLI_BRIDGE_EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * The credential-region orders the quick-adjust picker offers for the CLI
+ * route's `regionOrder`.
+ *
+ * The Host builds exactly two regions — `cn` and `global` (see
+ * `REGION_KEYS` in `src/index.ts`), so every meaningful order of that pair
+ * fits in these four presets: a preference, a reversed preference, or a
+ * single-region lock. `''` (uncommitted) renders as the CLI's own default
+ * order, CN first.
+ */
+const CLI_BRIDGE_REGION_ORDERS = ['cn,global', 'global,cn', 'cn', 'global'] as const
 
 /**
  * Tooltip for one model's image checkbox. The box is pre-checked only for
@@ -526,8 +538,8 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const [cliBridgeOn, setCliBridgeOn] = useState<boolean | undefined>(undefined)
   const [cliBridgeBusy, setCliBridgeBusy] = useState(false)
   /**
-   * The quick-adjust pins of the CLI route (model, effort) made by THIS card
-   * instance.
+   * The quick-adjust pins of the CLI route (model, effort, region order) made
+   * by THIS card instance.
    *
    * Each is `undefined` until the user changes its picker here: the value
    * then renders from the Host's answer (the authoritative mirror) and falls
@@ -539,6 +551,8 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const [cliBridgeModelBusy, setCliBridgeModelBusy] = useState(false)
   const [cliBridgeEffort, setCliBridgeEffort] = useState<string | undefined>(undefined)
   const [cliBridgeEffortBusy, setCliBridgeEffortBusy] = useState(false)
+  const [cliBridgeRegionOrder, setCliBridgeRegionOrder] = useState<string | undefined>(undefined)
+  const [cliBridgeRegionOrderBusy, setCliBridgeRegionOrderBusy] = useState(false)
   /**
    * Probe results, keyed by region then model id.
    *
@@ -1155,6 +1169,42 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       }
     } finally {
       if (mounted.current) setCliBridgeEffortBusy(false)
+    }
+  }
+
+  /**
+   * The credential-region order of the CLI route, rendered with the same
+   * write-first rule. Unlike the model and effort pins, `''` is NOT a
+   * meaningful committed value here: it means "nothing pinned", and the route
+   * then runs on the CLI's own default order — CN first. The picker therefore
+   * shows that default instead of an empty answer.
+   */
+  const cliBridgeRegionOrderValue = (): string => {
+    if (cliBridgeRegionOrder !== undefined) return cliBridgeRegionOrder
+    const fromHost = (statusByRegion[activeRegion] as { cliBridgeRegionOrder?: unknown } | undefined)?.cliBridgeRegionOrder
+    const committed = typeof fromHost === 'string' && fromHost !== ''
+      ? fromHost
+      : cliBridgeRegionOrderOf(settingsScope?.getSnapshot().value)
+    return committed !== '' ? committed : 'cn,global'
+  }
+
+  /**
+   * Pin the credential-region order the local CLI walks, same
+   * write-and-revert rule as {@link pickCliBridgeModel}.
+   */
+  const pickCliBridgeRegionOrder = async (regionOrder: string): Promise<void> => {
+    if (settingsScope === undefined) return
+    setCliBridgeRegionOrderBusy(true)
+    try {
+      await writeCliBridgeRegionOrder(settingsScope, regionOrder)
+      if (mounted.current) setCliBridgeRegionOrder(regionOrder)
+    } catch (error: unknown) {
+      if (mounted.current) {
+        setCliBridgeRegionOrder(undefined)
+        setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+      }
+    } finally {
+      if (mounted.current) setCliBridgeRegionOrderBusy(false)
     }
   }
 
@@ -1890,6 +1940,21 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     cliBridgeEffortLevels.push(cliBridgeEffortPinned)
   }
 
+  const cliBridgeRegionOrderPinned = cliBridgeRegionOrderValue()
+  const cliBridgeRegionOrderOptions: { value: string, label: string }[] = CLI_BRIDGE_REGION_ORDERS.map(order => ({
+    value: order,
+    label: order === 'cn,global'
+      ? t('row.cliBridgeRegionOrderCnFirst')
+      : order === 'global,cn'
+        ? t('row.cliBridgeRegionOrderGlobalFirst')
+        : order === 'cn'
+          ? t('row.cliBridgeRegionOrderCnOnly')
+          : t('row.cliBridgeRegionOrderGlobalOnly'),
+  }))
+  if (cliBridgeRegionOrderOptions.every(option => option.value !== cliBridgeRegionOrderPinned)) {
+    cliBridgeRegionOrderOptions.push({ value: cliBridgeRegionOrderPinned, label: cliBridgeRegionOrderPinned })
+  }
+
   const cliBridgePickers = (
     <div
       className="dsm-workbuddy-pref dsm-workbuddy-pref-indent"
@@ -1902,7 +1967,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
             <select
               className="dsm-workbuddy-cli-bridge-select"
               value={cliBridgeModelPinned}
-              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
               aria-label={t('row.cliBridgeModelAria')}
               onChange={(event: { currentTarget: { value: string } }) => {
                 void pickCliBridgeModel(event.currentTarget.value)
@@ -1919,7 +1984,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
             <select
               className="dsm-workbuddy-cli-bridge-select"
               value={cliBridgeEffortPinned}
-              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
               aria-label={t('row.cliBridgeEffortAria')}
               onChange={(event: { currentTarget: { value: string } }) => {
                 void pickCliBridgeEffort(event.currentTarget.value)
@@ -1928,6 +1993,22 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
               <option value="">{t('row.cliBridgeEffortDefault')}</option>
               {cliBridgeEffortLevels.map(level => (
                 <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </label>
+          <label className="dsm-workbuddy-cli-bridge-pick" title={t('row.cliBridgeRegionOrderHint')}>
+            <span className="dsm-workbuddy-pref-label">{t('row.cliBridgeRegionOrderLabel')}</span>
+            <select
+              className="dsm-workbuddy-cli-bridge-select"
+              value={cliBridgeRegionOrderPinned}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
+              aria-label={t('row.cliBridgeRegionOrderAria')}
+              onChange={(event: { currentTarget: { value: string } }) => {
+                void pickCliBridgeRegionOrder(event.currentTarget.value)
+              }}
+            >
+              {cliBridgeRegionOrderOptions.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
           </label>

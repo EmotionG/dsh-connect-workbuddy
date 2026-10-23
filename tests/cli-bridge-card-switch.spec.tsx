@@ -12,7 +12,7 @@
  * The server-side half of the merge is `cli-bridge-switch.spec.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel } from '../src/client/account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder } from '../src/client/account-selection.ts'
 import { WorkBuddyCard } from '../src/client/WorkBuddyCard.tsx'
 import { fakeScope, mount, stubFetch, t } from './pool-render-helpers.tsx'
 
@@ -35,7 +35,7 @@ describe('cliBridgeEnabledOf', () => {
   })
 })
 
-describe('cliBridgeModelOf / cliBridgeEffortOf', () => {
+describe('cliBridgeModelOf / cliBridgeEffortOf / cliBridgeRegionOrderOf', () => {
   it('read a pinned value, and "" for every shape that is not a string', () => {
     // '' is the real "not pinned, the CLI runs on its own default" answer.
     expect(cliBridgeModelOf(undefined)).toBe('')
@@ -55,9 +55,15 @@ describe('cliBridgeModelOf / cliBridgeEffortOf', () => {
     expect(cliBridgeEffortOf({ cliBridge: { effort: null } })).toBe('')
     expect(cliBridgeEffortOf({ cliBridge: {} })).toBe('')
   })
+
+  it('reads the region-order pin the same way', () => {
+    expect(cliBridgeRegionOrderOf({ cliBridge: { regionOrder: 'global,cn' } })).toBe('global,cn')
+    expect(cliBridgeRegionOrderOf({ cliBridge: { regionOrder: 42 } })).toBe('')
+    expect(cliBridgeRegionOrderOf({ cliBridge: {} })).toBe('')
+  })
 })
 
-describe('writeCliBridgeModel / writeCliBridgeEffort', () => {
+describe('writeCliBridgeModel / writeCliBridgeEffort / writeCliBridgeRegionOrder', () => {
   it('post the one-key patch to the Host and mirror its authoritative block', async () => {
     const calls: { url: string, body: unknown }[] = []
     vi.stubGlobal('fetch', async (url: unknown, init: { body?: string }) => {
@@ -98,6 +104,29 @@ describe('writeCliBridgeModel / writeCliBridgeEffort', () => {
     }
     await writeCliBridgeEffort(scope as never, 'max')
     expect(store.value.cliBridge).toMatchObject({ enabled: true, effort: 'max', maxTurns: 25 })
+  })
+
+  it('post a one-key region-order patch to the Host, keeping the sibling caps', async () => {
+    const calls: { url: string, body: unknown }[] = []
+    vi.stubGlobal('fetch', async (url: unknown, init: { body?: string }) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init.body)) })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, value: { enabled: true, regionOrder: 'global,cn', maxTurns: 25 } }),
+      }
+    })
+    const setCalls: [string, unknown][] = []
+    const scope = {
+      getSnapshot: () => ({ value: {} }),
+      set: async (field: string, value: unknown) => {
+        setCalls.push([field, value])
+        return true
+      },
+    }
+    await writeCliBridgeRegionOrder(scope as never, 'global,cn')
+    expect(calls[0]?.body).toEqual({ field: 'cliBridge', value: { regionOrder: 'global,cn' } })
+    expect(setCalls).toEqual([['cliBridge', { enabled: true, regionOrder: 'global,cn', maxTurns: 25 }]])
   })
 
   it('throw when neither writer persists the value', async () => {
@@ -237,7 +266,7 @@ describe('the card renders the global CLI switch', () => {
   })
 
   describe('the quick-adjust pickers under the switch', () => {
-    /** [0] is the model select, [1] the effort select. */
+    /** [0] is the model select, [1] the effort select, [2] the region-order select. */
     const selects = (container: HTMLDivElement): HTMLSelectElement[] =>
       Array.from(container.querySelectorAll<HTMLSelectElement>('.dsm-workbuddy-cli-bridge-select'))
 
@@ -303,6 +332,35 @@ describe('the card renders the global CLI switch', () => {
       const save = calls.find(call => String(call.url).includes('__save') && String(call.init?.body).includes('"effort"'))
       expect(save).toBeDefined()
       expect(String(save?.init?.body)).toContain('"effort":"high"')
+    })
+
+    it('offer the four region orders, defaulting to CN first when nothing is pinned', async () => {
+      const { m } = await render(true)
+      const regionOrder = selects(m.container)[2]
+      expect(regionOrder).toBeDefined()
+      // No pin anywhere: the picker shows the CLI's own default order.
+      expect(regionOrder?.value).toBe('cn,global')
+      expect(optionValues(regionOrder as HTMLSelectElement))
+        .toEqual(['cn,global', 'global,cn', 'cn', 'global'])
+    })
+
+    it('shows a committed region order the presets do not name, instead of dropping it', async () => {
+      const { m } = await render(true, { cliBridgeRegionOrder: 'us,cn' })
+      const regionOrder = selects(m.container)[2]
+      expect(regionOrder?.value).toBe('us,cn')
+      expect(optionValues(regionOrder as HTMLSelectElement))
+        .toEqual(['cn,global', 'global,cn', 'cn', 'global', 'us,cn'])
+    })
+
+    it('post a one-key region-order patch when the region picker changes', async () => {
+      const { m, calls } = await render(true)
+      const regionOrder = selects(m.container)[2]
+      await m.choose(regionOrder as HTMLSelectElement, 'cn')
+      await m.settle()
+      const save = calls.find(call => String(call.url).includes('__save') && String(call.init?.body).includes('"regionOrder"'))
+      expect(save).toBeDefined()
+      expect(String(save?.init?.body)).toContain('"field":"cliBridge"')
+      expect(String(save?.init?.body)).toContain('"regionOrder":"cn"')
     })
   })
 })

@@ -88,6 +88,8 @@ import {
   rankPool,
 } from './account-pool.ts'
 import { readPoolProbes, writePoolProbes } from './account-pool-store.ts'
+import { createFileRosterSeenStore } from './roster-seen-store.ts'
+import type { RosterSeenStore } from './roster-seen-store.ts'
 import type { WorkBuddyShim } from './shim.ts'
 import { WorkBuddyUpstreamClient, knownRegionOf, regionOf } from './upstream.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
@@ -826,6 +828,8 @@ interface WorkBuddyRegionStack {
   store: WorkBuddyCredentialStore
   catalog: WorkBuddyCatalog
   shim: WorkBuddyShim
+  /** This region's first-sighting history, feeding the "· N 新模型" segment. */
+  rosterSeen: RosterSeenStore
 }
 
 /** Every region, in card tab order. */
@@ -972,6 +976,11 @@ export function apply(ctx: Context, config: Config): void {
       refresh: credential => client.refreshToken(credential),
     })
     const catalog = new WorkBuddyCatalog(region)
+    // This region's OWN first-sighting history, the source of the composer
+    // pill's "· N 新模型". Region-scoped like the credential and pool copies:
+    // the two catalogs are separate, so a CN first-sighting says nothing about
+    // the international roster, and they must never overwrite each other.
+    const rosterSeen = createFileRosterSeenStore(region)
     /**
      * Where the next upstream `usage` should be written.
      *
@@ -1041,7 +1050,7 @@ export function apply(ctx: Context, config: Config): void {
         void recordAccountFailure(region, accountId, failure)
       },
     })
-    stacks[region] = { store, catalog, shim }
+    stacks[region] = { store, catalog, shim, rosterSeen }
   }
 
   // Answers "would switching to this account help?" after the upstream refuses
@@ -1690,6 +1699,15 @@ export function apply(ctx: Context, config: Config): void {
     offModelIds: region => savedOffModelIds(regionStateOf(current(), region), displayModels(current(), region)),
     contextBudgets: region => regionStateOf(current(), region).contextBudgets ?? {},
     discoverModels,
+    /**
+     * This region's first-sighting readout, the data behind the composer pill's
+     * "· N 新模型" segment.
+     *
+     * READ-ONLY here: only the reconciler's `note` writes first-sighting
+     * history, so no amount of polling by the pill or the card can change who
+     * counts as new — the one property that keeps the marker honest.
+     */
+    rosterSeen: region => stacks[region].rosterSeen.readout(),
     regionEnabled: region => regionEnabled(current(), region),
     /**
      * The region's committed sidebar-credit flag, read from the same config the
@@ -1723,6 +1741,7 @@ export function apply(ctx: Context, config: Config): void {
      */
     cliBridgeModel: () => unwrapVolatile(current().cliBridge)?.model ?? '',
     cliBridgeEffort: () => unwrapVolatile(current().cliBridge)?.effort ?? '',
+    cliBridgeRegionOrder: () => unwrapVolatile(current().cliBridge)?.regionOrder ?? '',
     /**
      * WHERE the readout sits, resolved here rather than read from the browser
      * settings mirror, for the same measured reason as the flag above: on the
@@ -2978,6 +2997,20 @@ export function apply(ctx: Context, config: Config): void {
               new Set(savedOffModelIds(state, models)),
             ))
             adapters[region].invalidate()
+            // Record when THIS machine first saw each id of the roster that just
+            // landed — the whole "· N 新模型" story. This is the ONLY writer of
+            // that history; the usage route answering the pill is read-only, so
+            // a panel poll can never change "who is new".
+            //
+            // A failure is a warning, NOT a reason to fall back to the static
+            // list (the catalog above is already set), and it is logged with its
+            // reason rather than silently answered as "no new models": those are
+            // two entirely different facts.
+            try {
+              await stacks[region].rosterSeen.note(models.map(model => model.id))
+            } catch (error: unknown) {
+              ctx.logger.warn(`dsh-connect-workbuddy: ${region} first-sighting history not updated`, error)
+            }
             // `lastCatalog` is deliberately NOT seeded here: it belongs to the
             // user's saved selection, written only by the card's explicit save
             // (via settingsScope). Until then the card shows the live fallback

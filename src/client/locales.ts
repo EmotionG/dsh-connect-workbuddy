@@ -433,10 +433,11 @@ export const en = {
   // for that reason, so the copy says what it costs instead of only naming it.
   'row.cliBridgeLabel': 'Let the local CodeBuddy CLI do the work',
   'row.cliBridgeHint': 'Adds the codebuddy_ask tool and the /codebuddy command. Each call spends CodeBuddy quota. injectResult only affects /codebuddy — its result is injected back into the session, costing one DSH turn when the session is idle; tool calls never read it. Rate-limited: 6 turns per session per hour, 20 per process per hour, one turn at a time. Off by default.',
-  // The two quick-adjust pins of the route: which model and which reasoning
-  // tier the local CLI runs on. The model list is not hardcoded — it is the
-  // catalog the card already synced for the active tab, so it follows the
-  // upstream; a pinned value the catalog does not list still shows.
+  // The three quick-adjust pins of the route: which model and which reasoning
+  // tier the local CLI runs on, and in what order it walks the credential
+  // regions. The model list is not hardcoded — it is the catalog the card
+  // already synced for the active tab, so it follows the upstream; a pinned
+  // value the catalog does not list still shows.
   'row.cliBridgeModelLabel': 'CLI model',
   'row.cliBridgeModelDefault': 'CLI default',
   'row.cliBridgeModelAria': 'Model the local CodeBuddy CLI runs on',
@@ -445,7 +446,14 @@ export const en = {
   'row.cliBridgeEffortDefault': 'CLI default',
   'row.cliBridgeEffortAria': 'Reasoning effort the local CodeBuddy CLI runs on',
   'row.cliBridgeEffortHint': 'Written to cliBridge.effort and passed to the CLI as --effort. "CLI default" leaves the tier to the CLI itself. When the picked model lists supported tiers, only those are offered.',
-  'row.cliBridgePickersHint': 'Both pickers write the global cliBridge block; "CLI default" is an explicit empty value, not "unset" — the CLI then uses its own default.',
+  'row.cliBridgeRegionOrderLabel': 'Region order',
+  'row.cliBridgeRegionOrderAria': 'Order in which the local CodeBuddy CLI walks the credential regions',
+  'row.cliBridgeRegionOrderHint': 'Written to cliBridge.regionOrder: the order the CLI tries the WorkBuddy credentials in, until one logs in. The region actually used is reported per turn as credential_region. Applies from the next call.',
+  'row.cliBridgeRegionOrderCnFirst': 'CN first',
+  'row.cliBridgeRegionOrderGlobalFirst': 'Global first',
+  'row.cliBridgeRegionOrderCnOnly': 'CN only',
+  'row.cliBridgeRegionOrderGlobalOnly': 'Global only',
+  'row.cliBridgePickersHint': 'All three pickers write the global cliBridge block; "CLI default" on model and effort is an explicit empty value, not "unset" — the CLI then uses its own defaults; the region picker writes cliBridge.regionOrder.',
   'row.imageToolLabel': 'Let the model draw images',
   'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image, with no per-call confirmation. Off means the tool is not registered at all.',
   'row.showCreditsCn': 'Show credits in the composer toolbar',
@@ -919,9 +927,9 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // 而不是只给它一个名字。
   'row.cliBridgeLabel': '允许调用本机 CodeBuddy CLI 干活',
   'row.cliBridgeHint': '开启后多出 codebuddy_ask 工具与 /codebuddy 指令；每次调用花 CodeBuddy 配额。injectResult 只影响 /codebuddy：其结果回注会话，会话空闲时多花一次 DSH 回合；工具调用不读它。限流：每会话每小时 6 回合、每进程每小时 20 回合、同时只跑一个回合。默认关闭。',
-  // 本地 CLI 路由的两个快调旋钮：跑哪个模型、哪个推理档位。模型列表
-  // 不写死——是卡片已为当前页签同步到的目录，跟随上游；已选值即使
-  // 目录里没有也会原样列出，不让它无声消失。
+  // 本地 CLI 路由的三个快调旋钮：跑哪个模型、哪个推理档位、按什么顺序
+  // 遍历凭据区域。模型列表不写死——是卡片已为当前页签同步到的目录，
+  // 跟随上游；已选值即使目录里没有也会原样列出，不让它无声消失。
   'row.cliBridgeModelLabel': 'CLI 模型',
   'row.cliBridgeModelDefault': 'CLI 默认',
   'row.cliBridgeModelAria': '本地 CodeBuddy CLI 运行所用的模型',
@@ -930,7 +938,14 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.cliBridgeEffortDefault': 'CLI 默认',
   'row.cliBridgeEffortAria': '本地 CodeBuddy CLI 的推理档位',
   'row.cliBridgeEffortHint': '写入 cliBridge.effort，CLI 以 --effort 接收；"CLI 默认"表示沿用 CLI 自身默认。所选模型列出支持档位时只给出这些档位。',
-  'row.cliBridgePickersHint': '两个选择都写入全局 cliBridge 块；"CLI 默认"是显式的空值而非未设置，届时 CLI 使用自己的默认。',
+  'row.cliBridgeRegionOrderLabel': '区域顺序',
+  'row.cliBridgeRegionOrderAria': '本地 CodeBuddy CLI 遍历凭据区域的顺序',
+  'row.cliBridgeRegionOrderHint': '写入 cliBridge.regionOrder：CLI 按此顺序尝试 WorkBuddy 凭据，直到登录成功；实际使用的区域在工具输出里以 credential_region 报告。自下次调用起生效。',
+  'row.cliBridgeRegionOrderCnFirst': '国内优先',
+  'row.cliBridgeRegionOrderGlobalFirst': '国际优先',
+  'row.cliBridgeRegionOrderCnOnly': '仅国内',
+  'row.cliBridgeRegionOrderGlobalOnly': '仅国际',
+  'row.cliBridgePickersHint': '三个选择都写入全局 cliBridge 块；模型/档位的"CLI 默认"是显式的空值而非未设置，届时 CLI 使用自己的默认；区域选择写入 cliBridge.regionOrder。',
   'row.imageToolLabel': '允许模型自主生图',
   'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——约 5.71 积分/张，没有逐次确认。关闭时该工具根本不会注册。',
   'row.showCreditsCn': '在输入框工具栏显示积分读数',

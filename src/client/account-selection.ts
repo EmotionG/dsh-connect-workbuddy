@@ -322,6 +322,40 @@ export async function writeCliBridgeEffort(
 }
 
 /**
+ * Read the credential-region order the CodeBuddy-CLI route walks out of a
+ * settings snapshot.
+ *
+ * `''` means "nothing is pinned": the route then falls back to the CLI default
+ * order (CN first, `cn,global`), so the picker must show that default rather
+ * than an empty answer. A non-string reads as `''` — the same garbage rule as
+ * {@link cliBridgeModelOf}.
+ */
+export function cliBridgeRegionOrderOf(configured: unknown): string {
+  const bridge = (configured as { cliBridge?: unknown } | undefined)?.cliBridge
+  const regionOrder = typeof bridge === 'object' && bridge !== null
+    ? (bridge as { regionOrder?: unknown }).regionOrder
+    : undefined
+  return typeof regionOrder === 'string' ? regionOrder : ''
+}
+
+/**
+ * Pin the credential-region order the local CodeBuddy CLI walks — a
+ * comma-separated region list such as `'cn,global'` — through
+ * {@link writeCliBridgePatch}.
+ *
+ * Any string is a legal write: the order is matched against the regions the
+ * Host actually built, and an unknown region name simply never matches, so a
+ * hand-configured typo degrades to the CLI default order instead of breaking
+ * the route.
+ */
+export async function writeCliBridgeRegionOrder(
+  scope: WorkBuddyAccountScope,
+  regionOrder: string,
+): Promise<void> {
+  await writeCliBridgePatch(scope, { regionOrder }, configured => cliBridgeRegionOrderOf(configured) === regionOrder)
+}
+
+/**
  * Write one volatile field, then confirm the value actually landed.
  *
  * ORDER MATTERS, and getting it wrong DELETES DATA. The two writers do not have

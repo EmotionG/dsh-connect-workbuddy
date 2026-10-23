@@ -45,6 +45,7 @@ import type {
 } from './account-pool-run.ts'
 import { fastDetailOf, regionOfStatusUrl, regionsMapOf, transferActionOf } from './status-paths.ts'
 import type { WorkBuddyCreditPosition } from './status-paths.ts'
+import type { RosterSeenReadout } from './roster-seen-store.ts'
 import type { WorkBuddyRegion } from './upstream.ts'
 import {
   oauthActionOf,
@@ -118,6 +119,20 @@ export interface WorkBuddyStatusRouteOptions {
   /** Re-read the live catalog of one region from the upstream. */
   discoverModels?(region: WorkBuddyRegion, signal?: AbortSignal): Promise<readonly WorkBuddyModelInfo[]>
   /**
+   * Which ids of the requested region's roster THIS machine first saw inside the
+   * new-model window (the "· N 新模型" segment), plus a note when the on-disk
+   * first-sighting history is in a version this build cannot read.
+   *
+   * READ-ONLY: the usage route never writes first-sighting history — only the
+   * catalog reconciler does (`src/index.ts`), so a panel poll can never change
+   * "who is new". Region-scoped because the two regions keep separate catalogs
+   * and therefore separate first-sighting tables.
+   *
+   * Optional, and absent means the Host predates the feature: the pill then
+   * renders no segment at all rather than a made-up "0 新模型".
+   */
+  rosterSeen?(region: WorkBuddyRegion): Promise<RosterSeenReadout>
+  /**
    * Whether the requested region's provider is currently offered to DSH. The
    * card renders this as the tab's on/off checkbox, so the switch reflects the
    * committed settings value rather than a local guess.
@@ -182,6 +197,13 @@ export interface WorkBuddyStatusRouteOptions {
    * reasons as {@link cliBridgeModel}.
    */
   cliBridgeEffort?(): string
+  /**
+   * The order the OPTIONAL CodeBuddy CLI route walks the credential regions in
+   * (a comma-separated list such as `'cn,global'`), or `''` for "the CLI's own
+   * default order". GLOBAL, optional, and absent-as-`''` for the same reasons
+   * as {@link cliBridgeModel}.
+   */
+  cliBridgeRegionOrder?(): string
   /**
    * The LIVE load level per model id, for the card's icon.
    *
@@ -920,12 +942,13 @@ export async function workBuddyWebStatus(
   // region at a time, so the switch has to be present on whichever tab is open.
   // `=== true` for the same reason as `imageToolEnabled`: absent is not consent.
   const cliBridgeEnabled = deps.cliBridgeEnabled?.() === true
-  // The route's two quick-adjust pins. Absent reads as `''` (the CLI's own
+  // The route's three quick-adjust pins. Absent reads as `''` (the CLI's own
   // default), never as a made-up value: an older Host without the deps simply
   // cannot answer, and the card's pickers then fall back to the settings
   // snapshot for the same reason `cliBridgeEnabled` does.
   const cliBridgeModel = deps.cliBridgeModel?.() ?? ''
   const cliBridgeEffort = deps.cliBridgeEffort?.() ?? ''
+  const cliBridgeRegionOrder = deps.cliBridgeRegionOrder?.() ?? ''
   // The LIVE load levels, beside the model list rather than inside it: the
   // card's list is the SAVED roster, and a saved roster has no load level.
   const busyLevels = deps.busyLevels?.(region) ?? {}
@@ -939,7 +962,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, cliBridgeModel, cliBridgeEffort, busyLevels }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, cliBridgeModel, cliBridgeEffort, cliBridgeRegionOrder, busyLevels }
   }
   let credential
   try {
@@ -975,6 +998,7 @@ export async function workBuddyWebStatus(
       cliBridgeEnabled,
       cliBridgeModel,
       cliBridgeEffort,
+      cliBridgeRegionOrder,
       busyLevels,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
@@ -1004,6 +1028,7 @@ export async function workBuddyWebStatus(
     cliBridgeEnabled,
     cliBridgeModel,
     cliBridgeEffort,
+    cliBridgeRegionOrder,
     busyLevels,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:
@@ -1024,6 +1049,12 @@ export async function workBuddyWebStatus(
   const figures: WorkBuddyLiveFigures = fast
     ? {}
     : await liveFigures(deps, region, credential, selected)
+  // "· N 新模型": which ids of THIS region's roster this machine first saw inside
+  // the new-model window. READ-ONLY — the catalog reconciler is the only writer
+  // of first-sighting history, so this route can never change "who is new" no
+  // matter how often the card or pill polls it. Absent for a Host that predates
+  // the feature, which renders no segment at all.
+  const rosterSeen = deps.rosterSeen === undefined ? undefined : await deps.rosterSeen(region)
   return {
     status: 'signed-in',
     // The persisted per-region budgets, read straight from the Host config.
@@ -1043,6 +1074,12 @@ export async function workBuddyWebStatus(
       authFile: volatileFlagOf('authFile'),
     },
     ...account,
+    // The new-model segment's data. Spreads are conditional because both fields
+    // are optional on the document shape (`exactOptionalPropertyTypes`).
+    ...rosterSeen === undefined ? {} : {
+      newModelIds: [...rosterSeen.newModelIds],
+      ...rosterSeen.versionNote === undefined ? {} : { rosterSeenVersionNote: rosterSeen.versionNote },
+    },
     ...figures,
     // The pool is assembled last and never allowed to fail the document: it is
     // an enhancement, and a credits read that failed inside it must not take
