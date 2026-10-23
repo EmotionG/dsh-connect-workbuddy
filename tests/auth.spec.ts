@@ -1086,6 +1086,43 @@ describe('WorkBuddyCredentialStore rotation override', () => {
     expect((await store.current())?.nickname).toBe('Alpha')
   })
 
+  it('marks the ROTATED account as selected, not the saved choice (reported mismatch)', async () => {
+    // The reporter's screenshot: 「当前选用」 sat under an account that was
+    // rate-limited, while the pill's total belonged to a different account.
+    // `current()` consults `rotatedAccountId` FIRST, so that account is the one
+    // being billed; `accounts()` used to answer from `accountId` alone, which is
+    // the SAVED choice. The usage document takes `credential` from `current()`
+    // and `account.accountId` from this list, so the two could name two accounts
+    // in one document.
+    const store = await twoAccounts()
+    const accounts = await store.accounts()
+    const alpha = accounts.find(account => account.accountName === 'Alpha')
+    const beta = accounts.find(account => account.accountName === 'Beta')
+    // The user's own choice stays Alpha (the documented default when none is set
+    // is the freshest credential, which is Alpha in this fixture).
+    expect(alpha?.selected).toBe(true)
+    store.setRotatedAccount(beta?.id)
+    const rotated = await store.accounts()
+    expect(rotated.find(account => account.accountName === 'Beta')?.selected).toBe(true)
+    expect(rotated.find(account => account.accountName === 'Alpha')?.selected).toBe(false)
+    // Exactly one row may be marked, or the card cannot answer "which one".
+    expect(rotated.filter(account => account.selected)).toHaveLength(1)
+    // Clearing the override hands the mark back to the saved choice, matching
+    // `current()`; the override never wrote `accountId`.
+    store.setRotatedAccount(undefined)
+    expect((await store.accounts()).find(account => account.accountName === 'Alpha')?.selected).toBe(true)
+  })
+
+  it('ignores a rotated id that names no local account, exactly as current() does', async () => {
+    const store = await twoAccounts()
+    store.setRotatedAccount('an-account-that-does-not-exist')
+    const accounts = await store.accounts()
+    // `current()` falls through to Alpha here, so the mark must too — a marker
+    // on nobody would contradict the shim on every request.
+    expect(accounts.filter(account => account.selected)).toHaveLength(1)
+    expect(accounts.find(account => account.accountName === 'Alpha')?.selected).toBe(true)
+  })
+
   it('falls back to the normal selection when the rotated account disappears', async () => {
     const store = await twoAccounts()
     store.setRotatedAccount('an-account-that-does-not-exist')

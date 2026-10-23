@@ -1586,9 +1586,21 @@ export class WorkBuddyCredentialStore {
    * refuses to use is what made the dropdown look healthy while every request
    * failed with 401.
    *
+   * THE POOL'S RUNTIME OVERRIDE IS PART OF `current()`, SO IT IS PART OF THIS.
+   * `current()` consults `rotatedAccountId` FIRST; this method used to ignore it
+   * and answer from `accountId` alone. With the pool on, the two therefore
+   * disagreed on every rotation: the shim billed account B while the card marked
+   * account A — the reporter's screenshot showed 「当前选用」 on a rate-limited
+   * account while the pill's total belonged to the one actually serving. Worse,
+   * the usage document takes its `credential` from `current()` and its
+   * `account.accountId` from this list, so one document could name two accounts.
+   *
    * So an explicit selection that matches NO local account marks nothing as
    * selected (no silent fallback to a different account — see {@link current}).
    * The implicit default is marked only when nothing was explicitly chosen.
+   * A live rotation marker wins over both, mirroring `current()`'s precedence,
+   * and only while it still names a local account — `current()` falls through in
+   * that case, and so does this.
    */
   async accounts(): Promise<WorkBuddyAccountChoice[]> {
     const credentials = await this.readAll()
@@ -1597,6 +1609,15 @@ export class WorkBuddyCredentialStore {
     const selectedExists = hasExplicitSelection
       && credentials.some(credential => workbuddyAccountId(credential) === this.accountId)
     const defaultSelected = this.preferred(credentials)
+    // The SAME precedence `current()` uses, resolved to an id once. Mirroring it
+    // here (rather than calling `current()`) keeps this list a single read of
+    // the credential directory; the fall-through rules are identical: a rotated
+    // id that names no local account is ignored, and an explicit choice that
+    // matches nothing marks nothing.
+    const rotatedId = this.rotatedAccountId !== undefined
+      && credentials.some(credential => workbuddyAccountId(credential) === this.rotatedAccountId)
+      ? this.rotatedAccountId
+      : undefined
     return credentials.map(credential => {
       const id = workbuddyAccountId(credential)
       return {
@@ -1617,11 +1638,16 @@ export class WorkBuddyCredentialStore {
         source: credential.source,
         tokenExpiresAtMs: credential.expiresAtMs,
         filePath: credential.filePath,
-        selected: selectedExists
-          ? id === this.accountId
-          // The default is the account in effect only while the user has not
-          // chosen one; a vanished explicit choice leaves nobody in effect.
-          : !hasExplicitSelection && credential === defaultSelected,
+        // A live rotation is what `current()` returns, so it is what the card
+        // must mark; without it the row and the billed account drifted apart on
+        // every pool rotation.
+        selected: rotatedId !== undefined
+          ? id === rotatedId
+          : selectedExists
+            ? id === this.accountId
+            // The default is the account in effect only while the user has not
+            // chosen one; a vanished explicit choice leaves nobody in effect.
+            : !hasExplicitSelection && credential === defaultSelected,
       }
     })
   }
