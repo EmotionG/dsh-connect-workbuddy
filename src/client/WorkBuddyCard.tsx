@@ -56,7 +56,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { cliBridgeEnabledOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -106,6 +106,27 @@ export type WorkBuddyCardProps =
   & { view?: string }
 
 const POLL_INTERVAL_MS = 60_000
+
+/**
+ * The reasoning tiers the local CodeBuddy CLI accepts for its `--effort` flag.
+ *
+ * Kept in sync with `EFFORT_LEVELS` in `src/cli-bridge/tool.ts` by hand: that
+ * module imports the node runtime, so the client bundle cannot share the
+ * constant — a drifted list here would offer a tier the CLI rejects.
+ */
+const CLI_BRIDGE_EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * The credential-region orders the quick-adjust picker offers for the CLI
+ * route's `regionOrder`.
+ *
+ * The Host builds exactly two regions — `cn` and `global` (see
+ * `REGION_KEYS` in `src/index.ts`), so every meaningful order of that pair
+ * fits in these four presets: a preference, a reversed preference, or a
+ * single-region lock. `''` (uncommitted) renders as the CLI's own default
+ * order, CN first.
+ */
+const CLI_BRIDGE_REGION_ORDERS = ['cn,global', 'global,cn', 'cn', 'global'] as const
 
 /**
  * Tooltip for one model's image checkbox. The box is pre-checked only for
@@ -516,6 +537,22 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
    */
   const [cliBridgeOn, setCliBridgeOn] = useState<boolean | undefined>(undefined)
   const [cliBridgeBusy, setCliBridgeBusy] = useState(false)
+  /**
+   * The quick-adjust pins of the CLI route (model, effort, region order) made
+   * by THIS card instance.
+   *
+   * Each is `undefined` until the user changes its picker here: the value
+   * then renders from the Host's answer (the authoritative mirror) and falls
+   * back to the settings snapshot only when the Host cannot say — the same
+   * rule as `cliBridgeOn`. A failed write reverts to `undefined`, so the
+   * picker shows the COMMITTED value again instead of one that never landed.
+   */
+  const [cliBridgeModel, setCliBridgeModel] = useState<string | undefined>(undefined)
+  const [cliBridgeModelBusy, setCliBridgeModelBusy] = useState(false)
+  const [cliBridgeEffort, setCliBridgeEffort] = useState<string | undefined>(undefined)
+  const [cliBridgeEffortBusy, setCliBridgeEffortBusy] = useState(false)
+  const [cliBridgeRegionOrder, setCliBridgeRegionOrder] = useState<string | undefined>(undefined)
+  const [cliBridgeRegionOrderBusy, setCliBridgeRegionOrderBusy] = useState(false)
   /**
    * Probe results, keyed by region then model id.
    *
@@ -1067,6 +1104,107 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
     } finally {
       if (mounted.current) setCliBridgeBusy(false)
+    }
+  }
+
+  /**
+   * The pinned model / effort of the CLI route, rendered the same way the
+   * switch is: this card's own successful write first, then the Host's answer
+   * (the authoritative mirror), then the settings snapshot. `''` is a real
+   * value on every level: "nothing is pinned, the CLI runs on its own
+   * default".
+   */
+  const cliBridgeModelValue = (): string => {
+    if (cliBridgeModel !== undefined) return cliBridgeModel
+    const fromHost = (statusByRegion[activeRegion] as { cliBridgeModel?: unknown } | undefined)?.cliBridgeModel
+    if (typeof fromHost === 'string') return fromHost
+    return cliBridgeModelOf(settingsScope?.getSnapshot().value)
+  }
+
+  const cliBridgeEffortValue = (): string => {
+    if (cliBridgeEffort !== undefined) return cliBridgeEffort
+    const fromHost = (statusByRegion[activeRegion] as { cliBridgeEffort?: unknown } | undefined)?.cliBridgeEffort
+    if (typeof fromHost === 'string') return fromHost
+    return cliBridgeEffortOf(settingsScope?.getSnapshot().value)
+  }
+
+  /**
+   * Pin the model the local CLI runs on (or `''` for "back to the CLI's
+   * default").
+   *
+   * The write is the same two-writer order as the switch; on a refusal the
+   * optimistic value is REVERTED so the picker renders the committed value
+   * again, and the error surfaces through the card's shared error line.
+   */
+  const pickCliBridgeModel = async (model: string): Promise<void> => {
+    if (settingsScope === undefined) return
+    setCliBridgeModelBusy(true)
+    try {
+      await writeCliBridgeModel(settingsScope, model)
+      if (mounted.current) setCliBridgeModel(model)
+    } catch (error: unknown) {
+      if (mounted.current) {
+        setCliBridgeModel(undefined)
+        setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+      }
+    } finally {
+      if (mounted.current) setCliBridgeModelBusy(false)
+    }
+  }
+
+  /**
+   * Pin the reasoning effort the local CLI runs on, same write-and-revert
+   * rule as {@link pickCliBridgeModel}.
+   */
+  const pickCliBridgeEffort = async (effort: string): Promise<void> => {
+    if (settingsScope === undefined) return
+    setCliBridgeEffortBusy(true)
+    try {
+      await writeCliBridgeEffort(settingsScope, effort)
+      if (mounted.current) setCliBridgeEffort(effort)
+    } catch (error: unknown) {
+      if (mounted.current) {
+        setCliBridgeEffort(undefined)
+        setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+      }
+    } finally {
+      if (mounted.current) setCliBridgeEffortBusy(false)
+    }
+  }
+
+  /**
+   * The credential-region order of the CLI route, rendered with the same
+   * write-first rule. Unlike the model and effort pins, `''` is NOT a
+   * meaningful committed value here: it means "nothing pinned", and the route
+   * then runs on the CLI's own default order — CN first. The picker therefore
+   * shows that default instead of an empty answer.
+   */
+  const cliBridgeRegionOrderValue = (): string => {
+    if (cliBridgeRegionOrder !== undefined) return cliBridgeRegionOrder
+    const fromHost = (statusByRegion[activeRegion] as { cliBridgeRegionOrder?: unknown } | undefined)?.cliBridgeRegionOrder
+    const committed = typeof fromHost === 'string' && fromHost !== ''
+      ? fromHost
+      : cliBridgeRegionOrderOf(settingsScope?.getSnapshot().value)
+    return committed !== '' ? committed : 'cn,global'
+  }
+
+  /**
+   * Pin the credential-region order the local CLI walks, same
+   * write-and-revert rule as {@link pickCliBridgeModel}.
+   */
+  const pickCliBridgeRegionOrder = async (regionOrder: string): Promise<void> => {
+    if (settingsScope === undefined) return
+    setCliBridgeRegionOrderBusy(true)
+    try {
+      await writeCliBridgeRegionOrder(settingsScope, regionOrder)
+      if (mounted.current) setCliBridgeRegionOrder(regionOrder)
+    } catch (error: unknown) {
+      if (mounted.current) {
+        setCliBridgeRegionOrder(undefined)
+        setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+      }
+    } finally {
+      if (mounted.current) setCliBridgeRegionOrderBusy(false)
     }
   }
 
@@ -1766,9 +1904,127 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     </label>
   )
 
+  /**
+   * The two quick-adjust pins of the CLI route, rendered under its switch the
+   * way the seat picker sits under its switch: indented, and only while the
+   * switch is ON — the pickers configure the route the switch turned on, and
+   * they disappear together with it.
+   *
+   * The model options are the active tab's LIVE catalog (`visibleModels`), so
+   * they follow the upstream instead of a hardcoded list; a pinned value the
+   * catalog does not list is still offered as its own option rather than
+   * vanishing from the select. The effort options are the six CLI tiers,
+   * narrowed to the pinned model's `reasoning.supportedEfforts` when that
+   * model is in the catalog and names tiers the CLI knows.
+   */
+  const cliBridgeModelPinned = cliBridgeModelValue()
+  const cliBridgeModelOptions = visibleModels.map(model => ({
+    value: model.id,
+    label: model.name !== model.id ? model.name : model.id,
+  }))
+  if (cliBridgeModelPinned !== '' && !cliBridgeModelOptions.some(option => option.value === cliBridgeModelPinned)) {
+    cliBridgeModelOptions.push({ value: cliBridgeModelPinned, label: cliBridgeModelPinned })
+  }
+
+  const cliBridgeEffortPinned = cliBridgeEffortValue()
+  const pinnedCliBridgeModel = visibleModels.find(model => model.id === cliBridgeModelPinned)
+  const pinnedCliBridgeTiers = pinnedCliBridgeModel?.reasoning?.supportedEfforts
+  const cliBridgeEffortLevels: string[] = ((): string[] => {
+    if (pinnedCliBridgeTiers === undefined || pinnedCliBridgeTiers.length === 0) {
+      return [...CLI_BRIDGE_EFFORT_LEVELS]
+    }
+    const known = CLI_BRIDGE_EFFORT_LEVELS.filter(level => (pinnedCliBridgeTiers as readonly string[]).includes(level))
+    return known.length > 0 ? known : [...CLI_BRIDGE_EFFORT_LEVELS]
+  })()
+  if (cliBridgeEffortPinned !== '' && !cliBridgeEffortLevels.includes(cliBridgeEffortPinned)) {
+    cliBridgeEffortLevels.push(cliBridgeEffortPinned)
+  }
+
+  const cliBridgeRegionOrderPinned = cliBridgeRegionOrderValue()
+  const cliBridgeRegionOrderOptions: { value: string, label: string }[] = CLI_BRIDGE_REGION_ORDERS.map(order => ({
+    value: order,
+    label: order === 'cn,global'
+      ? t('row.cliBridgeRegionOrderCnFirst')
+      : order === 'global,cn'
+        ? t('row.cliBridgeRegionOrderGlobalFirst')
+        : order === 'cn'
+          ? t('row.cliBridgeRegionOrderCnOnly')
+          : t('row.cliBridgeRegionOrderGlobalOnly'),
+  }))
+  if (cliBridgeRegionOrderOptions.every(option => option.value !== cliBridgeRegionOrderPinned)) {
+    cliBridgeRegionOrderOptions.push({ value: cliBridgeRegionOrderPinned, label: cliBridgeRegionOrderPinned })
+  }
+
+  const cliBridgePickers = (
+    <div
+      className="dsm-workbuddy-pref dsm-workbuddy-pref-indent"
+      title={t('row.cliBridgePickersHint')}
+    >
+      <span className="dsm-workbuddy-pref-copy">
+        <span className="dsm-workbuddy-pref-lead dsm-workbuddy-cli-bridge-pickers">
+          <label className="dsm-workbuddy-cli-bridge-pick" title={t('row.cliBridgeModelHint')}>
+            <span className="dsm-workbuddy-pref-label">{t('row.cliBridgeModelLabel')}</span>
+            <select
+              className="dsm-workbuddy-cli-bridge-select"
+              value={cliBridgeModelPinned}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
+              aria-label={t('row.cliBridgeModelAria')}
+              onChange={(event: { currentTarget: { value: string } }) => {
+                void pickCliBridgeModel(event.currentTarget.value)
+              }}
+            >
+              <option value="">{t('row.cliBridgeModelDefault')}</option>
+              {cliBridgeModelOptions.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="dsm-workbuddy-cli-bridge-pick" title={t('row.cliBridgeEffortHint')}>
+            <span className="dsm-workbuddy-pref-label">{t('row.cliBridgeEffortLabel')}</span>
+            <select
+              className="dsm-workbuddy-cli-bridge-select"
+              value={cliBridgeEffortPinned}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
+              aria-label={t('row.cliBridgeEffortAria')}
+              onChange={(event: { currentTarget: { value: string } }) => {
+                void pickCliBridgeEffort(event.currentTarget.value)
+              }}
+            >
+              <option value="">{t('row.cliBridgeEffortDefault')}</option>
+              {cliBridgeEffortLevels.map(level => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </label>
+          <label className="dsm-workbuddy-cli-bridge-pick" title={t('row.cliBridgeRegionOrderHint')}>
+            <span className="dsm-workbuddy-pref-label">{t('row.cliBridgeRegionOrderLabel')}</span>
+            <select
+              className="dsm-workbuddy-cli-bridge-select"
+              value={cliBridgeRegionOrderPinned}
+              disabled={!canWrite || saving || poolBusy || cliBridgeModelBusy || cliBridgeEffortBusy || cliBridgeRegionOrderBusy}
+              aria-label={t('row.cliBridgeRegionOrderAria')}
+              onChange={(event: { currentTarget: { value: string } }) => {
+                void pickCliBridgeRegionOrder(event.currentTarget.value)
+              }}
+            >
+              {cliBridgeRegionOrderOptions.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        </span>
+        <span className="dsm-workbuddy-pref-hint">{t('row.cliBridgePickersHint')}</span>
+      </span>
+    </div>
+  )
+
   const creditPreferences = (
     <div className="dsm-workbuddy-prefs">
       {cliBridgePreference}
+      {/* The picker row is a property of the switch above it, like the seat
+          row is a property of the credits switch: hidden while the route is
+          off, where it would configure nothing. */}
+      {cliBridgeSwitchedOn() ? cliBridgePickers : null}
       {imageToolPreference}
       <label
         className="dsm-workbuddy-pref"

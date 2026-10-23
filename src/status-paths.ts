@@ -1065,6 +1065,31 @@ export type WorkBuddyWebUsage =
      */
     cliBridgeEnabled?: boolean
     /**
+     * The model the OPTIONAL CodeBuddy CLI route runs on, or `''` for
+     * "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL like `cliBridgeEnabled`. Travels on the Host's answer for the
+     * same measured reason: on the stale-mirror 0.1.7 deployment a picker that
+     * read the settings mirror alone would keep showing a pin that had just
+     * been cleared (or had not landed yet).
+     */
+    cliBridgeModel?: string
+    /**
+     * The reasoning effort the OPTIONAL CodeBuddy CLI route runs on, or `''`
+     * for "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeEffort?: string
+    /**
+     * The order the OPTIONAL CodeBuddy CLI route walks the credential
+     * regions in — a comma-separated region list such as `'cn,global'` — or
+     * `''` for "nothing is pinned, the CLI walks its own default order".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeRegionOrder?: string
+    /**
      * The LIVE load level per model id, for the card's icon.
      *
      * A SEPARATE field from `models`, because the card's model list is the
@@ -1130,6 +1155,31 @@ export type WorkBuddyWebUsage =
      */
     cliBridgeEnabled?: boolean
     /**
+     * The model the OPTIONAL CodeBuddy CLI route runs on, or `''` for
+     * "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL like `cliBridgeEnabled`. Travels on the Host's answer for the
+     * same measured reason: on the stale-mirror 0.1.7 deployment a picker that
+     * read the settings mirror alone would keep showing a pin that had just
+     * been cleared (or had not landed yet).
+     */
+    cliBridgeModel?: string
+    /**
+     * The reasoning effort the OPTIONAL CodeBuddy CLI route runs on, or `''`
+     * for "nothing is pinned, the CLI uses its own default".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeEffort?: string
+    /**
+     * The order the OPTIONAL CodeBuddy CLI route walks the credential
+     * regions in — a comma-separated region list such as `'cn,global'` — or
+     * `''` for "nothing is pinned, the CLI walks its own default order".
+     *
+     * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
+     */
+    cliBridgeRegionOrder?: string
+    /**
      * The LIVE load level per model id, for the card's icon.
      *
      * A SEPARATE field from `models`, because the card's model list is the
@@ -1152,6 +1202,24 @@ export type WorkBuddyWebUsage =
      * selection, seeded from the built-in rule the first time it is read.
      */
     offModelIds: readonly string[]
+    /**
+     * Ids of THIS region's roster that this machine first saw inside the
+     * new-model window, oldest first — the data behind the composer pill's
+     * "· N 新模型" segment.
+     *
+     * "新" means "this machine first recorded the id in its catalog", NOT "the
+     * gateway added it": the upstream list carries no listed-since field, so
+     * claiming an upstream fact would be fabricating one. Absent means "nothing
+     * is new right now" or "this Host predates the feature" — never "0".
+     */
+    newModelIds?: readonly string[]
+    /**
+     * A sentence explaining why no new-model readout is shown, present only
+     * when the on-disk first-sighting history is in a version this build cannot
+     * read. Kept separate from the field above so "no new models" is never the
+     * story for a file that simply was not read.
+     */
+    rosterSeenVersionNote?: string
     credits?: WorkBuddyWebCredits
     creditsError?: string
     /**

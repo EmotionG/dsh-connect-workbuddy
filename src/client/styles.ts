@@ -197,6 +197,17 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-credit-position:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
 .dsm-workbuddy-credit-position:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
 .dsm-workbuddy-credit-position:disabled{opacity:.5;cursor:default}
+/* The quick-adjust pins of the CLI route (model, effort): two native selects
+   side by side, the same hairline-bordered rule as the seat picker — content-
+   sized, no chevron build, no own fill. The row rides the switch row's
+   dsm-workbuddy-pref-indent indent, because it answers a question the switch
+   above it poses. */
+.dsm-workbuddy-cli-bridge-pickers{flex-wrap:wrap}
+.dsm-workbuddy-cli-bridge-pick{display:flex;align-items:center;gap:6px;min-width:0}
+.dsm-workbuddy-cli-bridge-select{flex:none;max-width:none;margin-top:0;padding:3px 8px;border:1px solid var(--dsw-alias-border-l2,#3a3d45);border-radius:7px;background:var(--dsw-alias-bg-layer-3,#2a2c33);color:var(--dsw-alias-label-primary,#e6e6e6);font:inherit;font-size:12px;line-height:16px;cursor:pointer}
+.dsm-workbuddy-cli-bridge-select:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed,#777)}
+.dsm-workbuddy-cli-bridge-select:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+.dsm-workbuddy-cli-bridge-select:disabled{opacity:.5;cursor:default}
 /* A card whose provider is switched OFF dims its LABEL AND DOT. The checkbox
  * beside them must stay at full strength, because that checkbox is the only
  * way to switch the region back on — dimming it would grey out the control
@@ -302,6 +313,11 @@ export const WORKBUDDY_CARD_CSS = `
    label to push the row's own controls out of view. */
 .dsm-workbuddy-model-label-promo{max-width:6em;overflow:hidden}
 .dsm-workbuddy-model-label-promo-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The "本机首次见到" marker: the SAME quiet ink as the composer pill's
+   "· N 新模型" segment (label-dimmed), but no chip border and one step smaller,
+   so it reads as a side note beside the promotion chip rather than a second
+   badge competing with the model name. */
+.dsm-workbuddy-model-label-new{flex:none;display:inline-flex;align-items:center;padding:0 5px;border-radius:999px;font-size:10px;line-height:16px;font-weight:600;white-space:nowrap;color:var(--dsw-alias-label-dimmed,rgba(127,127,127,.6))}
 .dsm-workbuddy-busy{flex:none;display:inline-flex;align-items:center;block-size:12px;color:var(--dsm-workbuddy-busy-color);vertical-align:-2px}
 .dsm-workbuddy-busy svg{display:block;block-size:12px;inline-size:auto}
 .dsm-workbuddy-model-promo{flex:none;display:inline-flex;align-items:center;padding:0 7px;border-radius:999px;font-size:10px;line-height:16px;font-weight:600;white-space:nowrap;color:var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe));background:rgba(255,255,255,.08);background:color-mix(in srgb,var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe)) 16%,transparent);border:1px solid transparent;border-color:color-mix(in srgb,var(--dsm-workbuddy-promo-color,var(--dsw-alias-brand-primary,#5686fe)) 40%,transparent)}
@@ -839,6 +855,21 @@ export const WORKBUDDY_COMPOSER_CSS = `
 }
 .dsm-workbuddy-composer-credits-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}
 .dsm-workbuddy-composer-credits-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
+/* The new-model marker ("· 2 新模型") is its OWN button, a sibling of the credit
+   trigger inside the same pill — not text bolted into it, so the row is not one
+   giant click target and a screen reader can take a user straight to "which
+   models". MUTED on purpose, and muted FURTHER than the figure: the credits are
+   what this pill exists to show, and the marker only qualifies them, so
+   "2 新模型" must never out-shout "143 积分". label-dimmed sits a step below the
+   trigger's own label-tertiary for exactly that reason. */
+.dsm-workbuddy-composer-credits-new{
+  appearance:none;display:inline-flex;align-items:center;align-self:stretch;
+  padding:2px 6px;border:0;border-radius:6px;background:transparent;
+  font-size:12px;line-height:18px;color:var(--dsw-alias-label-dimmed,rgba(127,127,127,.6));
+  white-space:nowrap;cursor:pointer;font-variant-numeric:tabular-nums
+}
+.dsm-workbuddy-composer-credits-new:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}
+.dsm-workbuddy-composer-credits-new:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:1px}
 /* The panel is portaled to document.body and positioned from the trigger, so it
    MUST be fixed — otherwise the left/top it measures are ignored and it lands in
    document flow. All material comes from shell tokens so it follows the theme. */
@@ -969,6 +1000,31 @@ export const WORKBUDDY_COMPOSER_CSS = `
 .dsm-workbuddy-composer-panel-dot-ok{background:var(--dsw-alias-state-success-primary,#22a06b)}
 .dsm-workbuddy-composer-panel-dot-error{background:var(--dsw-alias-state-error-primary,#ef4444)}
 .dsm-workbuddy-composer-panel-dot-unknown{background:var(--dsw-alias-label-dimmed,rgba(127,127,127,.5))}
+/* The new-model readout BELOW the foot hairline: the label ("本机首次见到的模型")
+   in the footnote tone and the names in the body tone, so it reads as a note and
+   never as a fourth column of the table above. Sits AFTER the foot because the
+   foot's hairline is the one separator between the table and this block — two
+   hairlines back to back would look like a rendering fault.
+   The names WRAP rather than ellipsise (overflow-wrap:anywhere): Chinese has no
+   spaces to break at, and a hard cut carries no signal that more exists. */
+.dsm-workbuddy-composer-panel-new{margin-top:9px}
+.dsm-workbuddy-composer-panel-new-row{margin:0;font-size:11px;line-height:16px}
+/* The row is FOCUSED (not just scrolled) when the "· N 新模型" button opened the
+   panel, so a screen reader lands on it; the component keeps it out of the tab
+   order with tabIndex={-1}, hence outline:none here. The highlight is a
+   barely-there tint: the row has to be findable, not loud — this is a footnote,
+   not a notification, and the credits table above is the thing to read first. */
+.dsm-workbuddy-composer-panel-new-row-revealed{outline:none;border-radius:4px;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}
+.dsm-workbuddy-composer-panel-new-label{color:var(--dsw-alias-label-tertiary,GrayText)}
+.dsm-workbuddy-composer-panel-new-list{color:var(--dsw-alias-label-secondary,#444);overflow-wrap:anywhere}
+/* One class for BOTH footnotes: the definition of "new", and the version note
+   when the on-disk history was written by a newer build. They are the same
+   KIND of sentence — "what a word means here" — and two classes would let the
+   two drift apart in size or tone. */
+.dsm-workbuddy-composer-panel-note{
+  margin:5px 0 0;font-size:11px;line-height:16px;
+  color:var(--dsw-alias-label-tertiary,GrayText);overflow-wrap:anywhere;
+}
 .dsm-workbuddy-composer-panel-foot{
   display:flex;justify-content:space-between;gap:8px;
   margin-top:9px;padding-top:7px;

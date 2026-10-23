@@ -17,6 +17,7 @@
  */
 
 import { realpathSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import {
   defaultDesktopAuthCandidates,
@@ -34,6 +35,7 @@ import { WORKBUDDY_CONNECT_VERSION } from './version.ts'
 import { isHeartbeatProcessAlive, readHostHeartbeat, workbuddyHostHeartbeatPath } from './host-heartbeat.ts'
 import { piAiRuntimeInfo } from './pi-ai-runtime.ts'
 import { hostPeersInfo } from './host-peers.ts'
+import { describeRosterSeenPayload, isKnownRosterSeenVersion, rosterSeenPath } from './roster-seen-store.ts'
 
 type Action = 'doctor' | 'logout' | 'status'
 
@@ -43,8 +45,12 @@ type Action = 'doctor' | 'logout' | 'status'
  * 3 → 4: added `hostPeers` (issue #47). Consumers that switch on the version
  * see the field appear rather than having to guess whether its absence means
  * "old build" or "no peer".
+ *
+ * 4 → 5: added `rosterSeen`, so a first-sighting history that is corrupt or in
+ * a version this build cannot read is REPORTED rather than silently answered as
+ * "no new models".
  */
-const JSON_SCHEMA_VERSION = 4
+const JSON_SCHEMA_VERSION = 5
 
 /** Both regions, in reporting order. */
 const REGIONS: readonly WorkBuddyRegion[] = ['cn', 'global']
@@ -94,6 +100,50 @@ function makeAnyStore(): WorkBuddyCredentialStore {
   return new WorkBuddyCredentialStore({ refresh: credential => client.refreshToken(credential) })
 }
 
+/** One region's first-sighting history, as `doctor` reports it. */
+type RosterSeenDoctorSummary = {
+  path: string
+  present: boolean
+  readable: boolean
+  versionKnown?: boolean
+  version?: number
+  ids?: number
+  fresh?: number
+}
+
+/**
+ * Read one region's first-sighting history and describe its payload.
+ *
+ * Read-only: this CLI never writes history, so running `doctor` cannot change
+ * who counts as new. The point is that a corrupt file or one written by a newer
+ * build is REPORTED here — without this, both would surface as "no new models",
+ * which is a statement about this machine's catalogue and never a file.
+ */
+async function describeRosterSeen(region: WorkBuddyRegion): Promise<RosterSeenDoctorSummary> {
+  const path = rosterSeenPath(region)
+  let raw: unknown = null
+  try {
+    raw = JSON.parse(await readFile(path, 'utf8')) as unknown
+  } catch {
+    // Missing file and malformed JSON are the same here: nothing recorded yet.
+    raw = null
+  }
+  const described = describeRosterSeenPayload(raw)
+  if (described === null) {
+    return { path, present: raw !== null, readable: false }
+  }
+  const version = (raw as Record<string, unknown>)['version']
+  return {
+    path,
+    present: true,
+    readable: true,
+    versionKnown: described.versionKnown,
+    ...typeof version === 'number' ? { version } : {},
+    ids: described.ids,
+    fresh: described.fresh,
+  }
+}
+
 async function doctor(jsonOutput: boolean): Promise<number> {
   const anyStore = makeAnyStore()
   const desktopPresent = await anyStore.desktopFilePresent()
@@ -131,6 +181,7 @@ async function doctor(jsonOutput: boolean): Promise<number> {
    * user can tell the two states apart without reading a stack trace.
    */
   const hostPeers = await hostPeersInfo()
+  const rosterSeen = await Promise.all(REGIONS.map(async region => ({ region, summary: await describeRosterSeen(region) })))
   const report = {
     schemaVersion: JSON_SCHEMA_VERSION,
     package: 'dsh-connect-workbuddy',
@@ -199,6 +250,10 @@ async function doctor(jsonOutput: boolean): Promise<number> {
       cn: FALLBACK_WORKBUDDY_MODELS.length,
       global: FALLBACK_WORKBUDDY_MODELS_GLOBAL.length,
     },
+    // The first-sighting histories behind the "· N 新模型" segment. Reported so
+    // a file this build cannot read is VISIBLE: without this block it would
+    // surface as "no new models", which is a statement about the catalogue.
+    rosterSeen: Object.fromEntries(rosterSeen.map(({ region, summary }) => [region, summary])),
     hints: [
       ...anySignedIn ? [] : ['Sign in once in the WorkBuddy desktop app (either region), then run status again.'],
       ...desktopPresent ? [] : [`No WorkBuddy desktop auth file at the expected path; set ${WORKBUDDY_AUTH_FILE_ENV} if it lives elsewhere.`],
@@ -209,6 +264,17 @@ async function doctor(jsonOutput: boolean): Promise<number> {
       ...piAi.generation === 'legacy' && piAi.resolvedLocally
         ? [`This plugin resolves pi-ai ${piAi.version ?? '(unreadable version)'} (the 0.85 context shape) while DSH 0.2.0+ hosts normalize with 0.87; the adapter bridges that gap, but if tools still misbehave, remove any nested pi-ai copy so the plugin resolves the host's.`]
         : [],
+      ...rosterSeen.flatMap(({ region, summary }) => {
+        if (!summary.readable) {
+          return summary.present
+            ? [`${REGION_LABELS[region]} first-sighting history is present but unreadable (${summary.path}); remove it to reseed on the next reconcile.`]
+            : []
+        }
+        if (summary.versionKnown === false) {
+          return [`${REGION_LABELS[region]} first-sighting history is version ${summary.version === undefined ? 'unknown' : summary.version}, which this build cannot read (${summary.path}); it is answered as empty, so the pill shows no new-model marker.`]
+        }
+        return []
+      }),
     ],
   }
   if (jsonOutput) {
@@ -228,6 +294,13 @@ async function doctor(jsonOutput: boolean): Promise<number> {
         ...accounts.map(account => `  - ${account.accountName === '' ? '(unnamed)' : account.accountName} (${account.id})${account.selected ? ' [selected]' : ''} expires ${new Date(account.tokenExpiresAtMs).toISOString()}`),
       ]),
       `Static fallback models: CN ${report.fallbackModels.cn}, Global ${report.fallbackModels.global}`,
+      ...REGIONS.map(region => {
+        const summary = report.rosterSeen[region]
+        if (summary === undefined) return `New-model history (${REGION_LABELS[region]}): not available`
+        if (!summary.readable) return `New-model history (${REGION_LABELS[region]}): ${summary.present ? 'unreadable' : 'not started'} (${summary.path})`
+        if (summary.versionKnown === false) return `New-model history (${REGION_LABELS[region]}): version ${summary.version === undefined ? 'unknown' : summary.version} not readable (${summary.path})`
+        return `New-model history (${REGION_LABELS[region]}): ${summary.ids ?? 0} recorded, ${summary.fresh ?? 0} new`
+      }),
       ...report.hints.map(hint => `Hint: ${hint}`),
       '',
     ].join('\n'))

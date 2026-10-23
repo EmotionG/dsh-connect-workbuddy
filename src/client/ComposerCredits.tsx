@@ -48,11 +48,12 @@ import {
   withWorkBuddyRegionAndAction,
 } from '../status-paths.ts'
 import { readNdjson } from './ndjson.ts'
+import { normalizeNewModelIds } from './new-model-ids.ts'
 import { poolFailureText } from './pool-state.ts'
 import { writeAccountSlot } from './account-selection.ts'
 import { formatCredits } from './credit-format.ts'
 import { WORKBUDDY_COMPOSER_CSS } from './styles.ts'
-import type { WorkBuddyWebAccountCredit, WorkBuddyWebRegion, WorkBuddyWebUsage } from '../status-paths.ts'
+import type { WorkBuddyWebAccountCredit, WorkBuddyWebModel, WorkBuddyWebRegion, WorkBuddyWebUsage } from '../status-paths.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 
@@ -148,6 +149,36 @@ export const WORKBUDDY_COMPOSER_PROVIDERS: Readonly<Record<string, WorkBuddyWebR
 function creditsOf(usage: WorkBuddyWebUsage): number | undefined {
   if (usage.status !== 'signed-in') return undefined
   return usage.credits?.total
+}
+
+/**
+ * The "· N 新模型" ids out of one usage document, in first-sighted order.
+ *
+ * The filters live in `normalizeNewModelIds`, shared with the host picker's row
+ * marker, so the two surfaces cannot disagree about which models are new.
+ *
+ * Three filters, none of them optional:
+ * 1. Not a signed-in document answers `[]` rather than throwing — a Host that
+ *    predates the feature, or a degraded document, must cost the pill its
+ *    credits readout, and it must not cost it a crash.
+ * 2. A non-string, or an id that is only whitespace, is dropped.
+ * 3. Duplicates are dropped. The Host already dedupes, but the client must not
+ *    trust a peer: a duplicated id would turn "2 新模型" into two rows naming
+ *    the same model and stop the count meaning anything.
+ */
+function newModelIdsOf(usage: WorkBuddyWebUsage | undefined): string[] {
+  if (usage === undefined || usage.status !== 'signed-in') return []
+  return normalizeNewModelIds(usage.newModelIds)
+}
+
+/**
+ * The display name for a first-seen id, or the id itself when the catalog does
+ * not list it — a model that left the roster can still be inside the new
+ * window, and showing its id is a lie-free answer to "which model".
+ */
+function modelNameOf(models: readonly WorkBuddyWebModel[], id: string): string {
+  const found = models.find(model => model.id === id)
+  return found === undefined || found.name.trim() === '' ? id : found.name
 }
 
 /**
@@ -254,6 +285,41 @@ export function ComposerCredits(props: ComposerCreditsProps) {
   const mounted = useRef(true)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+  /** Whether the panel was opened BY the "· N 新模型" button (so it answers the
+   *  question the reader just asked, instead of just opening on the table). */
+  const [revealed, setRevealed] = useState(false)
+  const newRowRef = useRef<HTMLParagraphElement | null>(null)
+
+  /**
+   * The "· N 新模型" button is an affordance for the reader who wants to know
+   * WHICH models: it opens the panel and brings the new-model row into view.
+   *
+   * The Host owns the model picker and offers this plugin no API to open it or
+   * steer its selection, so the honest answer is the panel's own row — the one
+   * surface in the pill that names them. The rows themselves are marked "新" in
+   * the picker by `WorkBuddyModelLabel`, reading the same ids.
+   *
+   * The row is focused (not just scrolled) because that is what a screen reader
+   * needs to keep its place; it is pulled out of the tab order so Tab does not
+   * stop on it.
+   */
+  useEffect(() => {
+    if (!open) {
+      if (revealed) setRevealed(false)
+      return
+    }
+    if (!revealed) return
+    const row = newRowRef.current
+    if (row === null) return
+    try {
+      row.scrollIntoView({ block: 'nearest' })
+    } catch {
+      // Scrolling is the enhancement; the focus below is the contract. A test
+      // environment (jsdom) does not implement `scrollIntoView`, and the row
+      // must still be reachable there.
+    }
+    row.focus()
+  }, [open, revealed])
 
   useEffect(() => {
     mounted.current = true
@@ -581,6 +647,23 @@ export function ComposerCredits(props: ComposerCreditsProps) {
   const valueText = total === undefined ? '—' : formatCredits(total)
   const label = t(activeRegion === 'cn' ? 'composer.pointsCn' : 'composer.pointsGlobal')
 
+  // The "· N 新模型" segment: which ids of this region's roster THIS machine
+  // first saw inside the new-model window, as names. Rendered ONLY when
+  // non-empty — a permanently-on "0 新模型" is background noise, and the value
+  // is entirely in the rounds where there is something to say.
+  const newModelIds = newModelIdsOf(usage)
+  const newModelNames = newModelIds.map(id => modelNameOf(signedIn?.models ?? [], id))
+  // The trigger's hover answer: the first few names, then an ellipsis. Names,
+  // not ids, because the count in the pill is a number and this is the one place
+  // a reader can learn WHICH.
+  const newModelTooltip = newModelNames.length === 0
+    ? undefined
+    : `${t('composer.newModelsTitle')}${newModelNames.slice(0, 3).join(t('composer.newModelsSep'))}${newModelNames.length > 3 ? '…' : ''}`
+  // Present only when the on-disk first-sighting history is in a version this
+  // build cannot read, so "no new models" is never the story for a file that was
+  // simply not read.
+  const rosterSeenNote = signedIn?.rosterSeenVersionNote
+
   /**
    * The table's rows: every account in this region, with its balance.
    *
@@ -646,6 +729,20 @@ export function ComposerCredits(props: ComposerCreditsProps) {
       >
         {label} · {valueText}
       </button>
+      {newModelNames.length === 0
+        ? null
+        : (
+          <button
+            type="button"
+            className="dsm-workbuddy-composer-credits-new"
+            aria-haspopup="dialog"
+            aria-expanded={open}
+            title={newModelTooltip}
+            onClick={() => { setRevealed(true); setOpen(true) }}
+          >
+            · {newModelNames.length} {t('composer.newModels')}
+          </button>
+        )}
       {open && createPortal(
         <div
           ref={panelRef}
@@ -797,6 +894,31 @@ export function ComposerCredits(props: ComposerCreditsProps) {
               {t('composer.lastRefresh')} {lastRefresh === undefined ? '—' : formatClock(lastRefresh)}
             </span>
           </div>
+          {newModelNames.length === 0 && rosterSeenNote === undefined
+            ? null
+            : (
+                <div className="dsm-workbuddy-composer-panel-new">
+                  {newModelNames.length === 0
+                    ? null
+                    : (
+                        <>
+                          <p
+                            ref={newRowRef}
+                            tabIndex={-1}
+                            aria-label={`${t('composer.newModelsTitle')}${newModelNames.join(t('composer.newModelsSep'))}`}
+                            className={revealed
+                              ? 'dsm-workbuddy-composer-panel-new-row dsm-workbuddy-composer-panel-new-row-revealed'
+                              : 'dsm-workbuddy-composer-panel-new-row'}
+                          >
+                            <span className="dsm-workbuddy-composer-panel-new-label">{t('composer.newModelsRow')}</span>
+                            <span className="dsm-workbuddy-composer-panel-new-list">{newModelNames.join(t('composer.newModelsSep'))}</span>
+                          </p>
+                          <p className="dsm-workbuddy-composer-panel-note">{t('composer.newModelsNote')}</p>
+                        </>
+                      )}
+                  {rosterSeenNote === undefined ? null : <p className="dsm-workbuddy-composer-panel-note">{rosterSeenNote}</p>}
+                </div>
+              )}
           {failed ? <p className="dsm-workbuddy-composer-panel-error" role="status">{t('composer.refreshFailed')}</p> : null}
           {testError === undefined
             ? null
