@@ -2321,16 +2321,19 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                       siblingBusy={saving || togglingRegion !== undefined}
                       onBusyChange={setPoolBusy}
                       // Returns the promise so the pool section can AWAIT the
-                      // fresh props before discarding its draft (A-8). With
-                      // `void` here the await resolved immediately and the
-                      // window stayed open.
+                      // display refresh that follows a verified write (A-8).
                       //
-                      // And it answers with a BOOLEAN: `refreshUsage` reports a
-                      // failed fetch by RESOLVING (undefined) rather than
-                      // throwing, so the section cannot infer "the fresh props
-                      // arrived" from "it did not throw". `true` only when the
-                      // snapshot was actually applied; a superseded or failed
-                      // re-read resolves `false` and the draft is kept.
+                      // The draft is NO LONGER held until this resolves (5.8.0,
+                      // issue #131): it is discarded the moment the write
+                      // verifies, because the re-read is a network round trip and
+                      // "saving…" stayed on over settings that had already
+                      // landed. So the boolean below drives the STALE NOTICE, not
+                      // a draft decision — `refreshUsage` reports a failed fetch
+                      // by RESOLVING (undefined) rather than throwing, so `true`
+                      // here means "the snapshot was actually applied" and
+                      // `false` means "stored, display not refreshed"; `false`
+                      // renders `row.poolSavedStaleRefresh` and must not be
+                      // reported as a save failure.
                       onSaved={async () => (await refreshUsage(activeRegion)) !== undefined}
                       // Hands the PROMISE back, not a fire-and-forget call: the
                       // pool keeps its row veil up until the fresh snapshot has landed

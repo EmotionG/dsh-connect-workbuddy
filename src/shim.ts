@@ -1957,19 +1957,29 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       if (result.kind === 'account_restricted') {
         // The upstream names the CREDENTIAL, not the request: 11140 + 「账号存在
         // 异常行为，已被限制使用」. Another account can serve, so this class is
-        // failover-worthy and the pool records it as a measurement. The appeal
-        // sentence is carried through because upstream offers no in-band path
-        // to lift it (issue #127).
+        // failover-worthy and the pool records it as a measurement (issue #127).
+        //
+        // TWO CLAIMS THIS SENTENCE USED TO MAKE, BOTH FALSE (review #127):
+        //  · 「重新登录」lifts it — it does not. The pool's account id is the
+        //    sha256 of `uin`/`uid` (`auth.ts`), so a re-login produces the SAME id
+        //    and the stored measurement still applies; nothing clears it. The
+        //    restriction is the upstream's verdict about the account, which a new
+        //    token on this machine cannot answer.
+        //  · the upstream's `displayTips` is advice for THIS failure — it is not
+        //    necessarily. The `11128` family is measured sharing ONE misleading
+        //    `displayTips` across three different gates, so a tips string on a
+        //    `11140` body is the same genre of boilerplate, and relaying it under
+        //    「上游提示：」 would tell a benched account to go edit its prompt.
         const detail = result.detail
         const meta: string[] = ['账号被上游限制使用']
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
         const lead = detail?.displayMsg ?? clippedUpstreamText(result.message, 200)
-        const appeal = detail?.tips === undefined ? '' : `上游提示：${detail.tips}`
         const message =
           `${lead}（${meta.join('，')}）${note}${why}。该账号已被 WorkBuddy 上游按账号限制，`
-          + '与本次请求内容、网络和额度无关；插件会记录该测量并尝试其他可用账号，'
-          + `但该账号需要先在 WorkBuddy 官方渠道申诉或重新登录${appeal === '' ? '' : `（${appeal}）`}`
+          + '与本次请求内容、网络和额度无关；插件会记录该测量并改用其他可用账号。'
+          + '该限制是上游对该账号的判定：重新登录不改变插件认的这个账号，'
+          + '需要 WorkBuddy 官方渠道解除后，在卡片上手动「测试」该账号才会回池'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }
@@ -1993,8 +2003,14 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         if (detail?.upstreamCode !== undefined) meta.push(`code ${detail.upstreamCode}`)
         if (detail?.requestId !== undefined) meta.push(`requestId ${detail.requestId}`)
         const message =
-          `${lead}（${meta.join('，')}）${note}。该请求被 WorkBuddy 服务端策略拒绝，重新登录不会解决；` +
-          '可在 WorkBuddy 桌面端用同一账号验证，或切换区域/账号后重试'
+          // 「重新登录不会解决」was stated flatly, but `11140` is now known to hold
+          // TWO meanings and the restriction half IS answered by re-authenticating
+          // upstream. The matcher for that half is a sentence in the localized
+          // fields, so when it misses, this reply would push the user away from the
+          // one remedy that works — hence the hedge.
+          `${lead}（${meta.join('，')}）${note}。该请求被 WorkBuddy 服务端策略拒绝；` +
+          '若上游的说明指向内容，重新登录不会解决，可在 WorkBuddy 桌面端用同一账号验证；' +
+          '若它指向账号本身，则需要走官方渠道处理，插件会在遇到该措辞时另行标明'
         writeOpenAIError(res, KIND_STATUS[result.kind], result.kind, message, hostErrorCode(result.kind))
         return
       }

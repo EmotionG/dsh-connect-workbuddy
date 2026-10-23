@@ -100,8 +100,13 @@ describe('save keeps the draft unless the write AND the re-read both verify (A-8
     // The write already committed the draft; the stale-refresh notice is only
     // about the display catching up (issue #131).
     expect(m.button('row.poolSaved').disabled, 'nothing left to save — Save must be disabled').toBe(true)
-    // The stale-refresh notice names the DISPLAY problem (the write landed).
-    expect(m.text()).toContain('row.poolSaveFailed|message=row.poolSavedStaleRefresh')
+    // The stale-refresh notice names the DISPLAY problem (the write landed), and
+    // it must NOT be wrapped in 「保存失败：」 — that framing told the user the
+    // opposite of what had happened, since the setting was already verified on
+    // disk (issue #131).
+    expect(m.text()).toContain('row.poolSavedStaleRefresh')
+    expect(m.text()).not.toContain('row.poolSaveFailed')
+    expect(m.container.querySelector('[role="alert"]')).toBeNull()
     await m.unmount()
   })
 

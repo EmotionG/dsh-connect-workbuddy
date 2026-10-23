@@ -43,6 +43,14 @@ const SELF_EXPLANATORY: ReadonlySet<WorkBuddyWebProbeOutcome> = new Set([
   'rate-limited',
   'model-busy',
   'out-of-credit',
+  // `account-restricted` belongs here for the same reason `model-busy` does, and
+  // its contradiction is sharper: the label says the ACCOUNT is restricted, while
+  // the recorded body's `msg` for the whole `11140` family is
+  // `request illegal` — "the REQUEST was illegal". Printing both in one 72px cell
+  // asserts two opposite conclusions about two different subjects. The label
+  // already carries the remedy (appeal upstream, then re-test), so the JSON
+  // sentence adds no evidence the label did not use. (issue #127 review)
+  'account-restricted',
 ])
 
 /**

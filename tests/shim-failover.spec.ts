@@ -179,6 +179,41 @@ describe('pool failover: retrying a failed chat on another account', () => {
     }
   })
 
+  it('fails over an account the upstream RESTRICTED, and benches it (issue #127)', async () => {
+    // The other half of the #127 split, which had no test at all: mutating
+    // `isFailoverWorthy` to drop `account_restricted` left the whole suite green,
+    // so nothing pinned the one behaviour that makes this class differ from a
+    // content-policy refusal. A restricted credential is the ACCOUNT's problem —
+    // the next member may well answer — whereas `policy_reject` on the same
+    // `11140` code is a request-side refusal that another account cannot fix.
+    const other = credentialFor('other-restricted')
+    const seen: string[] = []
+    shim = mount({
+      others: [other],
+      chatStream: async credential => {
+        seen.push(credential.uin ?? '')
+        return seen.length === 1
+          ? {
+            ok: false,
+            status: 400,
+            kind: 'account_restricted',
+            message: '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}',
+          }
+          : ok()
+      },
+      failover: async () => other,
+    })
+    await shim.ready
+    const response = await chat(shim)
+    expect(seen, 'a restricted account is the account\u2019s problem, so the next member is tried').toEqual([
+      'selected',
+      'other-restricted',
+    ])
+    expect(response.status).toBe(200)
+    await shim.close()
+    shim = undefined
+  })
+
   it('does NOT walk the pool for a MODEL-scoped throttle (issue #56)', async () => {
     // The 14003 limit belongs to the model, so a second account answers the same
     // 14003 one round trip later — and each attempt writes a rate-limited

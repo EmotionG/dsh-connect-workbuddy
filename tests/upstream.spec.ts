@@ -187,6 +187,94 @@ describe('classifyUpstreamError', () => {
     expect(classifyUpstreamError(403, restrictedEn)).toBe('account_restricted')
   })
 
+  it('requires the 11140 code before benching an account, whatever else the body says (issue #127)', () => {
+    // The restriction verdict is the heaviest in the classifier: it fails over AND
+    // benches the account with NO cooldown, so only a re-authorisation returns it.
+    // The phrase alone must never reach it. The EXPECTED values below are the
+    // v5.7.0 baseline, read off the real classifier rather than from the marker
+    // lists: 5.7.0 had no phrase check at all, so each of these fell through to
+    // its own verdict, and that is exactly where it must still land. A body that
+    // merely MENTIONS the sentence under a credit / auth / busy / generic status is
+    // about something else entirely. Before the code half was required, every one
+    // of these returned `account_restricted` — one passing 500 that happened to
+    // contain the words would have taken an account permanently out of the pool.
+    const phrase = '账号存在异常行为，已被限制使用'
+    const en = 'restricted due to unusual activity'
+    const cases: [string, number, string, string][] = [
+      ['11128 + phrase', 400, `{"code":11128,"msg":"unapproved channel","displayMsg":{"zh":"${phrase}"}}`, 'channel_reject'],
+      ['402 credit + phrase', 402, `{"code":14018,"msg":"Credits exhausted","displayMsg":{"zh":"${phrase}"}}`, 'hard_credit'],
+      ['401 token + phrase', 401, `{"code":401,"msg":"token invalid","displayMsg":{"zh":"${phrase}"}}`, 'client'],
+      ['429 busy + phrase', 429, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"${phrase}"}}`, 'model_busy'],
+      ['500 + english phrase', 500, `{"error":"internal","detail":"${en}, retry later"}`, 'server'],
+      ['400 + phrase, no code', 400, `{"error":"gateway","detail":"${phrase}"}`, 'client'],
+    ]
+    for (const [label, status, body, expected] of cases) {
+      expect(classifyUpstreamError(status, body), label).toBe(expected)
+    }
+  })
+
+  it('still benches a 11140 restriction carried on any status', () => {
+    // The code half is the requirement, not the HTTP status: the same restriction
+    // has been observed on 400 and 403, and a status-keyed rule would miss it.
+    const body = '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}'
+    for (const status of [400, 401, 403]) {
+      expect(classifyUpstreamError(status, body), `status=${status}`).toBe('account_restricted')
+    }
+  })
+
+  it('reads the business code from the envelope, not from one JSON spelling (issue #127 review)', async () => {
+    // Each of these was measured FAILING after the bare `request illegal` marker
+    // was dropped: the policy answer then depended on the compact text
+    // `"code":11140`, so a space, a string code or a nested envelope matched
+    // nothing, fell through to `client`, and `outcomeOfFailure(403, …)` reported
+    // `credential-rejected` — a HEALTHY account marked as signed out. The verdict
+    // is read from the parsed field now, so the spelling cannot decide it.
+    const bodies = [
+      ['compact', '{"code":11140,"msg":"request illegal"}'],
+      ['spaced', '{"code": 11140,"msg":"request illegal"}'],
+      ['string code', '{"code":"11140","msg":"request illegal"}'],
+      ['nested error.data', '{"error":{"data":{"code":11140,"msg":"request illegal"}}}'],
+      ['pretty-printed', '{\n  "code": 11140,\n  "msg": "request illegal"\n}'],
+    ] as const
+    for (const [label, body] of bodies) {
+      expect(classifyUpstreamError(403, body), label).toBe('policy_reject')
+    }
+    // The inverse: the digits must not be found in an UNRELATED field either. A
+    // request id is hexadecimal and can contain `11140` by coincidence — the
+    // reason the original marker used the quoted-key form at all. Reading the
+    // parsed `code` field keeps that protection without depending on spacing.
+    expect(classifyUpstreamError(429, '{"code":6004,"requestId":"aabb11140ccdd","msg":"usage exceeds frequency limit"}')).toBe('soft_rate')
+    expect(classifyUpstreamError(403, '{"code":6004,"requestId":"11140"}')).not.toBe('policy_reject')
+
+    const { outcomeOfFailure } = await import('../src/probe.ts')
+    for (const [label, body] of bodies) {
+      expect(outcomeOfFailure(403, body), label).not.toBe('credential-rejected')
+    }
+  })
+
+  it('matches the restriction sentence through escapes and line breaks (issue #127 review)', () => {
+    // A proxy or re-serializer that escapes non-ASCII (Python's json.dumps
+    // default) writes 账号… as \u8d26…, which a raw-text scan never matches; a
+    // line break inside the English sentence survives as `\n` for the same
+    // reason. Both silently downgraded a real restriction to a content refusal.
+    const escaped = '{"code":11140,"displayMsg":{"zh":"'
+      + '\\u8d26\\u53f7\\u5b58\\u5728\\u5f02\\u5e38\\u884c\\u4e3a\\uff0c\\u5df2\\u88ab\\u9650\\u5236\\u4f7f\\u7528"}}'
+    expect(classifyUpstreamError(403, escaped)).toBe('account_restricted')
+    const broken = '{"code":11140,"displayMsg":{"en":"restricted due to\\nunusual activity"}}'
+    expect(classifyUpstreamError(403, broken)).toBe('account_restricted')
+    const zeroWidth = '{"code":11140,"displayMsg":{"zh":"账号存在\\u200b异常行为，已被限制使用"}}'
+    expect(classifyUpstreamError(403, zeroWidth)).toBe('account_restricted')
+  })
+
+  it('keeps a risk-control throttle with restriction wording OFF the bench (issue #127 review)', () => {
+    // 6004 says "temporarily restricted due to unusual activity, retry later":
+    // the SAME English sentence as the account bench, on a failure that is
+    // explicitly temporary. Text alone would have benched the account for good.
+    const throttle = '{"code":6004,"msg":"Your account was temporarily restricted due to unusual activity. Please retry later."}'
+    expect(classifyUpstreamError(429, throttle)).toBe('soft_rate')
+    expect(classifyUpstreamError(403, '<html>restricted due to unusual activity</html>')).toBe('client')
+  })
+
   it('keeps a benign 403 a generic client error', () => {
     expect(classifyUpstreamError(403, 'forbidden')).toBe('client')
   })

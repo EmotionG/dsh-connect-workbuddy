@@ -582,6 +582,69 @@ const CREDITS_EXHAUSTED_CODE = '"code":14018'
 const SESSION_DEAD_MARKERS: readonly string[] = ['Offline user session not found', '12153']
 
 /**
+ * The business code a failure envelope states, or `undefined` when it names none.
+ *
+ * WHY PARSE RATHER THAN SEARCH THE TEXT. The five marker constants below this
+ * file used to look for the quoted-key form (`'"code":11140'`) with `includes`,
+ * which is exact only for ONE serialization: measured behaviour of the real
+ * gateway is compact JSON, so it worked. It is nonetheless a spelling test
+ * dressed up as a code test, and two spellings that a proxy, a re-serializer or
+ * a nested envelope can produce fell through it — `{"code": 11140}` (a space) and
+ * `"code":"11140"` (a string). The consequence of a MISS is not neutral: with no
+ * policy marker and no channel marker, the body classifies as `client`, and
+ * `outcomeOfFailure(403, …)` then answers `credential-rejected`, which marks a
+ * perfectly healthy account as SIGNED OUT and benches it (issue #127 review).
+ *
+ * Reading the field is exact for all three spellings and for the nested
+ * `{"error":{"data":{"code":…}}}` shape this file already documents at the
+ * credit markers. `JSON.parse` also decodes `\uXXXX` escapes, which raw-text
+ * matching cannot see (see {@link isAccountRestrictedBody}).
+ *
+ * The body arrives TRUNCATED to {@link ERROR_BODY_LIMIT}, so a parse failure is
+ * normal for a large HTML error page and falls back to the compact/spaced text
+ * forms rather than reporting no code. A request id is hexadecimal and can
+ * contain `11140` by coincidence, which is why the fallback anchors on the
+ * quoted key and a digit boundary rather than the bare digits.
+ */
+function businessCodeOf(body: string): number | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body) as unknown
+  } catch {
+    const match = /"code"\s*:\s*"?(\d{4,6}(?!\d))/u.exec(body)
+    return match?.[1] === undefined ? undefined : Number(match[1])
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const raw = parsed as Record<string, unknown>
+  const direct = asBusinessCode(raw['code'])
+  if (direct !== undefined) return direct
+  // The documented credit shape nests its verdict: {"error":{"data":{"code":…}}}.
+  const error = raw['error']
+  if (typeof error === 'object' && error !== null) {
+    const data = (error as Record<string, unknown>)['data']
+    if (typeof data === 'object' && data !== null) {
+      const nested = asBusinessCode((data as Record<string, unknown>)['code'])
+      if (nested !== undefined) return nested
+    }
+  }
+  const data = raw['data']
+  if (typeof data === 'object' && data !== null) {
+    return asBusinessCode((data as Record<string, unknown>)['code'])
+  }
+  return undefined
+}
+
+/** One code field, accepting the number and the string spelling alike. */
+function asBusinessCode(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  if (typeof value === 'string' && /^\d{4,6}$/u.test(value.trim())) return Number(value.trim())
+  return undefined
+}
+
+/** The `11140` content-policy family, whatever the envelope's JSON spelling is. */
+const CONTENT_POLICY_CODE = 11140
+
+/**
  * Content-policy refusal markers from the chat gateway. The quoted-key form
  * avoids substring hits inside unrelated values (request ids are hex and can
  * contain `11140` by coincidence).
@@ -592,26 +655,97 @@ const SESSION_DEAD_MARKERS: readonly string[] = ['Offline user session not found
  * never ran, the reply changed 400 to 403, and users were told to switch
  * accounts for a request-side refusal (issue #127).
  */
-const POLICY_REJECT_MARKERS: readonly string[] = ['"code":11140']
+function isContentPolicyBody(body: string): boolean {
+  return businessCodeOf(body) === CONTENT_POLICY_CODE
+}
 
 /**
  * Whether a failure body is the account-restriction member of the `11140`
  * family (issue #127).
  *
- * Upstream reuses `msg: "request illegal"` for a content-policy refusal and an
- * account restriction, so the code alone cannot choose a failover policy. Both
- * measured `displayMsg` spellings are recognised: the Chinese sentence and its
- * English translation. A body with neither spelling stays `policy_reject`,
- * because inventing an account verdict from the shared code would bench an
- * account over a request-side refusal.
+ * TWO HALVES MUST BOTH HOLD — the business code `"code":11140` AND one of the
+ * restriction spellings. This is the same rule this file already applies to the
+ * `11128` family after issue #127: a bare sentence never classifies anything,
+ * because it is text that can appear anywhere.
+ *
+ * WHY THE CODE HALF IS NOT OPTIONAL HERE. The verdict is the heaviest in the
+ * classifier: `account_restricted` is failover-worthy AND benches the account
+ * with NO cooldown — nothing but a re-authorisation returns it. Measured before
+ * the code was required (see `classifyUpstreamError`), a body that merely
+ * MENTIONS the phrase classified as `account_restricted` whatever else it was:
+ * a 402 credit exhaustion, a 401 dead session, and even a 500 whose generic
+ * `retry later` text happened to contain the words. Each of those would have
+ * taken an account permanently out of the pool for a condition that was about
+ * the wallet, the token, or the platform. The code half is what keeps a heavy,
+ * non-self-healing verdict pinned to the one business code that states it.
+ *
+ * Both measured `displayMsg` spellings are recognised (the Chinese sentence and
+ * its English translation). A `11140` body carrying neither stays
+ * `policy_reject`: inventing an account verdict from the shared code alone would
+ * bench an account over a request-side refusal — the mirror-image error, which
+ * the code half must not be allowed to fix by loosening the phrase half.
  */
 const ACCOUNT_RESTRICTED_MARKERS: readonly string[] = [
   '账号存在异常行为',
   'restricted due to unusual activity',
 ]
 
+/**
+ * Whether a failure body is the account-restriction member of the `11140` family.
+ *
+ * Three separations make this decision safe, and all three were earned by the
+ * issue #127 review:
+ *
+ * 1. **Code-gated.** Only a `11140` envelope can reach the phrase test
+ *    ({@link isContentPolicyBody}). The phrase alone is not evidence about the
+ *    account: a risk-control throttle, a credit notice or an HTML edge page can
+ *    carry the same sentence, and this verdict is the only IRREVERSIBLE one in
+ *    the classifier — it benches the account with no cooldown.
+ * 2. **Decoded text.** The match runs on `displayMsg` / `displayTips` / `msg`
+ *    after `JSON.parse`, not on the raw bytes. An upstream or proxy that
+ *    serializes non-ASCII as `\uXXXX` (Python's `json.dumps` default) would
+ *    otherwise never match the Chinese sentence, and a restriction would silently
+ *    degrade to a content refusal. Matching the FIELD rather than the whole body
+ *    also stops the phrase in an unrelated field from deciding the class.
+ * 3. **Whitespace-normalized.** A line break inside the sentence survives as
+ *    `\n` in raw JSON and as real whitespace once parsed; collapsing runs of
+ *    whitespace means both spellings match.
+ */
 function isAccountRestrictedBody(body: string): boolean {
-  return ACCOUNT_RESTRICTED_MARKERS.some(marker => body.toLowerCase().includes(marker.toLowerCase()))
+  if (!isContentPolicyBody(body)) return false
+  const haystack = accountVerdictText(body)
+  if (haystack === '') return false
+  return ACCOUNT_RESTRICTED_MARKERS.some(marker => haystack.includes(normalizeVerdictText(marker)))
+}
+
+/** The sentences an account verdict can be stated in: display fields, then `msg`. */
+function accountVerdictText(body: string): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body) as unknown
+  } catch {
+    // Non-JSON (an edge page, or a body truncated mid-envelope): fall back to the
+    // text this function is about, with the same normalization applied.
+    return normalizeVerdictText(body)
+  }
+  if (typeof parsed !== 'object' || parsed === null) return ''
+  const raw = parsed as Record<string, unknown>
+  const parts = [
+    localizedText(raw['displayMsg']),
+    localizedText(raw['displayTips']),
+    typeof raw['msg'] === 'string' ? raw['msg'] : undefined,
+  ].filter((value): value is string => typeof value === 'string')
+  return normalizeVerdictText(parts.join(' '))
+}
+
+/** NFKC, zero-width stripped, whitespace runs collapsed, lower-cased. */
+function normalizeVerdictText(text: string): string {
+  return text
+    .normalize('NFKC')
+    .replace(/[\u200b-\u200d\ufeff]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .toLowerCase()
 }
 
 /**
@@ -975,14 +1109,6 @@ function clip(text: string, limit: number): string {
  * account, region or top-up can change.
  */
 export function classifyUpstreamError(status: number, body: string): UpstreamErrorKind {
-  // The account-restriction member of the `11140` family must be split BEFORE
-  // the content-policy marker: both reuse `msg: "request illegal"`, and only
-  // `displayMsg` distinguishes them. A restricted credential is an ACCOUNT
-  // problem (issue #127): another account is the only useful next move and the
-  // pool must bench this one. Treating it as `policy_reject` instead made every
-  // request burn a doomed attempt on the restricted account, then switch while
-  // being told the account itself was fine.
-  if (isAccountRestrictedBody(body)) return 'account_restricted'
   if (status === 402) return 'hard_credit'
   const lower = body.toLowerCase()
   for (const marker of HARD_CREDIT_MARKERS) {
@@ -1001,9 +1127,20 @@ export function classifyUpstreamError(status: number, body: string): UpstreamErr
   for (const marker of SESSION_DEAD_MARKERS) {
     if (body.includes(marker)) return 'session_dead'
   }
-  for (const marker of POLICY_REJECT_MARKERS) {
-    if (body.includes(marker)) return 'policy_reject'
-  }
+  // The account-restriction member of the `11140` family must be split BEFORE
+  // the content-policy answer: both reuse `msg: "request illegal"`, and only
+  // `displayMsg` distinguishes them. A restricted credential is an ACCOUNT
+  // problem (issue #127): another account is the only useful next move, and the
+  // pool must bench this one. Treating it as `policy_reject` instead made every
+  // request burn a doomed attempt on the restricted account, then switch while
+  // being told the account itself was fine.
+  //
+  // PLACED HERE — inside the `11140` branch it splits — rather than as the
+  // classifier's first test: the code half is what makes that placement
+  // equivalent for real `11140` bodies while a 402, 401 or 500 that merely
+  // quotes the phrase cannot reach this line at all.
+  if (isAccountRestrictedBody(body)) return 'account_restricted'
+  if (isContentPolicyBody(body)) return 'policy_reject'
   // AFTER the policy markers so a body that really is a content refusal keeps
   // that (more specific) reply, and BEFORE the plain 400 fallback so the channel
   // gate stops being filed as `client` — the misclassification that sent issues
@@ -1278,8 +1415,8 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  *
  * VALUES. The gateway does not verify where these ids come from — any well-formed
  * UUID passes — so nothing here is a secret and nothing is persisted. They are
- * still freshly generated per request, matching the official client's
- * `randomUUID()` per call: reusing one value across requests would forge a
+ * still freshly generated per request, as the official client generates
+ * its own per call: reusing one value across requests would forge a
  * conversation identity the plugin does not actually have, and the first thing
  * that would break is the upstream's own correlation of a session it is being
  * told about twice under one id.
@@ -1289,7 +1426,8 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  * side is exactly how the 3.1.0 defect became international-only and invisible
  * from the CN side. One code path, both regions.
  *
- * @returns the three headers, every value distinct.
+ * @returns the three headers (four when the usage identity is on, which adds
+ * `X-Request-ID`), every value distinct.
  */
 function conversationHeaders(
   shape: 'chat' | 'image',
@@ -1328,8 +1466,9 @@ function conversationHeaders(
  * `01a169…`-style 32-hex ids, while this plugin's `randomUUID()` produced
  * hyphenated v4 ids — so the same account's usage page read as two different
  * clients, and a reporter comparing them concluded the plugin was not the
- * official client. Nothing upstream REJECTS a v4 id (measured: hyphenated v4
- * ids answer 200), so this is a display-fidelity fix, not a gate.
+ * official client. Nothing upstream REJECTS a v4 id — the hyphenated v4 this
+ * plugin has always sent is what answers 200 today — so this is a
+ * display-fidelity fix, not a gate.
  *
  * Only the FORMAT is aligned, never the value's meaning: the timestamp prefix
  * is the moment this request was generated, which is exactly what a v7 id is
@@ -1362,7 +1501,8 @@ export interface WorkBuddyWireIdentity {
    * uses (plus `X-Request-ID`, which mirrors the message id there).
    *
    * OFF by default, and the reason is the evidence tier, not the mechanism: the
-   * reporter measured HTTP 200 on their own 5.3.1, and this plugin has not
+   * reporter measured HTTP 200 on their own build of this PLUGIN at 5.3.1
+   * (the WorkBuddy client itself was 5.8.3), and this plugin has not
    * reproduced that against the live gateway. Nothing in either gate is documented
    * as reading these headers — `11128`'s three doors are the message openings,
    * the missing conversation id and a non-system first message, none of which a
@@ -1388,7 +1528,7 @@ export interface WorkBuddyWireIdentity {
  *
  * `X-IDE-Type` stays `CLI` on purpose. Claiming the desktop app's type as well
  * would be a bigger identity claim than the one this fix needs, and the mixed
- * CLI + WorkBuddy shape is what was actually measured. The version comes from
+ * CLI + WorkBuddy shape is what the reporter measured. The version comes from
  * {@link PRODUCT_UA} rather than a second hardcoded number, so the two cannot
  * drift apart when the app version is bumped.
  *
@@ -1467,9 +1607,16 @@ function billingHeaders(credential: WorkBuddyCredential): Record<string, string>
  * issue #132 的实测只覆盖 chat，而生图这两个入口在 2026-10-21 是用带连字符的
  * v4 答的 200，而 id 的**格式**从来不是生图那道闸问的事。把对齐「顺手统一」到
  * 这里，等于用一条没人测过的字节去换一次显示对齐——`tests/upstream.spec.ts` 里
- * 那条生图守卫钉的就是这一点（把 `'image'` 改成 `'chat'` 会红）。
+ * 那条生图守卫钉的就是这一点，而 `shape` 是**唯一**挡住它的东西：客户端把
+ * `usageIdentity` 一路传进了 `imageHeaders`，是 `'image'` 这个形状参数让它即便带着开关
+ * 也不采用 chat 的形状。守卫因此真能失败——两个方向都实跑过：把 `'image'` 改成
+ * `'chat'` 会红，删掉 `shape === 'chat'` 判据也会红。（identity 没接进来之前，`shape`
+ * 是空转参数、只改它守卫照样绿；接进来是这一步的前提，别退回成不传 identity。）
  */
-function imageHeaders(credential: WorkBuddyCredential): Record<string, string> {
+function imageHeaders(
+  credential: WorkBuddyCredential,
+  identity: WorkBuddyWireIdentity = {},
+): Record<string, string> {
   return {
     'Authorization': `Bearer ${credential.accessToken}`,
     'Accept': 'application/json, text/plain, */*',
@@ -1482,7 +1629,7 @@ function imageHeaders(credential: WorkBuddyCredential): Record<string, string> {
       ? { 'X-No-Enterprise-Id': '1' }
       : { 'X-Enterprise-Id': credential.enterpriseId },
     ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
-    ...conversationHeaders('image'),
+    ...conversationHeaders('image', identity),
   }
 }
 
@@ -2142,8 +2289,8 @@ export interface PrepareChatBodyOptions {
    * The move is ORDER-ONLY and only within the trailing run: the injected
    * messages are lifted out and re-inserted immediately BEFORE the real prompt,
    * which keeps every message, its text and every tool result intact (the one
- * textual edit is the recorded prompt's leading marker, documented at
- * {@link ACP_LEADING_TAG}). It is
+   * textual edit is the recorded prompt's leading marker, documented at
+   * {@link ACP_LEADING_TAG}). It is
    * therefore invisible to the model's instruction order (a runtime-context block
    * is context wherever it sits) and it is what makes the usage column show what
    * the user actually typed.
@@ -2165,14 +2312,18 @@ export interface PrepareChatBodyOptions {
  * MEASURED shapes, not guesses: the harness's time-context provider appends
  * `Time sampled while preparing turn N, step M: …`, its runtime-context
  * provider appends `Current runtime context. …`, and its reminders arrive as
- * `<system-reminder>` blocks. `billion-context` also prefixes some messages with
- * an `<acp …>mNNNNN</acp>` marker, which is stripped when it leads an injected
- * block so the recorded text starts at the sentence a reader recognises.
+ * `<system-reminder>` blocks. `billion-context` may additionally wrap each
+ * message in an `<acp …>mNNNNN</acp>` marker, so the pattern TOLERATES that
+ * marker in front of an injected block — the marker itself is never removed
+ * from an injected message (see {@link ACP_LEADING_TAG} for where a marker IS
+ * removed, and why that is only the recorded prompt).
  *
  * A body whose trailing user message starts with none of these is left exactly
  * as it arrived — the alternative (moving "the last non-empty user message")
  * would reorder real conversations from other clients.
  */
+const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
+
 /**
  * The per-message marker `billion-context` puts in front of every message.
  *
@@ -2182,12 +2333,12 @@ export interface PrepareChatBodyOptions {
  * removed, never any text: the earlier messages keep theirs, so a model that
  * cites a past message by its `mNNNNN` id can still do it — the one id lost is
  * the message being answered right now, which is the only reference that cannot
- * matter. Done only under the same opt-in as the reorder, since it deletes bytes
- * the upstream counts.
+ * matter. Injected messages keep their marker too: they are not the row being
+ * recorded, and touching them would widen the edit for no benefit. Done only
+ * under the same opt-in as the reorder, since it deletes bytes the upstream
+ * counts.
  */
 const ACP_LEADING_TAG = /^<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?/u
-
-const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
 
 /**
  * The plain text of one message's content, for prefix matching only.
@@ -3212,7 +3363,7 @@ export class WorkBuddyUpstreamClient {
   ): Promise<WorkBuddyImageOutcome> {
     const response = await fetch(`${chatBase(credential)}${IMAGE_GENERATIONS_PATH}`, {
       method: 'POST',
-      headers: imageHeaders(credential),
+      headers: imageHeaders(credential, this.identity),
       body: JSON.stringify(buildImageBody(request)),
       signal: signal ?? AbortSignal.timeout(IMAGE_TIMEOUT_MS),
     })

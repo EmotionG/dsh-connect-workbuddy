@@ -193,7 +193,8 @@ describe('the card implements the pool contract it hands down (M15, M18, M19)', 
     // The write committed the draft, so no edit remains; the stale-refresh
     // message tells the user the figures will catch up later (issue #131).
     expect(m.container.querySelector('.dsm-workbuddy-pool-save-buttons button:last-child')?.hasAttribute('disabled'), 'nothing left to save — Save must be disabled').toBe(true)
-    expect(m.text()).toContain('row.poolSaveFailed|message=row.poolSavedStaleRefresh')
+    expect(m.text()).toContain('row.poolSavedStaleRefresh')
+    expect(m.text()).not.toContain('row.poolSaveFailed')
     // A failed re-read must NOT blank the panel. The region keeps its last good
     // snapshot with a `refreshError` overlay, so the pool section the user was
     // editing is still there. Before the merge fix the catch replaced the whole

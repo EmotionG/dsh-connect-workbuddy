@@ -164,13 +164,21 @@ export interface AccountPoolProps {
    * while the draft was already discarded — the save would look like it did
    * nothing until the next poll.
    *
-   * RESOLVE `false` WHEN THE RE-READ DID NOT DELIVER FRESH PROPS. The parent
-   * cannot report that by throwing: the card's `refreshUsage` answers a failed
-   * fetch by resolving, so "it did not throw" does NOT mean "the fresh props
-   * arrived". Resolving `false` stops this section from discarding the draft
-   * against a still-stale `saved` prop, which is the exact window this ordering
-   * exists to close. `void` (no returned promise) is treated as success, so a
-   * plain fire-and-forget callback stays valid.
+   * THE DRAFT IS NOT HELD UNTIL THE RE-READ SUCCEEDS (5.8.0, issue #131). It
+   * used to be: the sections kept the draft until this promise resolved `true`,
+   * and `false` meant "stale, keep it". That was the bug — the re-read depends on
+   * a network round trip that can be slow or fail, and the settings were already
+   * written and verified by then, so a slow refresh held a permanent "saving…"
+   * spin over work that had landed.
+   *
+   * The 5.8.0 contract is: the draft is discarded IMMEDIATELY after the VERIFIED
+   * write, and this callback only drives the DISPLAY refresh. `false` therefore
+   * means "stored, but the panel could not re-read it" and is surfaced as its own
+   * status line (`row.poolSavedStaleRefresh`), never as a save failure — it must
+   * not reuse `row.poolSaveFailed`, because "保存失败" was demonstrably untrue
+   * there. The accepted trade is a short window in which the rows still show the
+   * pre-save values; the alternative (locking the button on a failed refresh) is
+   * worse and was the reported defect.
    */
   onSaved?: () => void | Promise<boolean>
   /**
@@ -268,6 +276,9 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
   const [draft, setDraft] = useState<PoolPreferences | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
+  // A stale re-read after a VERIFIED write — a different fact from a failed
+  // save, and it must not borrow the 「保存失败：」 framing (issue #131).
+  const [staleNotice, setStaleNotice] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<'checkin' | 'test' | undefined>(undefined)
   const [actionError, setActionError] = useState<string | undefined>(undefined)
   // Seeded from the shared store so a remount continues the same history.
@@ -476,6 +487,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     setDraft(null)
     setDraftRegion(undefined)
     setSaveError(undefined)
+    setStaleNotice(undefined)
   }, [])
 
   /** Save the pool preferences through the plugin's VERIFIED write path. */
@@ -483,6 +495,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
     if (settingsScope === undefined || !dirty || draft === null) return
     setSaving(true)
     setSaveError(undefined)
+    setStaleNotice(undefined)
     try {
       // Loading is deliberately bounded by the verified settings write, not by
       // the upstream usage refresh. `refreshUsage` may wait on a billing route
@@ -490,15 +503,18 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
       // 「保存中…」 for that long made a completed save look stuck (issue #131).
       await writePoolPreferences(settingsScope, region, draft)
       if (mounted.current) setSaving(false)
-      // Commit only after the write verifies. The old in-flight state is kept
-      // until the parent's refresh resolves: the draft still represents the
-      // saved values, so no edit is lost while the slow usage read catches up.
+      // The verified write is the commit point: busy clears and the draft is
+      // discarded IMMEDIATELY, before the refresh starts (issue #131). Keeping
+      // the draft until the parent's re-read resolved is what left the button in
+      // 「保存中…」 on a slow or failed usage read — data already on disk. The
+      // accepted trade is a short window where the rows show pre-save values.
       discard()
       // The refresh is display-only: it is allowed to resolve undefined/throw
       // without turning a successful save into an error or restoring a draft
-      // that the Host has already persisted.
+      // that the Host has already persisted. A stale re-read is reported on its
+      // own channel, never as a save failure.
       const refreshed = await onSaved?.()
-      if (refreshed === false && mounted.current) setSaveError(t('row.poolSavedStaleRefresh'))
+      if (refreshed === false && mounted.current) setStaleNotice(t('row.poolSavedStaleRefresh'))
     } catch (error: unknown) {
       // Only a failed settings write reaches here. The draft is the only copy
       // of the user's edits, so it must be kept for a retry.
@@ -1480,7 +1496,7 @@ export function AccountPool(props: AccountPoolProps): ReturnType<typeof h> | nul
 
     renderSettings({
       t, pool, active, dirty, saving, siblingBusy: siblingBusy === true,
-      saveError, settingsScope,
+      saveError, staleNotice, settingsScope,
       onEdit: editDraft, onSave: () => { void save() }, onDiscard: discard,
       appendLog, targetProvenance, orderRules,
       ...accountTools === undefined ? {} : { accountTools },
@@ -1868,6 +1884,8 @@ function renderSettings(input: {
    */
   siblingBusy: boolean
   saveError: string | undefined
+  /** A verified save whose re-read came back stale — reported, not an error. */
+  staleNotice: string | undefined
   settingsScope: WorkBuddyAccountScope | undefined
   onEdit: (edit: (current: PoolPreferences) => PoolPreferences) => void
   onSave: () => void
@@ -1890,7 +1908,7 @@ function renderSettings(input: {
 }): ReturnType<typeof h> {
   const {
     t, pool, active, dirty, saving, siblingBusy,
-    saveError, settingsScope,
+    saveError, staleNotice, settingsScope,
     onEdit, onSave, onDiscard, targetProvenance, accountTools, orderRules,
   } = input
   const canEdit = settingsScope !== undefined
@@ -2056,6 +2074,13 @@ function renderSettings(input: {
       ? null
       : h('p', { className: 'dsm-workbuddy-pool-error', role: 'alert' },
           t('row.poolSaveFailed', { message: saveError })),
+
+    // The stale re-read must not be framed as a failed save: the setting IS
+    // written and verified, so prefixing it with 「保存失败」 told the user the
+    // opposite of what had happened (issue #131). Neutral `role="status"`.
+    staleNotice === undefined
+      ? null
+      : h('p', { className: 'dsm-workbuddy-pool-warn', role: 'status' }, staleNotice),
   )
 }
 
