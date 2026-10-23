@@ -342,8 +342,8 @@ describe('openingEvidenceOfBody: what the gate actually read', () => {
       ],
     })
     expect(openingEvidenceOfBody(body)).toEqual([
-      { opening: 'First opening.', role: 'system', neutralized: false, messageIndex: 0 },
-      { opening: 'Second opening.', role: 'system', neutralized: false, messageIndex: 2 },
+      { opening: 'First opening.', textLength: 14, role: 'system', neutralized: false, messageIndex: 0 },
+      { opening: 'Second opening.', textLength: 15, role: 'system', neutralized: false, messageIndex: 2 },
     ])
   })
 
@@ -356,8 +356,8 @@ describe('openingEvidenceOfBody: what the gate actually read', () => {
       ],
     })
     expect(openingEvidenceOfBody(body)).toEqual([
-      { opening: 'Part one.', role: 'system', neutralized: false, messageIndex: 0 },
-      { opening: 'Part two.', role: 'system', neutralized: false, messageIndex: 0 },
+      { opening: 'Part one.', textLength: 9, role: 'system', neutralized: false, messageIndex: 0 },
+      { opening: 'Part two.', textLength: 9, role: 'system', neutralized: false, messageIndex: 0 },
     ])
   })
 
@@ -407,7 +407,7 @@ describe('openingEvidenceOfBody: what the gate actually read', () => {
     // gateways refuse `developer` — so on the wire it IS a system message.
     const body = JSON.stringify({ messages: [{ role: 'developer', content: 'A developer opening.' }] })
     expect(openingEvidenceOfBody(body)).toEqual([
-      { opening: 'A developer opening.', role: 'system', neutralized: false, messageIndex: 0 },
+      { opening: 'A developer opening.', textLength: 20, role: 'system', neutralized: false, messageIndex: 0 },
     ])
   })
 
@@ -420,7 +420,7 @@ describe('openingEvidenceOfBody: what the gate actually read', () => {
       ],
     })
     expect(openingEvidenceOfBody(body)).toEqual([
-      { opening: 'Kept.', role: 'system', neutralized: false, messageIndex: 2 },
+      { opening: 'Kept.', textLength: 5, role: 'system', neutralized: false, messageIndex: 2 },
     ])
   })
 
@@ -528,6 +528,14 @@ describe('perturbChannelFingerprints: the rescue for an INNER content fingerprin
       messages: { content: { text: string }[] }[]
     }
     expect(parsed.messages[0]?.content[0]?.text).toBe('第一句。\u200b第二句！\u200b')
+  })
+
+  it('dense mode breaks prose without punctuation, while preserving the model-visible text', () => {
+    const body = JSON.stringify({ messages: [{ role: 'assistant', content: '验收做完了quiet period reminder' }] })
+    const next = perturbChannelFingerprints(body, true) as string
+    expect(next).toBeDefined()
+    expect(next).toContain('验​收​做​完​了​q​u​i​e​t')
+    expect(next.replace(/\u200b/gu, '')).toBe(body)
   })
 
   it('is idempotent, and undefined when it would change nothing', () => {

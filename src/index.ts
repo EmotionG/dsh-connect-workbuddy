@@ -516,6 +516,15 @@ export interface Config {
    * client-fingerprint workaround, not an account one — see `cli-bridge/runner`.
    */
   cliBridge?: CliBridgeSettings
+  /**
+   * When scanned messages are perturbed with invisible characters.
+   *
+   * `failure` (default) learns from a successful channel-gate rescue and starts
+   * later requests with the learned form; `always` starts every request with
+   * the dense form for a gateway whose plain attempt is a guaranteed refusal;
+   * `off` keeps only the post-failure rescue ladder.
+   */
+  channelPerturbation?: 'off' | 'failure' | 'always'
 }
 
 const modelConfig = z.object({
@@ -747,6 +756,11 @@ export const Config: z<Config> = z.object({
   cliBridge: asVolatile(
     cliBridgeConfig.default({} as any).description('Optional CodeBuddy CLI route; off by default and independent of the providers'),
   ) as unknown as z<CliBridgeSettings>,
+  channelPerturbation: asVolatile(
+    z.union([z.const('off'), z.const('failure'), z.const('always')])
+      .default('failure')
+      .description('When to perturb scanned messages with invisible characters: "off" only rescues after a channel-gate refusal, "failure" (default) learns from a successful rescue and starts later requests perturbed, "always" starts every request with the dense rescue for a gateway whose plain attempt is guaranteed to fail.'),
+  ) as unknown as z<'off' | 'failure' | 'always'>,
 }) as unknown as z<Config>
 
 /**
@@ -974,6 +988,7 @@ export function apply(ctx: Context, config: Config): void {
       client,
       catalog,
       logger: ctx.logger,
+      channelPerturbation: unwrapVolatile(config.channelPerturbation) ?? 'failure',
       /**
        * Pool routing, bound to THIS region.
        *
