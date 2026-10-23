@@ -137,6 +137,15 @@ export function availabilityLine(
 ): string | undefined {
   const probe = account.probe
   if (probe !== undefined) {
+    // A SUCCESS is never waiting, whatever time came with it.
+    //
+    // The stored record can carry `outcome: 'ok'` beside a `retryAtMs` eight
+    // days out — that value is the account's monthly quota reset, read off a
+    // `Retry-After` header on a 200 — and rendering it through the cooldown
+    // sentence produced “✓ 可用 · 11/01 00:00 之后可再用 · 约 8 天后” on a free
+    // model that had just answered. The Host heals such records on read, but the
+    // sentence must be safe on its own: an `ok` row renders its verdict alone.
+    if (probe.outcome === 'ok') return outcomeText(t, probe.outcome)
     if (probe.retryAtMs !== undefined) {
       // The instant AND the wait, in one sentence, derived from the same number.
       //
@@ -198,6 +207,10 @@ export function availabilityMark(
 ): string | undefined {
   const probe = account.probe
   if (probe !== undefined) {
+    // Same rule as {@link availabilityLine}: a success has no wait to state, so
+    // a stray instant from an older record must not become “约 8 天后恢复” on a
+    // row whose verdict is 可用.
+    if (probe.outcome === 'ok') return outcomeMarkText(t, probe.outcome)
     if (probe.retryAtMs !== undefined) {
       // The WAIT, never the instant, and WITH its verb: "被限流 · 约 2 小时后恢复"
       // rather than a bare "约 2 小时后". The duration alone left the reader to

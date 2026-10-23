@@ -370,6 +370,12 @@ export function parseUpstreamResetAt(message: string): number | undefined {
  * as "the upstream did not say when". That remains the honest answer for a
  * genuinely timeless failure; inventing a number here would be pure fiction.
  *
+ * An `ok` outcome ALWAYS returns `{}`, whatever headers or body came with it.
+ * A successful probe has already answered "can this account serve right now?"
+ * with yes, so there is no wait to state; and on this gateway a 200 can carry a
+ * `Retry-After` whose value is the account's monthly quota reset, which must
+ * never be rendered as a lockout. See the guard at the top of the function.
+ *
  * `model-busy` is the ONE exception, and it is not an invented countdown: the
  * upstream states a magnitude in prose ("about a minute") rather than a
  * timestamp, and the card's own vocabulary has no way to render "about". A
@@ -387,6 +393,14 @@ export function cooldownOf(input: {
   /** The region's next monthly quota refresh, when the upstream declares one. */
   quotaRefreshAtMs?: number
 }): Pick<WorkBuddyProbeResult, 'retryAtMs' | 'retrySource'> {
+  // A SUCCESS never has a cooldown. Guarded HERE rather than only at the call
+  // site because a `Retry-After` on a 200 is a real thing this gateway sends,
+  // and its value is the account's MONTHLY QUOTA RESET (observed: `2026-11-01
+  // 00:00 +08:00`), not a wait. Reading it as one produced “✓ 可用 · 11/01 00:00
+  // 之后可再用 · 约 8 天后” on a free model that answered normally — the report
+  // that started this fix. Keeping the rule in one place means no future caller
+  // can hand a success a cooldown by passing a header through.
+  if (input.outcome === 'ok') return {}
   const fromHeader = parseRetryAfter(input.retryAfter, input.nowMs)
   if (fromHeader !== undefined) return { retryAtMs: fromHeader, retrySource: 'retry-after' }
   const fromBody = input.body === undefined ? undefined : parseUpstreamResetAt(input.body)
@@ -549,12 +563,20 @@ export async function probeModel(input: {
       elapsedMs: Date.now() - startedAt,
       status: answer.status,
       ...credit === undefined ? {} : { message: `credit ${credit}` },
-      ...cooldownOf({
-        outcome: 'ok',
-        retryAfter: answer.retryAfter,
-        nowMs: input.nowMs,
-        ...input.quotaRefreshAtMs === undefined ? {} : { quotaRefreshAtMs: input.quotaRefreshAtMs },
-      }),
+      // NO cooldown on a success — not even when the response carries a
+      // `Retry-After` header.
+      //
+      // This was the bug behind “测试的是免费模型，为什么要 8 天后才能用？”.
+      // The gateway attaches `Retry-After` to a 200 whose value is the ACCOUNT's
+      // monthly quota reset (observed on a real record: `2026-11-01 00:00 +08:00`),
+      // and the success path read any present header as “you cannot use this
+      // until then”. The card then printed “✓ 可用 · 11/01 00:00 之后可再用 · 约
+      // 8 天后” — a usable zero-rate model that looked locked for eight days.
+      //
+      // A 200 answers “can I use this now?” with yes. A header on a success can
+      // describe a throttle budget or a quota schedule; it never describes a
+      // wait this account must observe before its next request. Cooldown state
+      // belongs to failures only, which `cooldownOf` now enforces on its own.
     }
   }
 

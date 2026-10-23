@@ -115,6 +115,18 @@ export function workbuddyPoolStorePath(region: WorkBuddyRegion): string {
  * would render a waiting time on an account that is not waiting for anything.
  */
 function retryAtMsOf(probe: WorkBuddyPoolProbe): number | undefined {
+  // A success NEVER carries a cooldown, whatever the stored record says.
+  //
+  // Records written before this rule existed can hold `outcome: 'ok'` together
+  // with a `retryAtMs` eight days out: the value is the account's monthly quota
+  // reset, read off a `Retry-After` header on a 200 response. That is the record
+  // behind “测试的是免费模型，为什么要 8 天后才能用？” — the card rendered
+  // “✓ 可用 · 11/01 00:00 之后可再用 · 约 8 天后” on a model that answered.
+  //
+  // Healing HERE is what retires those records: every consumer reads probes
+  // through {@link readPoolProbes}, and the next `writePoolProbes` persists the
+  // healed shape, so a file written by an older build repairs itself.
+  if (probe.outcome === 'ok') return undefined
   if (probe.retryAtMs !== undefined) return probe.retryAtMs
   if (probe.outcome !== 'rate-limited' && probe.outcome !== 'out-of-credit') return undefined
   if (probe.message === undefined) return undefined
@@ -233,6 +245,16 @@ export function mergePoolProbe(
   const merged = update.accountName === undefined && existing.accountName !== undefined
     ? { ...update, accountName: existing.accountName }
     : update
+  // A SUCCESS owns no cooldown, so an older record's `retryAtMs` must not be
+  // inherited onto it — and any time the update itself carries is dropped too.
+  // Without this, one `ok` measurement rewritten after a stale record would keep
+  // resurrecting the eight-day “之后可再用” that the read-time heal above just
+  // removed. The strip is unconditional because the invariant is absolute: a
+  // success is not waiting for anything.
+  if (update.outcome === 'ok') {
+    const { retryAtMs: _dropped, ...rest } = merged
+    return rest
+  }
   if (update.retryAtMs !== undefined) return merged
   // A stored time that has already PASSED is not worth inheriting: carrying it
   // forward would date the record to a moment in the past and make the row read

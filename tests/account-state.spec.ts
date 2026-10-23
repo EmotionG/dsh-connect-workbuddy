@@ -15,12 +15,19 @@
  *    re-read — and, worse, one that just hit its limit green.
  */
 import { describe, expect, it } from 'vitest'
-import { testRowOf, withTestRow } from '../src/client/account-state.ts'
+import { availabilityLine, availabilityMark, testRowOf, withTestRow } from '../src/client/account-state.ts'
 import type {
   WorkBuddyWebPoolAccount,
   WorkBuddyWebPoolTestRow,
   WorkBuddyWebUsage,
 } from '../src/status-paths.ts'
+import type { Translate } from '../src/client/searched-paths.ts'
+
+/** A key-preserving translator: assertions name the message the code chose. */
+const t: Translate = (key, params) => {
+  if (params === undefined || params === null) return key
+  return [key, ...Object.entries(params).map(([k, v]) => `${k}=${String(v)}`)].join('|')
+}
 
 /** A signed-in document carrying a pool block, which is what the panel reads. */
 function usageWith(accounts: readonly WorkBuddyWebPoolAccount[]): WorkBuddyWebUsage {
@@ -172,5 +179,36 @@ describe('withTestRow', () => {
     const withoutPool: WorkBuddyWebUsage = { ...usage } as WorkBuddyWebUsage
     delete (withoutPool as { pool?: unknown }).pool
     expect(withTestRow(withoutPool, testRow('a-1', { modelId: 'm', outcome: 'ok' }), NOW)).toBe(withoutPool)
+  })
+})
+
+describe('a successful probe never renders a wait', () => {
+  // The report that started this: a free (`x0.00`) model tested as usable, then
+  // shown as “✓ 可用 · 11/01 00:00 之后可再用 · 约 8 天后”. The instant was the
+  // account's monthly quota reset, picked up from a `Retry-After` header on the
+  // 200 — so the record is `ok` WITH a `retryAtMs`, which older builds stored.
+  const QUOTA_RESET = NOW + 8 * 24 * 3_600_000
+
+  it('prints the verdict alone on the pool card', () => {
+    expect(availabilityLine(t, {
+      probe: { outcome: 'ok', retryAtMs: QUOTA_RESET },
+    }, NOW)).toBe('row.probeOk')
+  })
+
+  it('prints the verdict alone in the composer panel', () => {
+    expect(availabilityMark(t, {
+      probe: { outcome: 'ok', retryAtMs: QUOTA_RESET },
+    }, NOW)).toBe('row.probeOk')
+  })
+
+  it('still states the instant on a genuinely limited account', () => {
+    // The guard is scoped to `ok`. A limited row must keep its time, or the fix
+    // would trade one wrong answer for a worse one: no recovery time at all.
+    expect(availabilityLine(t, {
+      probe: { outcome: 'rate-limited', retryAtMs: NOW + 60_000 },
+    }, NOW)).toContain('row.poolRetryAt')
+    expect(availabilityMark(t, {
+      probe: { outcome: 'rate-limited', retryAtMs: NOW + 60_000 },
+    }, NOW)).toContain('row.recoversMinutes')
   })
 })

@@ -123,6 +123,69 @@ describe('readPoolProbes', () => {
     expect(probes['beta']?.atMs).toBe(1)
   })
 
+  it('heals a stored success that carries a monthly quota reset as a cooldown', async () => {
+    // The exact record behind “测试的是免费模型，为什么要 8 天后才能用？”: an
+    // `ok` measurement with `retryAtMs` eight days out, because an older build
+    // read a `Retry-After` header on a 200 as a lockout. Every consumer reads
+    // through this function, so healing here fixes the card and the panel at
+    // once — and the next write persists the healed shape.
+    await writeFile(
+      workbuddyPoolStorePath('cn'),
+      JSON.stringify({
+        version: 1,
+        probes: {
+          alpha: {
+            outcome: 'ok',
+            atMs: 7,
+            retryAtMs: 1_800_000_600_000,
+            source: 'test-batch',
+            modelId: 'deepseek-v4.1-flash',
+          },
+        },
+      }),
+      'utf8',
+    )
+    const alpha = (await readPoolProbes('cn'))['alpha']
+    expect(alpha?.outcome).toBe('ok')
+    expect(alpha?.retryAtMs).toBeUndefined()
+    // The measurement itself is NOT discarded: only the invented wait goes.
+    expect(alpha?.modelId).toBe('deepseek-v4.1-flash')
+  })
+
+  it('does not inherit an older wait onto a fresh success', async () => {
+    // `mergePoolProbe` inherits `retryAtMs` when an update states none. That rule
+    // is right for a limited account and wrong for a success: it would keep
+    // resurrecting the eight-day “之后可再用” after the read-time heal removed it.
+    await writeFile(
+      workbuddyPoolStorePath('cn'),
+      JSON.stringify({
+        version: 1,
+        probes: { alpha: { outcome: 'rate-limited', atMs: 7, retryAtMs: 1_800_000_600_000 } },
+      }),
+      'utf8',
+    )
+    await writePoolProbes('cn', { alpha: { outcome: 'ok', atMs: 8 } })
+    const alpha = (await readPoolProbes('cn'))['alpha']
+    expect(alpha?.outcome).toBe('ok')
+    expect(alpha?.retryAtMs).toBeUndefined()
+  })
+
+  it('keeps inheriting a wait for an account that is still limited', async () => {
+    // The guard is scoped to `ok`. A limited record must keep its stated time
+    // across a later write that does not restate it — that inheritance is what
+    // stops the pool re-testing an exhausted account every 30 minutes.
+    await writeFile(
+      workbuddyPoolStorePath('cn'),
+      JSON.stringify({
+        version: 1,
+        probes: { alpha: { outcome: 'out-of-credit', atMs: 7, retryAtMs: 1_800_000_600_000 } },
+      }),
+      'utf8',
+    )
+    await writePoolProbes('cn', { alpha: { outcome: 'out-of-credit', atMs: 8 } })
+    expect((await readPoolProbes('cn'))['alpha']?.retryAtMs).toBe(1_800_000_600_000)
+  })
+
   it('writes nothing for an empty update', async () => {
     await writePoolProbes('cn', {})
     await expect(readFile(workbuddyPoolStorePath('cn'), 'utf8')).rejects.toThrow()

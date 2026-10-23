@@ -288,6 +288,26 @@ describe('cooldownOf', () => {
     const result = cooldownOf({ outcome: 'ok', retryAfter: null, nowMs: NOW })
     expect('retryAtMs' in result).toBe(false)
   })
+
+  it('gives a SUCCESS no cooldown even when the response carries Retry-After', () => {
+    // The reported symptom: a free (`x0.00`) model tested as usable, then shown
+    // as “✓ 可用 · 11/01 00:00 之后可再用 · 约 8 天后”. The gateway attaches a
+    // `Retry-After` to a 200 whose value is the ACCOUNT's monthly quota reset,
+    // and reading any present header as a cooldown turned a refresh schedule
+    // into an eight-day lockout on a model that had just answered.
+    const result = cooldownOf({ outcome: 'ok', retryAfter: '691200', nowMs: NOW })
+    expect(result).toEqual({})
+    expect('retryAtMs' in result).toBe(false)
+
+    // The header is not merely ignored on success: a quota refresh point
+    // supplied alongside it must not leak through either, for the same reason.
+    expect(cooldownOf({
+      outcome: 'ok',
+      retryAfter: '691200',
+      nowMs: NOW,
+      quotaRefreshAtMs: NOW + 8 * 24 * 3_600_000,
+    })).toEqual({})
+  })
 })
 
 /**
@@ -532,6 +552,23 @@ describe('probeModel', () => {
     })
     expect(result.message).not.toContain('supersecretvalue')
     expect(result.message).toContain('[redacted]')
+  })
+
+  it('keeps a success free of a cooldown when the 200 carries Retry-After', async () => {
+    // End-to-end through `probeModel`, because the guard has to hold for the
+    // real record shape that was stored: outcome `ok`, a `retryAtMs` eight days
+    // out, and `credit 0`. This is the exact combination the reporter saw on a
+    // free model, so it must never come back.
+    const client = clientAnswering({
+      ok: true,
+      status: 200,
+      retryAfter: '691200',
+      stream: 'data: [DONE]\n\n',
+    })
+    const result = await probeModel({ client, credential: CREDENTIAL, modelId: 'deepseek-v4.1-flash', nowMs: Date.now() })
+    expect(result.outcome).toBe('ok')
+    expect(result.retryAtMs).toBeUndefined()
+    expect('retryAtMs' in result).toBe(false)
   })
 
   it('keeps a success when the stream cannot be drained', async () => {
