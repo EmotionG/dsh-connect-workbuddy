@@ -251,6 +251,26 @@ describe('prepareChatBody keepPromptLast (issue #132)', () => {
     expect(String(prepared.at(-1)?.content)).toBe('真实输入')
   })
 
+  it('recognises the composite shape the CURRENT harness really sends (live sample, trimmed)', () => {
+    // Taken from a live DSH session (truncated, not composed by hand): the time sample and
+    // the LDVH verdict arrive in ONE `user` message, the verdict below the time
+    // line. Matching this shape is what keeps the option from silently decaying
+    // into "matches nothing" when the harness adds a second block per turn.
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('继续'),
+        injected('Time sampled while preparing turn 12, step 1: 2026-10-24T03:25:18+08:00[Asia/Shanghai]\n'
+          + 'Browser time zone for this request: Asia/Shanghai.\n\n'
+          + '【LDVH 管辖判定】not_governed —— 本会话不受 LDVH 管辖，LDVH 工具不注册。\n'
+          + '原因：session working directory is not inside a registered governed project'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+    expect(String(prepared.at(-1)?.content)).toBe('继续')
+    expect(prepared).toHaveLength(3)
+  })
+
   it('does NOT reorder a conversation whose trailing user message is a real turn', () => {
     // This is the risk the option carries, so it is pinned: another client's
     // ordinary conversation must keep its order byte-for-byte.
