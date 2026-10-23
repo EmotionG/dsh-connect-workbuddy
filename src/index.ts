@@ -64,7 +64,12 @@ import {
   type CliBridgeRuntime,
   type CliBridgeSettings,
 } from './cli-bridge/mount.ts'
-import type { BridgeCommandsService, BridgeToolsService } from './cli-bridge/services.ts'
+import type { DirectoryOf } from './cli-bridge/tool.ts'
+import type {
+  BridgeCommandsService,
+  BridgeProjectionReader,
+  BridgeToolsService,
+} from './cli-bridge/services.ts'
 import { recordBodyReport, type WorkBuddyUsageCounts } from './body-report.ts'
 import { cooldownOf, outcomeOfFailure, probeModel, redactUpstreamText, resolveProbeInputTokens } from './probe.ts'
 import { measureTps } from './tps.ts'
@@ -1620,6 +1625,10 @@ export function apply(ctx: Context, config: Config): void {
   // volatile write would reset the hourly budget the user is being held to.
   let cliTools: BridgeToolsService | undefined
   let cliCommands: BridgeCommandsService | undefined
+  // Reads a session's LIVE working directory. Set when the Host publishes its
+  // session projections and left undefined otherwise, which is exactly the
+  // pre-projection behaviour (the ladder then reads the session header).
+  let cliDirectoryOf: DirectoryOf | undefined
   let cliRuntime: CliBridgeRuntime | undefined
   let cliRuntimeKey = ''
   let disposeCliTool: (() => void) | undefined
@@ -1645,6 +1654,7 @@ export function apply(ctx: Context, config: Config): void {
         settings,
         REGION_KEYS.map(region => ({ region, store: stacks[region].store })),
         message => ctx.logger.warn(`dsh-connect-workbuddy: ${message}`),
+        cliDirectoryOf,
       )
     }
     if (cliRuntime === undefined) {
@@ -1681,6 +1691,74 @@ export function apply(ctx: Context, config: Config): void {
       disposeCliCommand?.()
       disposeCliCommand = undefined
       cliCommands = undefined
+    })
+  })
+
+
+  // The CLI route's directory source: the Host's session projections.
+  //
+  // WHY THIS INJECT EXISTS. The bridge used to default a turn's directory to
+  // `agent.session.header.cwd`, which the Host documents as detached, deep-frozen
+  // creation metadata — the directory the session was OPENED with, not the one it
+  // is in now. The live directory is a session projection (key
+  // `"workingDirectory"`, committed on every /cd), and it is what the Host itself
+  // prints into the model's system prompt. Reading the projection here is what makes
+  // /codebuddy and codebuddy_ask agree with the model about where the work is
+  // happening.
+  //
+  // SAME REASON AS THE TWO INJECTS ABOVE: sessionProjections is a host service that
+  // can appear after this row, so it is awaited rather than sampled once at apply
+  // time. Sampling would lose it on Desktop exactly the way tools and commands were
+  // being lost before.
+  //
+  // DEGRADATION IS THE POINT. A Host without this service leaves cliDirectoryOf
+  // undefined, and the bridge then reads the session header — the pre-projection
+  // behaviour, unchanged. Nothing here is load-bearing: no route disappears and no
+  // turn is refused because of a missing projection.
+  ctx.inject(['sessionProjections'], (projectionCtx) => {
+    const reader = (projectionCtx as unknown as { sessionProjections?: BridgeProjectionReader })
+      .sessionProjections
+    if (reader === undefined || typeof reader.stateOf !== 'function') return
+
+    /**
+     * The one place the projection key is spelled out.
+     *
+     * It must match the Host's own registration — key
+     * `"workingDirectory"`, stateVersion 1, in the Host's
+     * @deepseek-ai/dsh-working-directory package. If the Host renames the key, this is
+     * the line that has to follow, and the comment is what tells the next reader
+     * where to look.
+     *
+     * Returns null for `"no committed directory"`, which is the same signal the header
+     * path produces when it has nothing — so the ladder below it behaves identically.
+     * NOTE what it deliberately does NOT do: fall back to the service's own default.
+     * The Host's get() answers stateOf(...) ?? defaultDirectory, and that fallback is
+     * the Host process's cwd, i.e. a directory nobody chose. Substituting it here would
+     * quietly turn `"we do not know"` into `"use this one"`, which is the one change this
+     * whole refactor must not make.
+     */
+    const WORKING_DIRECTORY_PROJECTION_KEY = 'workingDirectory'
+    cliDirectoryOf = (session: unknown): string | null => {
+      let state: unknown
+      try {
+        state = reader.stateOf(session, WORKING_DIRECTORY_PROJECTION_KEY)
+      } catch {
+        // A projection reader that throws is treated as one that does not exist: the
+        // header fallback below still produces a usable directory.
+        return null
+      }
+      if (typeof state !== 'string') return null
+      const trimmed = state.trim()
+      return trimmed === '' ? null : trimmed
+    }
+
+    // The runtime may already exist (settings were applied before this service
+    // appeared). Rebuild it so the new source takes effect on the next call; the
+    // settings key is unchanged, so the shared gate survives and no budget is reset.
+    syncCliBridge(current())
+
+    projectionCtx.effect(() => () => {
+      cliDirectoryOf = undefined
     })
   })
 

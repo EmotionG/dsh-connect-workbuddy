@@ -22,8 +22,8 @@
 import { formatInjection, injectOutcome } from './inject.ts'
 import type { InjectionOutcome } from './inject.ts'
 import type { BridgeCommandInvocation, BridgeCommandsService, BridgeLog } from './services.ts'
-import { runAsk } from './tool.ts'
-import type { AskDeps, AskResult } from './tool.ts'
+import { runAsk, sessionDirOf as sessionDirOfForCommand } from './tool.ts'
+import type { AskDeps, AskResult, DirectoryOf } from './tool.ts'
 
 /** The command name as registered (no leading slash). */
 export const COMMAND_NAME = 'codebuddy'
@@ -185,6 +185,27 @@ export function formatCommandOutcome(
 export type CommandDeps = AskDeps
 
 /**
+ * The command's slice of the invocation the tool's resolver needs.
+ *
+ * The command's agent IS a live agent (the Host's command service passes the
+ * whole thing, not a narrowed subset), so it satisfies `BridgeToolExecution`
+ * structurally. The `signal` field is carried so the shared resolver sees the
+ * same object shape it sees from a tool call.
+ */
+function sessionDirOfCommand(
+  invocation: BridgeCommandInvocation,
+  directoryOf: DirectoryOf | undefined,
+): string {
+  return sessionDirOfForCommand(
+    {
+      ...(invocation.agent !== undefined ? { agent: invocation.agent } : {}),
+      ...(invocation.signal !== undefined ? { signal: invocation.signal } : {}),
+    },
+    directoryOf,
+  )
+}
+
+/**
  * Register `/codebuddy`, returning the disposer.
  *
  * `commands` is passed in rather than looked up so a Host without the service
@@ -214,13 +235,23 @@ export function mountCodebuddyCommand(commands: BridgeCommandsService | undefine
       },
       handler: async (invocation: BridgeCommandInvocation) => {
         // The command has no tool-call context, so the workspace comes from the
-        // session header. This is the whole reason the command can promise a
-        // working directory when the tool has to be told one.
-        const cwd = invocation.agent?.session?.header?.cwd
-        if (typeof cwd !== 'string' || cwd.trim() === '') {
+        // session. This is the whole reason the command can promise a working
+        // directory when the tool has to be told one.
+        //
+        // SAME RESOLVER AS THE TOOL, deliberately. Both entrances used to read
+        // `agent.session.header.cwd` — the session's creation-time directory — and
+        // the tool then layered a ladder on top of it while the command had
+        // nothing, so the two disagreed about what "this session's workspace"
+        // meant. The tool's resolver now prefers the Host's live working-directory
+        // projection and keeps the header only as its fallback, and the command
+        // uses it too so the two entrances can never drift apart again.
+        const cwd = sessionDirOfCommand(invocation, deps.directoryOf)
+        if (cwd === '') {
           return {
             kind: 'error',
-            text: '这个会话没有工作区路径（session.header.cwd 为空），无法确定 CodeBuddy 该在哪里跑。请在一个打开过目录的会话里再试。',
+            text:
+              '这个会话没有工作区路径（会话的工作目录投影为空，回退的 session.header.cwd 也为空），' +
+              '无法确定 CodeBuddy 该在哪里跑。请在一个打开过目录的会话里再试。',
           }
         }
 

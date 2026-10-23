@@ -17,7 +17,7 @@
  * Every one of those is asserted below rather than described.
  */
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { readdirSync } from 'node:fs'
+import { readdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -44,6 +44,7 @@ import {
 import { composeContinuation, formatInjection, injectOutcome, INJECT_TEXT_LIMIT } from '../src/cli-bridge/inject.ts'
 import type { BridgeAgent } from '../src/cli-bridge/inject.ts'
 import type { BridgeCommandDefinition, BridgeToolDefinition, BridgeToolExecution } from '../src/cli-bridge/services.ts'
+import type { DirectoryOf } from '../src/cli-bridge/tool.ts'
 import {
   EFFORT_LEVELS,
   MAX_REPLY_CHARS_CAP,
@@ -288,6 +289,33 @@ function executionIn(dir: string): BridgeToolExecution {
   return { agent: { id: 'session-1', session: { header: { cwd: dir } } } }
 }
 
+/**
+ * An execution whose session carries a LIVE working directory as well as a header.
+ *
+ * The Host's `workingDirectory` projection is not the session header — it is separate
+ * state that starts from the header and then moves on every `/cd`. This is what a
+ * session looks like after the human changed directory at least once, which is
+ * exactly the case the header cannot answer.
+ */
+function executionInProjected(headerDir: string, liveDir: string | null): BridgeToolExecution {
+  return {
+    agent: { id: 'session-1', session: { header: { cwd: headerDir }, workingDirectory: liveDir } },
+  }
+}
+
+/**
+ * A `DirectoryOf` shaped like the Host's reader: it answers with the projection
+ * held by the session it is handed, and `null` when that session never committed
+ * one. Every other answer — a relative path, a non-string — is a Host bug, and
+ * the tests for that pass the bad value through the session object directly.
+ */
+function projectionOf(): DirectoryOf {
+  return (session: unknown) => {
+    const live = (session as { workingDirectory?: unknown } | undefined)?.workingDirectory
+    return typeof live === 'string' && live.trim() !== '' ? live : null
+  }
+}
+
 describe('resolveWorkingDir', () => {
   it('prefers the explicit argument over the session and the configured default', () => {
     // Inside the session tree, so it is allowed — and it is still the argument
@@ -306,6 +334,77 @@ describe('resolveWorkingDir', () => {
       ok: true,
       unattended: false,
     })
+  })
+
+  // The three tests below pin the one behaviour this change is about: where a
+  // turn's directory comes from when the human has moved the session somewhere
+  // since it was opened.
+  //
+  // `sessionDir` is the header (the directory the session was OPENED with) and
+  // `allowedDir` is the live projection (where the human `cd`'d to). They are two
+  // different real directories in this block, so a test can tell them apart.
+  it('prefers the live projection over the session header', () => {
+    const choice = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected(sessionDir, allowedDir),
+      projectionOf(),
+    )
+    expect(choice).toMatchObject({ ok: true, unattended: false })
+    // The header would have produced `sessionDir`; the projection wins, so the
+    // assertion is on the projection's path and nothing else.
+    expect(choice.dir).toBe(realpathSync(allowedDir))
+  })
+
+  it('falls back to the session header when the projection is empty', () => {
+    // A Host that has no committed directory for this session is the ordinary
+    // state of a freshly opened session, and the header is still the right answer
+    // for it.
+    const choice = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected(sessionDir, null),
+      projectionOf(),
+    )
+    expect(choice).toMatchObject({ ok: true, unattended: false })
+    expect(choice.dir).toBe(realpathSync(sessionDir))
+  })
+
+  it('ignores a projection that is not an absolute path', () => {
+    // The Host validates its own projections, but this plugin reads a structure it
+    // does not own. A relative value must not reach the CLI's cwd.
+    const choice = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected(sessionDir, 'packages/app'),
+      projectionOf(),
+    )
+    expect(choice).toMatchObject({ ok: true, unattended: false })
+    expect(choice.dir).toBe(realpathSync(sessionDir))
+  })
+  it('degrades to the configured default, not to the Host process directory', () => {
+    // THE TEST THAT PINS THE WHOLE DESIGN. The Host's own reader answers
+    // `stateOf(...) ?? defaultDirectory`, and `defaultDirectory` is the Host process's
+    // cwd — a directory nobody chose. A bridge that copied that behaviour would
+    // answer every "where are we" question with the Host's own install directory.
+    // So: no projection AND no header must land on the CONFIGURED default, and
+    // when there is no configured default either, it must refuse.
+    const withConfigured = resolveWorkingDir(
+      {},
+      options({ workingDir: allowedDir }),
+      executionInProjected('', null),
+      projectionOf(),
+    )
+    expect(withConfigured).toMatchObject({ ok: true, dir: allowedDir, unattended: false })
+
+    const withoutAnything = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected('', null),
+      projectionOf(),
+    )
+    expect(withoutAnything.ok).toBe(false)
+    expect(withoutAnything.dir).not.toBe(process.cwd())
   })
 
   it('falls back to the configured default', () => {
@@ -820,6 +919,70 @@ describe('/codebuddy', () => {
     const result = await sink.registered[0]!.handler({ agent: { id: 's', inject() {}, steer() {} } })
     expect(result.kind).toBe('error')
     expect(result.text).toContain('工作区')
+  })
+  // The command and the tool must agree on where a turn runs, so the command
+  // reads the same projection the tool does. These two pin the two halves of that
+  // agreement: the projection wins when it exists, and the command does NOT get a
+  // ladder of its own when neither source has a directory.
+  it('runs the turn in the session projection, not in the header directory', async () => {
+    const sink = captureCommands()
+    // The smallest board that records the announcement, shaped like the real one:
+    // `begin` returns a turn the bridge will hand back to `end`, so the stub has to
+    // return something rather than the raw input.
+    const begun: Array<{ entrance: string; workingDir: string }> = []
+    const board = {
+      begun,
+      begin(input: { entrance: string; workingDir: string }) {
+        const turn = { ...input, id: 'spy-0', startedAt: Date.now(), phase: 'starting' as const }
+        begun.push({ entrance: input.entrance, workingDir: input.workingDir })
+        return turn as never
+      },
+      end() {},
+      snapshot() {
+        return { turns: [], serverTime: Date.now() }
+      },
+      size() {
+        return begun.length
+      },
+    }
+    mountCodebuddyCommand(sink.service, {
+      options: options({ allowedDirs: [sessionDir, allowedDir] }),
+      regions: [],
+      log: () => {},
+      live: board,
+      directoryOf: projectionOf(),
+    })
+    // The projection wins BEFORE the turn starts, so the directory it chose is
+    // observable from the announcement the board received — no stubbing needed.
+    // The header points at `sessionDir` and the projection at `allowedDir`; the
+    // announcement must name the projection's directory and nothing else.
+    await sink.registered[0]!.handler({
+      agent: {
+        id: 'session-1',
+        session: { header: { cwd: sessionDir }, workingDirectory: allowedDir },
+        inject: vi.fn(),
+        steer: vi.fn(),
+      },
+      rawInput: 'look',
+    })
+    expect(board.begun).toHaveLength(1)
+    expect(board.begun[0]).toMatchObject({ entrance: 'command', workingDir: realpathSync(allowedDir) })
+  })
+
+  it('still refuses when the projection and the header are both empty', async () => {
+    const sink = captureCommands()
+    mountCodebuddyCommand(sink.service, {
+      options: options(),
+      regions: [],
+      log: () => {},
+      directoryOf: projectionOf(),
+    })
+    const result = await sink.registered[0]!.handler({
+      agent: { id: 's', session: { header: { cwd: '' }, workingDirectory: null }, inject() {}, steer() {} },
+      rawInput: 'look',
+    })
+    expect(result.kind).toBe('error')
+    expect(result.text).toContain('投影')
   })
 
   it('refuses a second concurrent turn on the same session', async () => {

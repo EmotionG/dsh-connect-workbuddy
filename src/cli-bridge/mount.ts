@@ -32,7 +32,7 @@ import type { LiveBoard } from './live.ts'
 import type { BridgeCommandsService, BridgeLog, BridgeToolsService } from './services.ts'
 import { gateFor } from './tool.ts'
 import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, SESSION_CONTINUITY_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
-import type { AskDeps, BridgeOptions } from './tool.ts'
+import type { AskDeps, BridgeOptions, DirectoryOf } from './tool.ts'
 
 /**
  * The `cliBridge` settings as they arrive from the config schema.
@@ -215,13 +215,18 @@ export function createCliBridgeRuntime(
   settings: CliBridgeSettings | undefined,
   regions: readonly BridgeCredentialRegion[],
   log: BridgeLog,
+  directoryOf?: DirectoryOf,
 ): CliBridgeRuntime | undefined {
   const options = normalizeCliBridgeOptions(settings, message => log(message))
   if (!options.enabled) return undefined
   const live = createLiveBoard()
   // One gate for both surfaces: the budget must not depend on which entrance the
   // call arrived through.
-  return { options, deps: { options, regions, log, gate: gateFor(options), live }, live }
+  return {
+    options,
+    deps: { options, regions, log, gate: gateFor(options), live, ...(directoryOf !== undefined ? { directoryOf } : {}) },
+    live,
+  }
 }
 
 /** Mount `codebuddy_ask` on a tools service, returning its disposer. */

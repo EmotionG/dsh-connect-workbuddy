@@ -247,13 +247,44 @@ function isInside(parent: string, child: string): boolean {
   return inner.startsWith(outer.endsWith(sep) ? outer : outer + sep)
 }
 
-/** The session directory this tool call came from, when the Host supplies one. */
-function sessionDirOf(execution: BridgeToolExecution | undefined): string {
-  const cwd = execution?.agent?.session?.header?.cwd
+/**
+ * Reads one session's LIVE working directory, or `null` when the Host does not
+ * maintain one (or this plugin was wired without the service).
+ *
+ * Optional on `AskDeps` so a Host without session projections — and every test
+ * that builds `deps` by hand — keeps today's behaviour exactly: a `null` here is
+ * indistinguishable from "no projection service", and the ladder then reads the
+ * session header, which is what it did before.
+ */
+export type DirectoryOf = (session: unknown) => string | null
+
+/** The session directory this call came from, when the Host supplies one.
+ *
+ * THE ORDER INSIDE THIS FUNCTION IS THE FIX. The session's live projection is
+ * read FIRST, because it is the directory the human and the model are actually
+ * in; the session header is the fallback, because it is where that projection
+ * starts from (`init: header => header.cwd ?? null`) and because a session that
+ * never committed a projection has nothing else.
+ *
+ * Both sources are re-validated here: the session service already rejects
+ * relative headers, but a hand-built agent in a test (or a Host with a looser
+ * contract) must not be able to smuggle a relative path through either one.
+ */
+export function sessionDirOf(
+  execution: BridgeToolExecution | undefined,
+  directoryOf: DirectoryOf | undefined,
+): string {
+  const session = execution?.agent?.session
+  if (session !== undefined && directoryOf !== undefined) {
+    const live = directoryOf(session)
+    if (typeof live === 'string') {
+      const trimmed = live.trim()
+      if (trimmed !== '' && isAbsolute(trimmed)) return trimmed
+    }
+  }
+  const cwd = session?.header?.cwd
   if (typeof cwd !== 'string') return ''
   const trimmed = cwd.trim()
-  // The session service already rejects relative headers; re-check anyway so a
-  // hand-built agent in a test cannot smuggle one through this path.
   return trimmed !== '' && isAbsolute(trimmed) ? trimmed : ''
 }
 
@@ -278,8 +309,9 @@ export function resolveWorkingDir(
   args: Record<string, unknown>,
   options: BridgeOptions,
   execution: BridgeToolExecution | undefined,
+  directoryOf?: DirectoryOf,
 ): WorkingDirChoice {
-  const sessionDir = sessionDirOf(execution)
+  const sessionDir = sessionDirOf(execution, directoryOf)
   const explicit = typeof args['working_dir'] === 'string' ? args['working_dir'].trim() : ''
 
   let chosen = ''
@@ -440,6 +472,15 @@ export interface AskDeps {
    * unobserved, which is the pre-feature behaviour rather than an error.
    */
   live?: LiveBoard
+  /**
+   * Reads the calling session's LIVE working directory.
+   *
+   * Wired from the Host's session projections when it has them (see
+   * `BridgeProjectionReader` in `./services.ts` for what that buys and where it
+   * comes from). Left `undefined` this bridge falls back to the session header's
+   * creation-time `cwd`, which is the pre-projection behaviour.
+   */
+  directoryOf?: DirectoryOf
 }
 
 /** The gate this call must pass, built once per normalized option set. */
@@ -630,7 +671,7 @@ export async function runAsk(
     return result({ ok: false, error: 'message 不能为空：要说清楚这一轮让 CodeBuddy 做什么。' })
   }
 
-  const dir = resolveWorkingDir(args, options, execution)
+  const dir = resolveWorkingDir(args, options, execution, deps.directoryOf)
   if (!dir.ok) return result({ ok: false, error: dir.reason })
 
   // Charge the budget BEFORE resolving credentials: the gate exists to bound how
