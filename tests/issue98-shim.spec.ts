@@ -235,14 +235,14 @@ describe('the self-healing retry (issue #98)', () => {
     const reply = await chat(shim, [{ role: 'system', content: DSH_FINGERPRINT }, { role: 'user', content: 'hi' }])
 
     expect(reply.status).toBe(400)
-    expect(mounted.bodies).toHaveLength(2)
+    expect(mounted.bodies).toHaveLength(3)
     // The second body differs from the first only by the invisible characters.
     const first = mounted.bodies[0] ?? ''
     const second = mounted.bodies[1] ?? ''
     expect(second).toContain('\u200b')
     expect(first).not.toContain('\u200b')
     expect(second.replace(/\u200b/gu, '')).toBe(first)
-    expect(reply.message).toContain('并已用一次不可见扰动重试过')
+    expect(reply.message).toContain('并已用一次不可见扰动与一次密集不可见扰动重试过')
     expect(reply.message).not.toContain('并已用强制中性头')
   })
 })
@@ -262,17 +262,17 @@ describe('the reply reads the HOST body, per role (issue #98)', () => {
     expect(reply.status).toBe(400)
     expect(reply.type).toBe('channel_reject')
     // The opening is quoted with its role and with the reason it matters.
-    expect(reply.message).toContain(`「assistant：${DSH_FINGERPRINT}」（插件已加中性头）`)
+    expect(reply.message).toContain(`「assistant：${DSH_FINGERPRINT}，首尾为「here is my prompt」，共 67 字」（插件已加中性头）`)
     // The system message is quoted too — the reader must not be left guessing
     // which of their messages the gateway looked at.
-    expect(reply.message).toContain(`「system：${NOVEL_OPENING}」（不在插件已知名单里`)
+    expect(reply.message).toContain(`「system：${NOVEL_OPENING}，共 59 字」（不在插件已知名单里`)
     // Support's handles survive.
     expect(reply.message).toContain('code 11128')
     expect(reply.message).toContain('requestId 26d17b97-c53b-461a-bd21-34c61c86f15b')
     // The retry really happened, and the reply says so.
     // The ladder spent both rungs (the head retry could not help by itself),
     // and the reply says so.
-    expect(reply.message).toContain('并已用强制中性头与一次不可见扰动重试过')
+    expect(reply.message).toContain('并已用强制中性头与一次不可见扰动与一次密集不可见扰动重试过')
     // The old, misleading claim is gone: the plugin cannot know which line the
     // gateway matched, and pretending otherwise is what misdirected the reports.
     expect(reply.message).not.toContain('命中的 system 提示开头')
@@ -285,7 +285,7 @@ describe('the reply reads the HOST body, per role (issue #98)', () => {
 
     const reply = await chat(shim, [{ role: 'system', content: NOVEL_OPENING }, { role: 'user', content: 'hi' }])
 
-    expect(reply.message).toContain(`「system：${NOVEL_OPENING}」（不在插件已知名单里，网关可能新增了词条）`)
+    expect(reply.message).toContain(`「system：${NOVEL_OPENING}，共 59 字」（不在插件已知名单里，网关可能新增了词条）`)
     // The gateway's shared tips sentence is NOT relayed as if it were a finding.
     expect(reply.message).not.toContain('可能不是官方客户端发出的。请用官方版本重新发送')
   })
@@ -299,7 +299,7 @@ describe('the reply reads the HOST body, per role (issue #98)', () => {
 
     const reply = await chat(shim, [{ role: 'system', content: DSH_FINGERPRINT }, { role: 'user', content: 'hi' }])
 
-    expect(reply.message).toContain(`「system：${DSH_FINGERPRINT}」（插件已加中性头）`)
+    expect(reply.message).toContain(`「system：${DSH_FINGERPRINT}，共 48 字」（插件已加中性头）`)
     expect(reply.message).not.toContain(`「system：${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}」`)
   })
 

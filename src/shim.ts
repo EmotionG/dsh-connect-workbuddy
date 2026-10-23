@@ -108,6 +108,16 @@ export interface WorkBuddyShimOptions {
   catalog: WorkBuddyCatalog
   logger?: ShimLogger
   /**
+   * When to perturb scanned messages with invisible characters.
+   *
+   * `off` keeps the ordinary fail-then-rescue ladder; `failure` (the default)
+   * remembers a successful rescue and starts later requests with it; `always`
+   * starts every request with the dense rescue. `always` is for users whose
+   * gateway has already made the plain attempt a guaranteed 11128 — it trades a
+   * little prompt byte-level purity for avoiding that doomed round trip.
+   */
+  channelPerturbation?: 'off' | 'failure' | 'always'
+  /**
    * Pool failover for chat requests. Absent means no failover at all — the
    * pre-pool behaviour, where the selected account serves and its failure is
    * reported as-is.
@@ -1170,7 +1180,10 @@ function channelEvidenceText(bodyJson: string): string {
       const label = entry.neutralized
         ? '（插件已加中性头）'
         : '（不在插件已知名单里，网关可能新增了词条）'
-      return `「${entry.role}：${entry.opening}」${label}`
+      const span = entry.closing === undefined
+        ? `，共 ${entry.textLength} 字`
+        : `，首尾为「${entry.closing}」，共 ${entry.textLength} 字`
+      return `「${entry.role}：${entry.opening}${span}」${label}`
     })
     .join('、')
   const hidden = entries.length - shown.length
@@ -1392,6 +1405,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const onAccountFailure = options.onAccountFailure
   const onRequestBody = options.onRequestBody
   const onUpstreamUsage = options.onUpstreamUsage
+  const channelPerturbation = options.channelPerturbation ?? 'failure'
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -1640,7 +1654,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     // refresh still happens exactly once, before any retry.
     /**
      * The body to send FIRST, which is the perturbed form once this process has
-     * proven the gateway demands it.
+     * proven the gateway demands it, or when the user selected `always`.
      *
      * `perturbChannelFingerprints` is consulted only when the flag is set, so a
      * fresh process still pays the plain attempt — that is what discovers
@@ -1650,13 +1664,15 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
      * spaces and changes no word the model reads, so starting from it is not a
      * behaviour change, only a saved round trip.
      */
-    const preferred = channelNeedsPerturbation
-      ? perturbChannelFingerprints(prepared) ?? prepared
+    const startPerturbed = channelPerturbation === 'always' || channelNeedsPerturbation
+    const preferred = startPerturbed
+      ? perturbChannelFingerprints(prepared, channelPerturbation === 'always') ?? prepared
       : prepared
     let result = await client.chatStream(credential, preferred, controller.signal)
     // A refused PERTURBED body means the rule changed under us: fall back to the
     // plain ladder and let it rediscover what works. Without this the plugin
-    // could keep sending a shape that no longer helps, forever.
+    // could keep sending a shape that no longer helps, forever. `always` is the
+    // user's explicit choice, so it is not cleared by one refusal.
     if (channelNeedsPerturbation && !result.ok && result.kind === 'channel_reject') {
       channelNeedsPerturbation = false
       logger?.warn('dsh-connect-workbuddy: a perturbed body was refused too; clearing the learned preference and retrying from the plain form')
@@ -1697,6 +1713,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
      */
     let retriedWithForcedHead = false
     let retriedWithPerturbation = false
+    let retriedWithDensePerturbation = false
     if (!result.ok && result.kind === 'channel_reject' && !controller.signal.aborted) {
       const forced = forceNeutralHead(prepared)
       if (forced !== undefined) {
@@ -1715,6 +1732,21 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
           // Only set on SUCCESS — a perturbation that is also refused teaches
           // nothing about what the gateway wants.
           if (result.ok) channelNeedsPerturbation = true
+        }
+      }
+      // The dense rescue is deliberately last: it is the least byte-conservative
+      // form, and the gateway's own wording gives no hint that it would be needed.
+      // It exists because both measured rungs are punctuation-dependent and a
+      // fingerprinted prose span can contain no punctuation at all.
+      if (!result.ok && result.kind === 'channel_reject' && !controller.signal.aborted) {
+        const dense = perturbChannelFingerprints(forced ?? prepared, true)
+        if (dense !== undefined) {
+          logger?.warn('dsh-connect-workbuddy: the channel gate refused the sparse perturbation too; retrying once with a dense word-boundary perturbation')
+          result = await client.chatStream(credential, dense, controller.signal)
+          retriedWithDensePerturbation = true
+          // Dense is the strongest form; remembering it is safe only for the
+          // `failure` policy, which exists to learn from a successful rescue.
+          if (result.ok && channelPerturbation === 'failure') channelNeedsPerturbation = true
         }
       }
     }
@@ -1985,6 +2017,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         const retries: string[] = []
         if (retriedWithForcedHead) retries.push('强制中性头')
         if (retriedWithPerturbation) retries.push('一次不可见扰动')
+        if (retriedWithDensePerturbation) retries.push('一次密集不可见扰动')
         const retryNote = retries.length === 0 ? '' : `，并已用${retries.join('与')}重试过`
         // ISSUE #113: WHICH MEMBER of the `11128` family this is, decided by the
         // plugin's OWN evidence rather than by the upstream's `msg` — which

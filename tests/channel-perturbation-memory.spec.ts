@@ -211,7 +211,7 @@ describe('the perturbed form is remembered after it works', () => {
     const { instance, bodies } = mount([REFUSED])
     shim = instance
     const text = await chat(instance, 'You are a helpful assistant and nothing else follows')
-    expect(bodies.length).toBeLessThanOrEqual(3)
+    expect(bodies.length).toBeLessThanOrEqual(4)
     // The user still gets the failure, with the gate's advice intact.
     expect(text).toContain('上游失败')
   })
@@ -230,5 +230,43 @@ describe('the perturbed form is remembered after it works', () => {
     const secondRunAttempts = bodies.length - firstRunAttempts
     expect(secondRunAttempts).toBe(firstRunAttempts)
     expect(perturbations(bodies[firstRunAttempts] as string)).toBe(0)
+  })
+})
+
+describe('channelPerturbation: "always" starts every request with the dense rescue', () => {
+  function mountWithPolicy(answers: readonly WorkBuddyChatResult[], channelPerturbation: 'off' | 'failure' | 'always'): {
+    instance: WorkBuddyShim
+    bodies: string[]
+  } {
+    const bodies: string[] = []
+    let index = 0
+    const client = {
+      chatStream: async (_credential: unknown, bodyJson: string) => {
+        bodies.push(bodyJson)
+        const answer = answers[Math.min(index, answers.length - 1)]
+        index += 1
+        return answer as WorkBuddyChatResult
+      },
+    } as unknown as WorkBuddyUpstreamClient
+    const instance = createWorkBuddyShim({ store, client, catalog: new WorkBuddyCatalog(), channelPerturbation })
+    return { instance, bodies }
+  }
+
+  it('sends the dense form on the first request and does not spend a doomed plain attempt', async () => {
+    const { instance, bodies } = mountWithPolicy([okResult()], 'always')
+    shim = instance
+    await chat(instance)
+    expect(bodies).toHaveLength(1)
+    const body = bodies[0] as string
+    expect(perturbations(body)).toBeGreaterThan(0)
+    expect(body).toContain('I​t i​s a t​e​s​t')
+  })
+
+  it('keeps the plain body untouched under "off"', async () => {
+    const { instance, bodies } = mountWithPolicy([okResult()], 'off')
+    shim = instance
+    await chat(instance)
+    expect(bodies).toHaveLength(1)
+    expect(perturbations(bodies[0] as string)).toBe(0)
   })
 })

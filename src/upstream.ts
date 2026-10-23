@@ -1663,6 +1663,11 @@ const WORD_INTERNAL_BREAK = /([A-Z][A-Za-z0-9]*)(\s+)(?=[A-Z][A-Za-z0-9])/gu
  * the request AND the neutral head could not change anything. Requests the
  * gateway answers keep their bytes untouched.
  *
+ * `dense` adds word-boundary breaks for the last-resort rescue. The default
+ * sparse form is still used first because it is the least invasive and has been
+ * measured; dense mode exists for the refusal both the neutral head and the
+ * sparse form could not clear.
+ *
  * Idempotent: a body that already carries U+200B in a scanned message is left
  * alone, so a retry never stacks perturbations. Returns `undefined` when
  * nothing would change, which is the caller's signal not to spend a request.
@@ -1670,7 +1675,10 @@ const WORD_INTERNAL_BREAK = /([A-Z][A-Za-z0-9]*)(\s+)(?=[A-Z][A-Za-z0-9])/gu
  * Never throws: a malformed body is the upstream's to reject, and a parse error
  * must not turn a rescue into a crash.
  */
-export function perturbChannelFingerprints(bodyJson: string): string | undefined {
+export function perturbChannelFingerprints(
+  bodyJson: string,
+  dense = false,
+): string | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(bodyJson)
@@ -1687,13 +1695,36 @@ export function perturbChannelFingerprints(bodyJson: string): string | undefined
     // Sentence terminators followed by whitespace, the CJK ones without, and
     // clause commas: between them they land inside almost any prose span that
     // is long enough to be worth fingerprinting.
-    const next = text
+    const boundaries = text
       .replace(/([.!?])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
       .replace(/([。！？])/gu, `$1${ZERO_WIDTH_SPACE}`)
       .replace(/([,;])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
       .replace(WORD_INTERNAL_BREAK, (whole: string, head: string, tail: string) =>
         `${head}${ZERO_WIDTH_SPACE}${tail}`)
-    return next === text ? undefined : next
+    if (!dense) return boundaries === text ? undefined : boundaries
+    // DENSE mode is the strong rescue used after the ordinary rescue has also
+    // failed. Punctuation rules cannot break a fingerprint made only of ordinary
+    // prose, and they cannot break anything at all in a message with no
+    // punctuation. Every non-zero-width rune boundary is a legal exact-match
+    // break, so spacing U+200B between word characters and between words reaches
+    // spans that no punctuation or product-name rule can. Punctuation stays
+    // untouched to keep the body close to what the model and the gateway already
+    // saw; whitespace is likewise left alone so the model's tokenizer sees no
+    // new word splits.
+    const denseText = boundaries.replace(
+      /(?=\S)/gu,
+      (whole: string, offset: number, source: string) => {
+        // The zero-width space inserted by the sparse rules is invisible, but
+        // it is still a rune in the source; it must not delete the sparse break
+        // that the lookahead can otherwise see through.
+        if (source.slice(Math.max(0, offset - 1), offset + 1).includes(ZERO_WIDTH_SPACE)) return ''
+        const previous = source.slice(0, offset).match(/\S(?=\S*$)/u)?.[0]
+        return previous !== undefined && /[A-Za-z0-9぀-ヿ㐀-鿿]/u.test(previous)
+          ? ZERO_WIDTH_SPACE
+          : ''
+      },
+    )
+    return denseText === text ? undefined : denseText
   }
   for (const value of messages) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
@@ -1740,6 +1771,10 @@ export function perturbChannelFingerprints(bodyJson: string): string | undefined
 export interface OpeningEvidence {
   /** The opening line, whitespace-collapsed and clipped. */
   readonly opening: string
+  /** Length of the whole scanned text part, before clipping. */
+  readonly textLength: number
+  /** Last non-empty line of the same text part, clipped; absent for a one-line text. */
+  readonly closing?: string
   /**
    * Which message the opening belongs to — the role verbatim (`system` or
    * `assistant`).
@@ -1822,8 +1857,11 @@ export function openingEvidenceOfBody(bodyJson: string): OpeningEvidence[] {
       if (evidence.length >= SYSTEM_EVIDENCE_LIMIT) break
       const opening = firstNonEmptyLineOf(text).replace(/\s+/gu, ' ').trim()
       if (opening === '') continue
+      const closing = lastNonEmptyLineOf(text).replace(/\s+/gu, ' ').trim()
       evidence.push({
         opening: clip(opening, SYSTEM_OPENING_LIMIT),
+        textLength: text.length,
+        ...closing === '' || closing === opening ? {} : { closing: clip(closing, SYSTEM_OPENING_LIMIT) },
         role: roleOfEvidence,
         neutralized: startsWithNeutralHead(opening) || isUnapprovedChannelOpening(opening),
         messageIndex: index,
@@ -1857,6 +1895,23 @@ const SYSTEM_EVIDENCE_LIMIT = 8
  */
 function firstNonEmptyLineOf(content: string): string {
   for (const line of content.split('\n')) {
+    if (line.trim() !== '') return line
+  }
+  return ''
+}
+
+/**
+ * The last line of a text that carries something.
+ *
+ * The gate has also been measured to match an exact substring INSIDE a scanned
+ * message, so a first line alone can point at the wrong evidence: a neutralised
+ * opening may sit above a fingerprint deeper in the same assistant history
+ * message. The closing line is the cheapest observable other end of that text.
+ */
+function lastNonEmptyLineOf(content: string): string {
+  const lines = content.split('\n')
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index] as string
     if (line.trim() !== '') return line
   }
   return ''

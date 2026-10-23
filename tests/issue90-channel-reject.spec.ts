@@ -178,9 +178,9 @@ describe('openingEvidenceOfBody: what the gate actually read', () => {
       ],
     })
     expect(openingEvidenceOfBody(body)).toEqual([
-      { opening: 'You are an AI agent powered by DeepSeek Harness.', role: 'system', neutralized: true, messageIndex: 0 },
-      { opening: 'Sure.', role: 'assistant', neutralized: false, messageIndex: 2 },
-      { opening: 'Second system message.', role: 'system', neutralized: false, messageIndex: 3 },
+      { opening: 'You are an AI agent powered by DeepSeek Harness.', closing: 'Long body follows.', textLength: 68, role: 'system', neutralized: true, messageIndex: 0 },
+      { opening: 'Sure.', closing: 'Here is the answer.', textLength: 26, role: 'assistant', neutralized: false, messageIndex: 2 },
+      { opening: 'Second system message.', textLength: 22, role: 'system', neutralized: false, messageIndex: 3 },
     ])
   })
 
@@ -316,7 +316,7 @@ describe('the rendered reply names the line the gate refused', () => {
     expect(type).toBe('channel_reject')
     // 1. The evidence, quoted — this is the whole fix. The reader can now see
     //    WHICH line was refused instead of cycling accounts.
-    expect(message).toContain(`请求里被网关扫描的消息开头：「system：${NOVEL}」（不在插件已知名单里`)
+    expect(message).toContain(`请求里被网关扫描的消息开头：「system：${NOVEL}，共 59 字」（不在插件已知名单里`)
     // 2. Support's handles, compact.
     expect(message).toContain('code 11128')
     expect(message).toContain('requestId 26d17b97-c53b-461a-bd21-34c61c86f15b')
@@ -337,7 +337,7 @@ describe('the rendered reply names the line the gate refused', () => {
     shim = mount(failure(400, CHANNEL_REJECT_BODY), async () => undefined)
     await shim.ready
     const { message } = await chat(shim, 'You are an AI agent powered by DeepSeek Harness.')
-    expect(message).toContain('「system：You are an AI agent powered by DeepSeek Harness.」（插件已加中性头）')
+    expect(message).toContain('「system：You are an AI agent powered by DeepSeek Harness.，共 48 字」（插件已加中性头）')
     expect(message).not.toContain(`「system：${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}」`)
   })
 
