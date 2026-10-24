@@ -2423,7 +2423,28 @@ export interface PrepareChatBodyOptions {
    * conversation whose trailing user messages are real turns.
    */
   keepPromptLast?: boolean
+  /**
+   * Additional leading markers that mark a trailing `user` message as injected
+   * context, one literal prefix per entry.
+   *
+   * WHY. The built-in pattern at {@link INJECTED_USER_PREFIX} knows only the
+   * prefixes measured at the time it was written; a companion plugin (or a DSH
+   * update) that starts injecting new text would silently fall back to having
+   * its blocks recorded as the prompt. Each entry is matched LITERALLY at the
+   * start of the message text (after leading whitespace and the
+   * `billion-context` marker, which the built-in pattern tolerates) and OR'ed
+   * with the built-ins; entries are escaped, so no configuration value can turn
+   * the pattern invalid.
+   */
+  extraInjectedPrefixes?: readonly string[]
 }
+
+/**
+ * The optional run of `billion-context` markers every injected-prefix match
+ * tolerates in front of the marker text, and the built-in marker alternatives.
+ */
+const INJECTED_ACP_MARKER_RUN = '(?:<acp\\b[^>]*>m\\d{1,8}<\\/acp>[ \\t]*\\r?\\n?)*'
+const INJECTED_BUILT_IN_PREFIXES = 'Time sampled while preparing turn \\d+, step \\d+:|Current runtime context\\.|<system-reminder>|\\[Compressed conversation section\\]|This is an efficiency nudge'
 
 /**
  * Prefixes the DSH harness uses for the context it injects as `user` messages.
@@ -2431,7 +2452,11 @@ export interface PrepareChatBodyOptions {
  * MEASURED shapes, not guesses: the harness's time-context provider appends
  * `Time sampled while preparing turn N, step M: …`, its runtime-context
  * provider appends `Current runtime context. …`, and its reminders arrive as
- * `<system-reminder>` blocks. `billion-context` may additionally wrap each
+ * `<system-reminder>` blocks. `billion-context` injects its compression record
+ * and its efficiency note as `user` messages too (issue #133): the compressed
+ * section opens with a bracketed `[Compressed conversation section]` heading
+ * line, and the nudge opens with `This is an efficiency …`. `billion-context`
+ * may additionally wrap each
  * message in an `<acp …>mNNNNN</acp>` marker, so the pattern TOLERATES that
  * marker in front of an injected block — the marker itself is never removed
  * from an injected message (see {@link ACP_LEADING_TAG} for where a marker IS
@@ -2441,7 +2466,29 @@ export interface PrepareChatBodyOptions {
  * as it arrived — the alternative (moving "the last non-empty user message")
  * would reorder real conversations from other clients.
  */
-const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
+const INJECTED_USER_PREFIX = new RegExp(`^${INJECTED_ACP_MARKER_RUN}(?:${INJECTED_BUILT_IN_PREFIXES})`, 'u')
+
+/**
+ * Escape a user-supplied prefix so it can be embedded as a literal alternative.
+ */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+/**
+ * The prefix pattern for one request: the built-ins plus any configured
+ * extras, each extra matched literally at the same position the built-ins
+ * match (after optional leading whitespace and the `billion-context` marker).
+ * Returns the shared built-in pattern when there are no usable extras.
+ */
+function injectedPrefixPattern(extras?: readonly string[]): RegExp {
+  const literals = (extras ?? []).filter(extra => typeof extra === 'string' && extra !== '')
+  if (literals.length === 0) return INJECTED_USER_PREFIX
+  return new RegExp(
+    `^${INJECTED_ACP_MARKER_RUN}(?:${INJECTED_BUILT_IN_PREFIXES}|${literals.map(escapeRegExp).join('|')})`,
+    'u',
+  )
+}
 
 /**
  * The per-message marker `billion-context` puts in front of every message.
@@ -2504,9 +2551,9 @@ function stripLeadingAcpTag(content: unknown): { value: unknown, changed: boolea
 }
 
 /** Whether this message is one of the harness's injected context blocks. */
-function isInjectedUserMessage(message: Record<string, unknown>): boolean {
+function isInjectedUserMessage(message: Record<string, unknown>, pattern: RegExp): boolean {
   if (message['role'] !== 'user') return false
-  return INJECTED_USER_PREFIX.test(textOfContent(message['content']).replace(/^\s+/u, ''))
+  return pattern.test(textOfContent(message['content']).replace(/^\s+/u, ''))
 }
 
 /**
@@ -2515,7 +2562,7 @@ function isInjectedUserMessage(message: Record<string, unknown>): boolean {
  * Returns `true` when the order changed, so the caller can serialize only once.
  * Never throws, and a body with nothing to move keeps its exact message order.
  */
-function keepPromptLast(messages: unknown[]): boolean {
+function keepPromptLast(messages: unknown[], pattern: RegExp): boolean {
   // Find the LAST user message that is NOT injected: that is the real prompt.
   let promptIndex = -1
   for (let index = messages.length - 1; index >= 0; index--) {
@@ -2523,7 +2570,7 @@ function keepPromptLast(messages: unknown[]): boolean {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const message = value as Record<string, unknown>
     if (message['role'] !== 'user') continue
-    if (isInjectedUserMessage(message)) continue
+    if (isInjectedUserMessage(message, pattern)) continue
     if (textOfContent(message['content']).trim() === '') continue
     promptIndex = index
     break
@@ -2531,12 +2578,12 @@ function keepPromptLast(messages: unknown[]): boolean {
   if (promptIndex < 0) return false
   const trailing = messages.slice(promptIndex + 1).filter(value =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
-      ? isInjectedUserMessage(value as Record<string, unknown>)
+      ? isInjectedUserMessage(value as Record<string, unknown>, pattern)
       : false)
   if (trailing.length === 0) return false
   const kept = messages.filter((value, index) => !(index > promptIndex
     && typeof value === 'object' && value !== null && !Array.isArray(value)
-    && isInjectedUserMessage(value as Record<string, unknown>)))
+    && isInjectedUserMessage(value as Record<string, unknown>, pattern)))
   kept.splice(promptIndex, 0, ...trailing)
   // The prompt is now the LAST `user` message, which is the one the usage page
   // records — so its own leading marker is what still shows up there.
@@ -2593,11 +2640,108 @@ export function prepareChatBody(source: string, options?: PrepareChatBodyOptions
   // gateways require the conversation to OPEN with a system message, and this
   // reorder only ever moves `user` messages among themselves.
   if (options?.keepPromptLast === true && Array.isArray(obj['messages'])) {
-    keepPromptLast(obj['messages'])
+    keepPromptLast(obj['messages'], injectedPrefixPattern(options.extraInjectedPrefixes))
   }
   neutralizeChannelFingerprints(obj)
   normalizeToolChoice(obj)
   dropRefusedReasoning(obj)
+  return JSON.stringify(obj)
+}
+
+/**
+ * The host's session-title prompt template, verbatim up to the JSON payload.
+ *
+ * MEASURED in the installed DSH desktop 0.2.1-rc.2 `app.asar`, twice: the
+ * request builder interpolates exactly this prefix before the JSON array of
+ * `{seq, text}` records, and the host's own format validator asserts the
+ * session-event carries the same text. Every title plugin the host bundles
+ * (`dsh-session-title-llm`, `…-first-prompt-llm`, `…-all-prompts-llm`) shares
+ * the template, so one prefix covers all variants. `purpose: 'session-title'`
+ * exists on the host's `GenerateOptions` type but does not travel on the
+ * OpenAI wire, so body shape is the only discriminator the shim has.
+ */
+const SESSION_TITLE_PROMPT_PREFIX = 'Generate the session title from this JSON array of human messages:\n'
+const SESSION_TITLE_PROMPT_HEAD = 'Generate the session title from this JSON array of human messages:'
+
+/**
+ * The ASCII-only head of the template, up to (not including) its newline.
+ *
+ * The full prefix contains a raw newline, which a serialized body escapes to
+ * `\n`, so `prepared.includes(SESSION_TITLE_PROMPT_PREFIX)` would MISS every
+ * real title. This head is all plain ASCII, so it appears verbatim in the
+ * serialized body whenever the host sends the template as a single text part
+ * — which its own format validator asserts (`content.length === 1`). It
+ * therefore makes a prefilter without false negatives for the real shape; a
+ * body split mid-template across array parts would slip past it and simply
+ * keep the pre-rewrite behaviour. False positives (a conversation quoting the
+ * template) are fine: the full detection below rejects them — the prefilter
+ * only skips work, never changes a verdict.
+ */
+
+/**
+ * Rewrite a recognized session-title request onto the hidden lightweight model.
+ *
+ * WHY (issues #132/#133). The host asks its title plugins' prompt through the
+ * same provider the conversation uses, so the title of every new session is
+ * billed at the main paid model's rate. The reporter measured the upstream's
+ * hidden `wb-lite` at 0 credits for exactly these requests (real upstream
+ * calls, counted toward request volume, only fired once per new session), so
+ * the rewrite moves the title to that model.
+ *
+ * DETECTION is fail-closed: the body is rewritten only when it has NO
+ * assistant or tool messages and EXACTLY ONE `user` message, and that message
+ * opens with the host's title template above. A real conversation can hardly
+ * collide with the template (the host's own validator asserts it), and the
+ * failure direction if the host ever rewords it is safe: the rewrite simply
+ * stops, and the title is billed as before. `keepPromptLast` is unaffected —
+ * the template prefix is not an injected-context marker, so a title body is
+ * never reordered.
+ *
+ * WHAT is rewritten: the model id and the reasoning fields the lightweight
+ * model does not accept. Everything else — `stream`, `max_tokens`, the
+ * identity headers, every message byte — is untouched, so the other switches
+ * keep behaving exactly as they do for conversation requests.
+ *
+ * Returns the original string unchanged when not enabled or not a title
+ * request, so the caller does not need a separate shape check.
+ */
+export function rewriteSessionTitleModel(
+  prepared: string,
+  options?: { enabled?: boolean, model?: string },
+): string {
+  if (options?.enabled !== true) return prepared
+  // Prefilter before paying for a full parse: the template head must appear
+  // verbatim in any real title body, so a body without it is not a title and
+  // skips the parse entirely (multi-megabyte conversation bodies are the
+  // common case, and the option is global once enabled).
+  if (!prepared.includes(SESSION_TITLE_PROMPT_HEAD)) return prepared
+  let body: unknown
+  try {
+    body = JSON.parse(prepared)
+  } catch {
+    return prepared
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return prepared
+  const obj = body as Record<string, unknown>
+  const messages = obj['messages']
+  if (!Array.isArray(messages)) return prepared
+  let titleText: string | undefined
+  for (const value of messages) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return prepared
+    const message = value as Record<string, unknown>
+    if (message['role'] === 'assistant' || message['role'] === 'tool') return prepared
+    if (message['role'] !== 'user') continue
+    // A second user message means a conversation, not a title request.
+    if (titleText !== undefined) return prepared
+    titleText = textOfContent(message['content'])
+  }
+  if (titleText === undefined) return prepared
+  if (!titleText.replace(/^\s+/u, '').startsWith(SESSION_TITLE_PROMPT_PREFIX)) return prepared
+  obj['model'] = typeof options.model === 'string' && options.model.trim() !== ''
+    ? options.model.trim()
+    : 'wb-lite'
+  delete obj['reasoning_effort']
+  delete obj['reasoning']
   return JSON.stringify(obj)
 }
 

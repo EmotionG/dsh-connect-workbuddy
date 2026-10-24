@@ -554,6 +554,34 @@ export interface Config {
    * an explicit opt-in rather than a silent change on upgrade.
    */
   keepPromptLast?: boolean
+  /**
+   * Extra literal prefixes (issue #133) treated like the harness's injected
+   * context markers when `keepPromptLast` is on, for injected blocks a
+   * companion plugin produces that the built-in list does not recognize. Each
+   * entry is matched literally at the start of a trailing `user` message.
+   */
+  extraInjectedPrefixes?: string[]
+  /**
+   * Move the host's session-title request onto the hidden lightweight model
+   * (issues #132/#133). Off by default: it is a real upstream request either
+   * way, and the rewrite changes which bucket it is billed against.
+   */
+  sessionTitle?: {
+    /**
+     * Whether title requests are re-pointed at {@link sessionTitle.model}.
+     * The host still fires the request exactly once per new session; the
+     * reporter measured the lightweight model at 0 credits for these calls
+     * (request volume still counts, and the evidence is reporter-level, not
+     * reproduced by this plugin).
+     */
+    enabled?: boolean
+    /**
+     * Target model for the rewritten title request. Defaults to `wb-lite`,
+     * the hidden model the reporter measured; configurable in case the id
+     * changes or a region exposes a different one.
+     */
+    model?: string
+  }
 }
 
 const modelConfig = z.object({
@@ -803,6 +831,18 @@ export const Config: z<Config> = z.object({
         "Message count and text are preserved; the one edit is the recorded prompt's own leading " +
         "<acp> marker. Off by default because it changes the message order the upstream counts."),
   ) as unknown as z<boolean>,
+  extraInjectedPrefixes: asVolatile(
+    z.array(z.string())
+      .default([])
+      .description('Extra literal prefixes (issue #133) treated like the harness-injected context markers when keepPromptLast is on — for blocks a companion plugin injects that the built-in list does not recognize. Each entry matches the start of a trailing user message; read only while keepPromptLast is enabled. Sampled when the plugin mounts: reload the plugin (or restart the host) after changing it.'),
+  ) as unknown as z<string[]>,
+  sessionTitle: asVolatile(
+    z.object({
+      enabled: z.boolean().default(false),
+      model: z.string().default('wb-lite'),
+    }).default({})
+      .description('Move the host session-title request onto a hidden lightweight model (issues #132/#133). The host fires one real upstream request per new session either way; enabled re-points it at `model` (default wb-lite, measured 0 credits by the reporter) instead of billing the main paid model. Request volume still counts, and the lightweight model is reporter-measured, not reproduced here. Sampled when the plugin mounts: reload the plugin (or restart the host) after changing it.'),
+  ) as unknown as z<{ enabled: boolean, model: string }>,
 }) as unknown as z<Config>
 
 /**
@@ -1042,6 +1082,8 @@ export function apply(ctx: Context, config: Config): void {
       logger: ctx.logger,
       channelPerturbation: unwrapVolatile(config.channelPerturbation) ?? 'failure',
       keepPromptLast: unwrapVolatile(config.keepPromptLast) === true,
+      extraInjectedPrefixes: unwrapVolatile(config.extraInjectedPrefixes) ?? [],
+      sessionTitle: unwrapVolatile(config.sessionTitle) ?? {},
       /**
        * Pool routing, bound to THIS region.
        *
