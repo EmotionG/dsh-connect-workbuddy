@@ -648,6 +648,18 @@ describe('rewriteSessionTitleModel (issues #132/#133)', () => {
     expect(messages[0]?.role).toBe('system')
     expect(prepared['model']).toBe('wb-lite')
   })
+
+  it('prefilters without false negatives across content shapes and escaping', () => {
+    // The prefilter matches the serialized text, where the template newline is
+    // escaped: both a bare string and an array first-part must still be found.
+    for (const content of [
+      'Generate the session title from this JSON array of human messages:\n[]',
+      [{ type: 'text', text: 'Generate the session title from this JSON array of human messages:\n[]' }],
+    ]) {
+      const source = prepareChatBody(JSON.stringify({ model: 'm', messages: [{ role: 'user', content }] }))
+      expect(JSON.parse(rewriteSessionTitleModel(source, { enabled: true })).model).toBe('wb-lite')
+    }
+  })
 })
 
 describe('parseUpstreamErrorDetail', () => {

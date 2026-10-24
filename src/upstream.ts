@@ -2563,6 +2563,22 @@ export function prepareChatBody(source: string, options?: PrepareChatBodyOptions
  * OpenAI wire, so body shape is the only discriminator the shim has.
  */
 const SESSION_TITLE_PROMPT_PREFIX = 'Generate the session title from this JSON array of human messages:\n'
+const SESSION_TITLE_PROMPT_HEAD = 'Generate the session title from this JSON array of human messages:'
+
+/**
+ * The ASCII-only head of the template, up to (not including) its newline.
+ *
+ * The full prefix contains a raw newline, which a serialized body escapes to
+ * `\n`, so `prepared.includes(SESSION_TITLE_PROMPT_PREFIX)` would MISS every
+ * real title. This head is all plain ASCII, so it appears verbatim in the
+ * serialized body whenever the host sends the template as a single text part
+ * — which its own format validator asserts (`content.length === 1`). It
+ * therefore makes a prefilter without false negatives for the real shape; a
+ * body split mid-template across array parts would slip past it and simply
+ * keep the pre-rewrite behaviour. False positives (a conversation quoting the
+ * template) are fine: the full detection below rejects them — the prefilter
+ * only skips work, never changes a verdict.
+ */
 
 /**
  * Rewrite a recognized session-title request onto the hidden lightweight model.
@@ -2596,6 +2612,11 @@ export function rewriteSessionTitleModel(
   options?: { enabled?: boolean, model?: string },
 ): string {
   if (options?.enabled !== true) return prepared
+  // Prefilter before paying for a full parse: the template head must appear
+  // verbatim in any real title body, so a body without it is not a title and
+  // skips the parse entirely (multi-megabyte conversation bodies are the
+  // common case, and the option is global once enabled).
+  if (!prepared.includes(SESSION_TITLE_PROMPT_HEAD)) return prepared
   let body: unknown
   try {
     body = JSON.parse(prepared)

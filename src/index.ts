@@ -834,14 +834,14 @@ export const Config: z<Config> = z.object({
   extraInjectedPrefixes: asVolatile(
     z.array(z.string())
       .default([])
-      .description('Extra literal prefixes (issue #133) treated like the harness-injected context markers when keepPromptLast is on — for blocks a companion plugin injects that the built-in list does not recognize. Each entry matches the start of a trailing user message; read only while keepPromptLast is enabled.'),
+      .description('Extra literal prefixes (issue #133) treated like the harness-injected context markers when keepPromptLast is on — for blocks a companion plugin injects that the built-in list does not recognize. Each entry matches the start of a trailing user message; read only while keepPromptLast is enabled. Sampled when the plugin mounts: reload the plugin (or restart the host) after changing it.'),
   ) as unknown as z<string[]>,
   sessionTitle: asVolatile(
     z.object({
       enabled: z.boolean().default(false),
       model: z.string().default('wb-lite'),
     }).default({})
-      .description('Move the host session-title request onto a hidden lightweight model (issues #132/#133). The host fires one real upstream request per new session either way; enabled re-points it at `model` (default wb-lite, measured 0 credits by the reporter) instead of billing the main paid model. Request volume still counts, and the lightweight model is reporter-measured, not reproduced here.'),
+      .description('Move the host session-title request onto a hidden lightweight model (issues #132/#133). The host fires one real upstream request per new session either way; enabled re-points it at `model` (default wb-lite, measured 0 credits by the reporter) instead of billing the main paid model. Request volume still counts, and the lightweight model is reporter-measured, not reproduced here. Sampled when the plugin mounts: reload the plugin (or restart the host) after changing it.'),
   ) as unknown as z<{ enabled: boolean, model: string }>,
 }) as unknown as z<Config>
 
