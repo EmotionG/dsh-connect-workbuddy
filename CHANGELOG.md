@@ -29,6 +29,10 @@
   - `current()` 会**先看**池的运行时轮换标记（`rotatedAccountId`），再看用户保存的选择；而 `accounts()` 回答 `selected` 时只看保存的选择。池子把请求轮换到 B 号后，shim 记在 B 号账上，卡片却把 A 号标成「当前选用」——截图里那枚标记落在被限流的号上，而胶囊与行内数字都属于另一个号。
   - 同一份用量文档还会因此**点名两个账号**：`credential` 取自 `current()`（真正计费的那个），而 `account.accountId` / `accountName` 取自 `accounts()`（保存的那个）。现在 `accounts()` 用与 `current()` **完全相同**的优先级解析标记：有活跃轮换且该账号仍在本地，就标它；轮换指向已消失的账号时与 `current()` 一样回落；其余情况仍按「显式选择 / 默认最新」判断。清除轮换后标记随 `current()` 回到用户自己的选择，轮换本身仍然从不写设置。
   - 面板里还有第二处同源分裂：行的**底色**读 credits 端点的 `selected`（保存的选择），**「当前选用」文字**读池文档的 `current`（被计费的账号）。池子一轮换，两者就指向不同行——报告者看到的「底色在一个号、文字在另一个号」。现在整行（底色、文字、切换按钮的禁用态）都读同一个答案；`selected` 只在没有池文档时才作为兜底。
+- **新增 `sessionTitle` 开关：把每个新会话的标题请求改到隐藏轻量模型（#132/#133，报告者实测；本插件未复现）。**
+  - DSH 宿主每个新会话发一次标题生成请求，走与对话相同的 provider，按主付费模型费率计费。开启 `sessionTitle.enabled` 后，识别为标题请求的 body（宿主标题模板 `Generate the session title from this JSON array of human messages:` 打头、整条 body 只有这一条 user 消息、无 assistant/tool 消息）被改写到 `sessionTitle.model`（默认 `wb-lite`），并删除 `reasoning_effort` / `reasoning` 字段。报告者实测该模型对这类请求 **0 积分**，但仍是真实上游请求、计入请求数、仅新会话首条触发一次。
+  - 识别依据是**本机安装的 DSH 桌面端 0.2.1-rc.2 `app.asar` 的字节级取证**：请求构造与宿主自己的格式校验器都断言这一模板与单 user 消息形状；宿主 `GenerateOptions.purpose: 'session-title'` 不随 OpenAI 线上协议传输，body 形状是 shim 唯一可用的判据。识别 **fail-closed**：宿主改模板则改写静默停止、回到原计费，普通对话不可能命中（模板前缀须从文本开头匹配，正文引用模板的对话不会被改写——各有测试钉住）。
+  - **默认 `false`**，与 #132 两项同一理由：这笔请求无论改写与否都会发出，但改写改变的是上游把这笔记进哪个计费桶（0 积分 vs 主模型费率），升级后不该静默变化；且 wb-lite 是隐藏模型、能过渠道闸是报告者账号级的实测。目标模型可配置（`sessionTitle.model`），防 id 变化或区域差异；上游拒绝时仅该会话标题失败一次，不影响主对话。
 - **`keepPromptLast` 认得 billion-context 注入的两类上下文块（#133）。**
   - 5.8.0 的注入前缀清单只覆盖宿主自家的三类（时间采样、`Current runtime context.`、`<system-reminder>`），而 billion-context 压缩插件同样以 `role=user` 注入内容：压缩摘要块以 `[Compressed conversation section]` 标题行打头，效率提示以 `This is an efficiency` 打头。开了 `keepPromptLast` 后这两类漏网，被当成真实提问留在末尾，用量页「请求」列随之记错——报告者已在本地产物上逐字节验证此修法并实测恢复。
   - 注入前缀同时做成**可配置**：新增 `extraInjectedPrefixes`（字符串数组，每项按**字面**前缀匹配、正则元字符会被转义，默认空），压缩插件或宿主将来改文案时不必等插件发版。它只在 `keepPromptLast` 开启时参与匹配，默认行为不变。

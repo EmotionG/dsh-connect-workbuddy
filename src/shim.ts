@@ -42,6 +42,7 @@ import {
   openingEvidenceOfBody,
   perturbChannelFingerprints,
   requestEvidenceOf,
+  rewriteSessionTitleModel,
   WorkBuddyUpstreamClient,
   type UpstreamErrorKind,
   type WorkBuddyChatResult,
@@ -137,6 +138,17 @@ export interface WorkBuddyShimOptions {
    * `keepPromptLast` is on.
    */
   extraInjectedPrefixes?: readonly string[]
+  /**
+   * Move the host's session-title request onto the hidden lightweight model
+   * (issues #132/#133). Disabled by default; when enabled, a body recognized
+   * as the one-message title prompt is re-pointed at `model` (default
+   * `wb-lite`, measured 0 credits) instead of billing the main paid model.
+   * See `rewriteSessionTitleModel` for the fail-closed detection rules.
+   */
+  sessionTitle?: {
+    enabled?: boolean
+    model?: string
+  }
   /**
    * Pool failover for chat requests. Absent means no failover at all — the
    * pre-pool behaviour, where the selected account serves and its failure is
@@ -1443,6 +1455,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const extraInjectedPrefixes = Array.isArray(options.extraInjectedPrefixes)
     ? options.extraInjectedPrefixes.filter(entry => typeof entry === 'string' && entry !== '')
     : []
+  const sessionTitleOptions = options.sessionTitle ?? {}
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -1648,10 +1661,10 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     }
 
     const raw = (await readBody(req)).toString('utf8')
-    const prepared = prepareChatBody(raw, {
+    const prepared = rewriteSessionTitleModel(prepareChatBody(raw, {
       keepPromptLast: keepPromptLastEnabled,
       extraInjectedPrefixes,
-    })
+    }), sessionTitleOptions)
     // The model this request is about, read from the body that goes upstream
     // (issue #61). Read ONCE, so every attempt — the first and each failover
     // retry — is remembered against the same model.

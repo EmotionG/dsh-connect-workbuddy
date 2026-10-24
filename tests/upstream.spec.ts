@@ -12,6 +12,7 @@ import {
   parseUpstreamModel,
   prepareChatBody,
   regionOf,
+  rewriteSessionTitleModel,
   globalBase,
   isUndecodablePolicyBody,
   selectCliModels,
@@ -537,6 +538,115 @@ describe('prepareChatBody keepPromptLast (issue #132)', () => {
     }))
     // The built-in prefixes still work, and nothing threw.
     expect(String(prepared.at(-1)?.content)).toBe('真实输入')
+  })
+})
+
+describe('rewriteSessionTitleModel (issues #132/#133)', () => {
+  /**
+   * The wire body the host really sends for a title (measured in the 0.2.1-rc.2
+   * app.asar): exactly one user message opening with the title template, the
+   * JSON array of `{seq, text}` records below it. `prepareChatBody` runs first
+   * because the shim applies the rewrite to the prepared body.
+   */
+  const titleBody = (): string => prepareChatBody(JSON.stringify({
+    model: 'deepseek-v4.1-flash',
+    messages: [
+      { role: 'user', content: 'Generate the session title from this JSON array of human messages:\n'
+        + JSON.stringify([{ seq: 0, text: '推荐几个菜谱' }]) },
+    ],
+  }), { keepPromptLast: true })
+
+  it('leaves every body untouched when the option is off (the default)', () => {
+    const source = titleBody()
+    expect(rewriteSessionTitleModel(source)).toBe(source)
+    expect(rewriteSessionTitleModel(source, { enabled: false })).toBe(source)
+  })
+
+  it('re-points a recognized title request at the lightweight model and drops reasoning fields', () => {
+    const source = prepareChatBody(JSON.stringify({
+      model: 'deepseek-v4.1-flash',
+      reasoning_effort: 'off',
+      reasoning: { effort: 'low' },
+      max_tokens: 64,
+      messages: [
+        { role: 'user', content: 'Generate the session title from this JSON array of human messages:\n'
+          + JSON.stringify([{ seq: 3, text: '帮我把这段话翻译成英文' }]) },
+      ],
+    }))
+    const prepared = JSON.parse(rewriteSessionTitleModel(source, { enabled: true })) as Record<string, unknown>
+    expect(prepared['model']).toBe('wb-lite')
+    expect(prepared).not.toHaveProperty('reasoning_effort')
+    expect(prepared).not.toHaveProperty('reasoning')
+    // Everything else survives byte-for-byte semantics: stream, cap, messages.
+    expect(prepared['max_tokens']).toBe(64)
+    expect(Array.isArray(prepared['messages'])).toBe(true)
+  })
+
+  it('honours a configured target model', () => {
+    const prepared = JSON.parse(rewriteSessionTitleModel(titleBody(), {
+      enabled: true,
+      model: 'wb-mini',
+    })) as Record<string, unknown>
+    expect(prepared['model']).toBe('wb-mini')
+  })
+
+  it('ignores a blank model and falls back to wb-lite', () => {
+    const prepared = JSON.parse(rewriteSessionTitleModel(titleBody(), {
+      enabled: true,
+      model: '   ',
+    })) as Record<string, unknown>
+    expect(prepared['model']).toBe('wb-lite')
+  })
+
+  it('does NOT rewrite a body with two user messages', () => {
+    const source = prepareChatBody(JSON.stringify({
+      model: 'deepseek-v4.1-flash',
+      messages: [
+        { role: 'user', content: 'Generate the session title from this JSON array of human messages:\n[]' },
+        { role: 'user', content: '普通提问' },
+      ],
+    }))
+    const prepared = JSON.parse(rewriteSessionTitleModel(source, { enabled: true })) as Record<string, unknown>
+    expect(prepared['model']).toBe('deepseek-v4.1-flash')
+  })
+
+  it('does NOT rewrite a body containing an assistant or tool message', () => {
+    for (const extra of [
+      { role: 'assistant', content: '之前的回答' },
+      { role: 'tool', content: 'tool result' },
+    ]) {
+      const source = prepareChatBody(JSON.stringify({
+        model: 'deepseek-v4.1-flash',
+        messages: [
+          { role: 'user', content: 'Generate the session title from this JSON array of human messages:\n[]' },
+          extra,
+        ],
+      }))
+      const prepared = JSON.parse(rewriteSessionTitleModel(source, { enabled: true })) as Record<string, unknown>
+      expect(prepared['model']).toBe('deepseek-v4.1-flash')
+    }
+  })
+
+  it('does NOT rewrite a user message that merely resembles the template', () => {
+    // The prefix must match from the START of the text (after whitespace);
+    // a conversation that quotes the template mid-sentence is a conversation.
+    const source = prepareChatBody(JSON.stringify({
+      model: 'deepseek-v4.1-flash',
+      messages: [
+        { role: 'user', content: '请问这个提示是干嘛的：Generate the session title from this JSON array of human messages:' },
+      ],
+    }))
+    const prepared = JSON.parse(rewriteSessionTitleModel(source, { enabled: true })) as Record<string, unknown>
+    expect(prepared['model']).toBe('deepseek-v4.1-flash')
+  })
+
+  it('still recognizes the title after the system head and keepPromptLast ran', () => {
+    // The shim rewrites the PREPARED body: ensureSystemHead has inserted a
+    // system message by then, and detection must tolerate it.
+    const prepared = JSON.parse(rewriteSessionTitleModel(titleBody(), { enabled: true })) as Record<string, unknown>
+    const messages = prepared['messages'] as { role: string }[]
+    expect(messages[0]?.role).toBe('system')
+    expect(prepared['model']).toBe('wb-lite')
   })
 })
 

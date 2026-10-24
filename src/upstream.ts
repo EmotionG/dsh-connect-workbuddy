@@ -2551,6 +2551,82 @@ export function prepareChatBody(source: string, options?: PrepareChatBodyOptions
 }
 
 /**
+ * The host's session-title prompt template, verbatim up to the JSON payload.
+ *
+ * MEASURED in the installed DSH desktop 0.2.1-rc.2 `app.asar`, twice: the
+ * request builder interpolates exactly this prefix before the JSON array of
+ * `{seq, text}` records, and the host's own format validator asserts the
+ * session-event carries the same text. Every title plugin the host bundles
+ * (`dsh-session-title-llm`, `…-first-prompt-llm`, `…-all-prompts-llm`) shares
+ * the template, so one prefix covers all variants. `purpose: 'session-title'`
+ * exists on the host's `GenerateOptions` type but does not travel on the
+ * OpenAI wire, so body shape is the only discriminator the shim has.
+ */
+const SESSION_TITLE_PROMPT_PREFIX = 'Generate the session title from this JSON array of human messages:\n'
+
+/**
+ * Rewrite a recognized session-title request onto the hidden lightweight model.
+ *
+ * WHY (issues #132/#133). The host asks its title plugins' prompt through the
+ * same provider the conversation uses, so the title of every new session is
+ * billed at the main paid model's rate. The reporter measured the upstream's
+ * hidden `wb-lite` at 0 credits for exactly these requests (real upstream
+ * calls, counted toward request volume, only fired once per new session), so
+ * the rewrite moves the title to that model.
+ *
+ * DETECTION is fail-closed: the body is rewritten only when it has NO
+ * assistant or tool messages and EXACTLY ONE `user` message, and that message
+ * opens with the host's title template above. A real conversation can hardly
+ * collide with the template (the host's own validator asserts it), and the
+ * failure direction if the host ever rewords it is safe: the rewrite simply
+ * stops, and the title is billed as before. `keepPromptLast` is unaffected —
+ * the template prefix is not an injected-context marker, so a title body is
+ * never reordered.
+ *
+ * WHAT is rewritten: the model id and the reasoning fields the lightweight
+ * model does not accept. Everything else — `stream`, `max_tokens`, the
+ * identity headers, every message byte — is untouched, so the other switches
+ * keep behaving exactly as they do for conversation requests.
+ *
+ * Returns the original string unchanged when not enabled or not a title
+ * request, so the caller does not need a separate shape check.
+ */
+export function rewriteSessionTitleModel(
+  prepared: string,
+  options?: { enabled?: boolean, model?: string },
+): string {
+  if (options?.enabled !== true) return prepared
+  let body: unknown
+  try {
+    body = JSON.parse(prepared)
+  } catch {
+    return prepared
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return prepared
+  const obj = body as Record<string, unknown>
+  const messages = obj['messages']
+  if (!Array.isArray(messages)) return prepared
+  let titleText: string | undefined
+  for (const value of messages) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return prepared
+    const message = value as Record<string, unknown>
+    if (message['role'] === 'assistant' || message['role'] === 'tool') return prepared
+    if (message['role'] !== 'user') continue
+    // A second user message means a conversation, not a title request.
+    if (titleText !== undefined) return prepared
+    titleText = textOfContent(message['content'])
+  }
+  if (titleText === undefined) return prepared
+  if (!titleText.replace(/^\s+/u, '').startsWith(SESSION_TITLE_PROMPT_PREFIX)) return prepared
+  obj['model'] = typeof options.model === 'string' && options.model.trim() !== ''
+    ? options.model.trim()
+    : 'wb-lite'
+  delete obj['reasoning_effort']
+  delete obj['reasoning']
+  return JSON.stringify(obj)
+}
+
+/**
  * Remove `reasoning_effort: "off"` when it would only ever fail (issue #83).
  *
  * The refusal table is keyed by exact model id, but the model a request
