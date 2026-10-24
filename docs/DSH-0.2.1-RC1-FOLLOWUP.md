@@ -201,6 +201,31 @@ npm semver 判同一问题                          → false
 
 ---
 
+### 2.4 ⚠️ 2026-10-24 订正（rc.3 复核）：上一节的「为什么可以接受」归因错了
+
+§2.2 的路 2 与上一节都写着「宿主只校验 `@deepseek-ai/dsh*`，且 profile 用 `link:` +
+`autoInstallPeers:false`，所以 rc 宿主上插件照常加载」。**这个解释是错的**，保留记录以免误导后人。
+
+实测（0.2.1-rc.3）：`evaluatePluginCompatibility()`（`dsh-app-boot/lib/index.js:311`，其 `:276`
+的 `satisfies` 包装）是这样求值的——
+
+```js
+semver.satisfies(runtimeVersion, range, { includePrerelease: true })
+```
+
+第三参数就是关键。于是 `satisfies('0.2.1-rc.3', '>=0.1.7-rc.1 <0.3.0-0', {includePrerelease:true})`
+判 **true** —— **兼容闸门确实在跑、也确实校验了本插件，只是对 rc 放行**。与链接方式无关。
+
+上一节钉住的「裸 `semver.satisfies` 判 false」这个**事实**依然正确（`tests/dsh-line.spec.ts`
+照旧断言它），错的只是对**为什么没被拦**的归因；该测试里的注释已同步订正。
+
+**因此范围无需修改**：`0.2.1-rc.3` 已被现声明（在宿主口径下）接受；等宿主发 `0.2.1` GA，裸 semver
+也会判 true。`includePrerelease` 同样会放行 `0.3.0-rc.1`，而 `<0.3.0-0` 仍把它挡住——上界的必要性不变。
+
+详见 [`DSH-0.2.1-RC3-FOLLOWUP.md`](DSH-0.2.1-RC3-FOLLOWUP.md) §3。
+
+---
+
 ## 三、P2：类型层面的隐性断裂
 
 `src/adapter.ts:241` `adaptLegacyPiAiContext(context: Context): Context` 返回 0.85 形状，

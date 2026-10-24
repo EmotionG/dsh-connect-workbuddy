@@ -1,5 +1,30 @@
 # Changelog
 
+## 5.8.2 (2026-10-24)
+
+> 适配版本：跟随宿主 `0.2.1-rc.3`。rc.2 在 web-app 捆绑里新增了官方插件 `@deepseek-ai/dsh-client-ui-deepseek-model-label-1017`（给 DeepSeek 官方 Flash 行画「1017」发布徽章），它与本插件注册**同一个 `single` 槽**、**同一个默认优先级 0**——于是本插件的注册**抛错**，模型选择器里的负载徽章**静默消失**。本版修掉这一处，其余全部兼容。
+
+### Fixes
+
+- **模型选择器的标签槽位不再与宿主自带的 1017 徽章插件抢同一格（0.2.1-rc.2+）。**
+  - 该槽是 `kind: "single"`，`SlotCore.register()` 对同一优先级上的第二次注册**直接抛错**：`single slot "conversation.input.model.label" already has a registration at priority 0 … (lowest renders)`。两个插件都用默认 `0`，谁后注册谁抛。实测是本插件抛——应用自己的崩溃日志里逐字记着这句，以及本插件的 `model label slot failed to register`。因为 `catch` 只 `console.error`（刻意的：标签失注册不该让整页挂掉），页面上**只是徽章不见了**，没有任何可见报错，所以一直没被发现。
+  - 修法只做一件事：**换一个不碰撞的优先级**。`-0.5`（分数优先级合法）与宿主的默认 `0`、以及 `dsh-connect-qoder` 占用的 `-1` 都不碰撞，三个插件于是排成 `-1`（qoder）→ `-0.5`（本插件）→ `0`（宿主 1017）。取值只要求「不与别人碰撞」，不需要知道别人用了几。
+  - **刻意不引入插件之间的联动**（项目不变量，见 [`docs/DESIGN.md`](docs/DESIGN.md) §零）：不读 `slots.entries(...)` 枚举同槽的其它注册、不把别家的行「转交」给别的插件的组件渲染、不为对方合成 `t` 席位、不依赖别人的优先级。曾经的转交方案能算「更客气」，但它要代渲染器合成对方的 props（`t` 来自对方注册时声明的 `locale:` 命名空间），还得约定一条跨插件转交方向否则递归——实测两个插件都转交时同一行被来回传递，直接 `RangeError: Maximum call stack size exceeded`。这不是本插件该承担的责任，整体撤除。
+  - **代价（已接受并记录）**：该槽是 `single`，一格只有一个赢家。「最低优先级渲染」意味着 `-0.5` 实际上**赢过**宿主的 `0`，因此本插件赢下该格时，别的插件在**它自己的行**上的装饰不会被合成（宿主的「1017」徽章不会出现在本插件渲染的那一行）。不是自己的模型行，一律给宿主契约的下限 `model.name`。这是**放弃联动换来的确定性**，不是待修缺陷；要改成联动，先改 `DESIGN.md` §零。
+  - **取值 `-0.5` 的定夺依据（不需要用户来选）**：宿主一方早有书面立场——`dsh-client-ui-deepseek-model-label-1017` 的 README「Known Limitations and Deferred Work」逐字写着「the two presentations do not compose automatically」，并把处置办法写成**在 profile patch 里禁用它**（配置层，不是运行时协商）。所以「两个徽标不合成」是宿主的官方立场，本项目的 §零 不变量与之一致。其余三条：1017 的 package description 就是「**Temporary** 1017 release badge」，README 承诺结构化发布标签上线后移除该包；它只装饰**一个**模型（`DeepSeek-V4.1-Flash`，限 `deepseek-official`/`deepseek-account` 两条线路），而本插件装饰**自己全部 WorkBuddy 模型行**（负载等级、促销价、夜间折扣、新模型标记）；`single` 槽「最低优先级渲染」，`-0.5` 实际赢过宿主的 `0`——但选它是为了**不碰撞**而非谦让，且 1017 被移除后本插件自动成为该格唯一占用者。
+
+### Docs
+
+- 新增 [`docs/DSH-0.2.1-RC3-FOLLOWUP.md`](docs/DSH-0.2.1-RC3-FOLLOWUP.md)：rc.3 复核全文，含逐面包比对与本次回归的完整证据链。
+- [`docs/DSH-0.2.1-RC1-FOLLOWUP.md`](docs/DSH-0.2.1-RC1-FOLLOWUP.md) 补 §2.4 **订正**：原文把「rc 宿主上照常加载」归因为「闸门只校验 `@deepseek-ai/dsh*` + profile 用 `link:`」，**这是错的**——闸门确实校验，只是用 `semver.satisfies(rt, range, { includePrerelease: true })` 放行。范围本身无需改（裸 semver 判 false 的事实仍成立）。
+
+### Tests
+
+- 新增 [`tests/model-label-slot-coexistence.spec.tsx`](tests/model-label-slot-coexistence.spec.tsx)（6 条），跑**真实的 `SlotCore`**：宿主 1017 在场时注册不抛错、优先级与 `-1`/`0` 均不碰撞、自家行仍有徽章；外加「不做联动」一组——别家行只给纯目录名（**即使**另一个贡献者就在账本上）、源码不得出现 `slots.entries(...)` / 渲染别家组件 / `locale.bind`、注册只声明自家常量。
+- 变异验证：把 `MODEL_LABEL_PRIORITY` 改回 `0` → 多条红并**复现同一句崩溃原文**；把注册换成会读账本的写法 → 「不做联动」那组红。
+- `tests/dsh-line.spec.ts` 里「已知预发布悬崖」的注释按实测订正归因（断言本身不变，仍钉「裸 semver 判 false」）。
+- 完整套件 **2225 通过 / 2 条按平台跳过**（此前 2219），`typecheck` 与 `build` 通过。
+
 ## 5.8.1 (2026-10-24)
 
 > 修复版本：解决 DSH 会话在国内区**每一步**都 `400 / 11128` 的死循环。根因不是账号、额度、网络，也不是「宿主提示词要你改」——是插件的救援梯子对网关的**精确子串门**有一个可证明的盲区：`You are a coding agent powered by <model> model.` 这条 agent 身份从句，稀疏零宽扰动打不到，于是每次请求都逐字节原样上线被拒。**凭据、计费、provider 注册均未改动**；请求路径新增的定向破坏只插不可见字符（实测真实提示 **+0.26% 字节**），不改模型读到的任何一个词。

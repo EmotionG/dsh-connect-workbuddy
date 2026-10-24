@@ -36,7 +36,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { WorkBuddyCard } from './WorkBuddyCard.tsx'
 import type { WorkBuddyCardInjected } from './WorkBuddyCard.tsx'
 import { ComposerCreditsGate } from './ComposerCreditsGate.tsx'
-import { WorkBuddyModelLabel } from './WorkBuddyModelLabel.tsx'
+import { MODEL_LABEL_PRIORITY, WorkBuddyModelLabel } from './WorkBuddyModelLabel.tsx'
 import { CodebuddyLive } from './CodebuddyLive.tsx'
 import { selectQuotaNoticeClaim, WorkBuddyQuotaNotice } from './WorkBuddyQuotaNotice.tsx'
 import { en, zh } from './locales.ts'
@@ -194,14 +194,32 @@ export function apply(ctx: WorkBuddyClientContext): void {
      * example is the official DeepSeek "1017" release badge, which is the same
      * job — a coloured marker beside a model name.
      *
-     * Registered unconditionally: the component itself renders nothing for a
-     * provider that is not ours, so there is nothing to gate on.
+     * WHY A NEGATIVE PRIORITY (host 0.2.1-rc.2 and later). This is a `single`
+     * slot: it holds ONE cell, and `SlotCore.register()` THROWS when a second
+     * registration claims the same priority — "single slot … already has a
+     * registration at priority 0 — register at a different priority to shadow
+     * it (lowest renders)". The host itself now ships a contributor here
+     * (`@deepseek-ai/dsh-client-ui-deepseek-model-label-1017`, in the web-app
+     * bundle from rc.2 on) that registers at the default 0, so registering at
+     * 0 makes the two race: whichever lands second throws. Measured on
+     * 0.2.1-rc.3 that is US — the app's own crash log records, verbatim,
+     * "single slot \"conversation.input.model.label\" already has a
+     * registration at priority 0 (registered by Kb)" plus this entry's
+     * catch-all line "model label slot failed to register" twice per page
+     * load, which is the badge silently disappearing from the picker.
+     *
+     * See `MODEL_LABEL_PRIORITY` in `./WorkBuddyModelLabel.tsx` for the full
+     * ordering, the measured evidence, and the deliberate absence of any
+     * inter-plugin coordination (project invariant, `docs/DESIGN.md` §六).
      */
     const registerModelLabel = (): (() => void) | undefined => {
       try {
         return ctx.slots.inject('conversation.input.model.label' as never, () => (ctx.slots as unknown as {
-          register(options: { name: string }, component: unknown): () => void
-        }).register({ name: 'conversation.input.model.label' }, WorkBuddyModelLabel))
+          register(options: { name: string, priority: number }, component: unknown): () => void
+        }).register(
+          { name: 'conversation.input.model.label', priority: MODEL_LABEL_PRIORITY },
+          WorkBuddyModelLabel,
+        ))
       } catch (error: unknown) {
         console.error('[dsh-connect-workbuddy] model label slot failed to register (host provider unaffected):', error)
         return undefined

@@ -242,19 +242,79 @@ function NewModelMark(): ReactElement {
   )
 }
 
+/** The props the host's picker hands to whatever wins the model-label cell. */
+export interface WorkBuddyModelLabelProps {
+  provider: { id: string, name: string }
+  model: { id: string, name: string }
+  placement: 'trigger' | 'menu' | 'option'
+  selected: boolean
+}
+
+/**
+ * The priority this plugin registers the model-label slot at.
+ *
+ * WHY A DISTINCT PRIORITY AT ALL. `conversation.input.model.label` is a
+ * `single` slot: it holds ONE cell, and `SlotCore.register()` THROWS when a
+ * second registration claims one priority — "single slot … already has a
+ * registration at priority 0 — register at a different priority to shadow it
+ * (lowest renders)". The default priority is `0`, which is also what the host's
+ * own shipped contributor uses
+ * (`@deepseek-ai/dsh-client-ui-deepseek-model-label-1017`, in the web-app
+ * bundle from 0.2.1-rc.2 on), so registering at `0` made the two race. Measured
+ * on 0.2.1-rc.3 that is US: the app's own crash log records
+ * `single slot "conversation.input.model.label" already has a registration at
+ * priority 0 (registered by Kb)` and this entry's catch-all line
+ * `model label slot failed to register`, and because that catch only logs, the
+ * badge simply vanished from the picker with no visible error.
+ *
+ * WHY NOT `-1`. That is `dsh-connect-qoder`'s slot priority, and two plugins on
+ * one priority collide for exactly the same reason `0` did.
+ *
+ * WHY `-0.5` IS SAFE AND SELF-CONTAINED. The value only has to be distinct from
+ * whatever else claims the cell; `-0.5` is legal, sorts without collision
+ * against both `-1` and `0`, and requires knowing nothing about the other
+ * plugins. See the "不做插件联动" invariant in `docs/DESIGN.md`.
+ *
+ * WHAT THIS PLUGIN DELIBERATELY DOES NOT DO. It does not read the slot ledger,
+ * does not look for another plugin's registration, and does not render another
+ * plugin's component. Foreign rows get the plain catalog name, which is exactly
+ * the slot's documented minimum. Inter-plugin chaining is out of scope by
+ * project policy (`docs/DESIGN.md` §零) — and that policy is NOT stricter than
+ * the Host's own: the shipped `dsh-client-ui-deepseek-model-label-1017` README
+ * lists, under "Known Limitations and Deferred Work", that "another model-label
+ * plugin at the same priority conflicts; the two presentations do not compose
+ * automatically", and the remedy it documents is DISABLING it in the profile
+ * patch — a configuration decision, not a runtime negotiation. A consequence is
+ * that when this plugin wins the cell, another contributor's decoration on ITS
+ * rows is not composed; that is an accepted, documented trade-off rather than
+ * something to work around at runtime.
+ *
+ * WHY WINNING IS THE RIGHT SIDE OF THAT TRADE. 1017 is a TEMPORARY marker
+ * (its own package description: "Temporary 1017 release badge …"; its README
+ * says to remove the package and its bundle row once structured release labels
+ * replace it) and it decorates exactly ONE model, on two provider routes. This
+ * plugin decorates every WorkBuddy model row with load level, promo price and
+ * the new-model mark — its core surface. Trading a long-lived feature for a
+ * temporary marker is the wrong way round, and when 1017 is removed this
+ * plugin is already the only occupant of the cell.
+ *
+ * Exported so the test asserts against the value that actually ships rather
+ * than a copy of it.
+ */
+export const MODEL_LABEL_PRIORITY = -0.5
+
 /**
  * The label for one model row in the host's picker.
+ *
+ * Self-contained by design: a model this plugin owns gets the full label, and
+ * anything else gets the plain catalog name. There is no forwarding and no
+ * consultation of other plugins' registrations — see `MODEL_LABEL_PRIORITY`.
  *
  * @param props - The host's model identity and the placement of this label.
  * @returns The catalog name, the promotion chip when one holds, and the load
  *          badge when the probe reported one.
  */
-export function WorkBuddyModelLabel(props: {
-  provider: { id: string, name: string }
-  model: { id: string, name: string }
-  placement: 'trigger' | 'menu' | 'option'
-  selected: boolean
-}): ReactElement {
+export function WorkBuddyModelLabel(props: WorkBuddyModelLabelProps): ReactElement {
   const { provider, model, placement } = props
   const region = regionOfProvider(provider.id)
   if (region === undefined) {

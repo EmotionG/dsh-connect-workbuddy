@@ -244,9 +244,19 @@ describe('declared DSH host line', () => {
     //     更新说明，而不是静默漂移；
     //   - 若有人「修」比较器把它判成 true，这条同样变红。
     //
-    // 为什么可以接受：宿主 `evaluatePluginCompatibility()` 只校验
-    // `@deepseek-ai/dsh*` 命名空间；本机 profile 用 `link:` + 默认不自动装
-    // peer，所以 rc 宿主上插件照常加载。等宿主发 `0.2.1` GA，现声明即放行。
+    // 为什么 rc 宿主上插件照常加载（0.2.1-rc.3 实测）——**原因是宿主的判定口径**，
+    // 不是链接方式。`evaluatePluginCompatibility()`（`dsh-app-boot/lib/index.js`）
+    // 用 `semver.satisfies(rt, range, { includePrerelease: true })` 求值（其内部
+    // `:276` 的 `satisfies` 包装即带该第三参数）。因此 `0.2.1-rc.3` 对现声明判
+    // **true**，兼容闸门从未拦过 rc 宿主。
+    //
+    // ⚠️ 此处原先写的是「闸门只校验 `@deepseek-ai/dsh*` 命名空间；profile 用
+    // `link:` 且默认不自动装 peer，所以 rc 宿主照常加载」。那个解释是**错的**：
+    // 闸门确实校验，只是用 `includePrerelease` 放过。本用例钉的「裸 semver 判
+    // false」始终成立，错的只是对**为什么没被拦**的归因，现已按实测订正。
+    //
+    // 范围本身仍不改：`includePrerelease` 也会放行 `0.3.0-rc.1`，而 `<0.3.0-0`
+    // 把它挡住（见下一条用例）。等宿主发 `0.2.1` GA，现声明同样放行。
     const declared = declaredRange()
     expect(satisfiesRange('0.2.1-rc.1', declared)).toBe(false)
     expect(satisfiesRange('0.2.0-rc.1', declared)).toBe(false)

@@ -7,6 +7,45 @@
 
 ---
 
+## 零、硬性边界：不做插件之间的联动
+
+**本插件不与其他插件协作。** 这不是实现细节，是项目级不变量：改代码时不需要、
+也不允许为「另一个插件在场」做任何适配。落到可执行的规则上：
+
+1. **不读别人的注册。** 不调用 `slots.entries(...)` / `entriesOfSlot(...)` 去枚举同一槽位里
+   还有谁注册过，也不检查某个插件是否安装。
+2. **不渲染别人的组件。** 不退而求其次地把某个槽位的行「转交」给另一个插件的组件渲染。
+   这看起来只是转发，实际要代渲染器合成对方的 props——例如 `t` 席位来自对方注册时声明的
+   `locale:` 命名空间——一处合成不对就抛错；而为了不递归，还得约定一条跨插件的转交方向。
+   这正是本插件明确不承担的责任。
+3. **不依赖别人的优先级。** 槽位只声明自己的优先级常量，取值只要求「不与别人碰撞」，
+   不要求知道别人用了几。别人改优先级不该让本插件失效。
+4. **不因别人在场而改变行为。** 不是自己的模型行，一律给宿主的契约下限（纯目录名）。
+
+**这条边界是有代价的，且代价被接受。** `conversation.input.model.label` 是 `single` 槽位，
+一格只有一个赢家。当本插件赢得该格时，别的插件在**它自己的行**上的装饰不会被合成——
+例如宿主自带的「1017」发布徽章不会出现在本插件渲染的那一行。这是**放弃联动换来的确定性**，
+不是待修的缺陷；想改成联动，先改本节。
+
+**为什么这条边界与宿主同向（2026-10-24 实测取证）。** 本节一度被怀疑是「自作自受」，
+但宿主一方早就有书面立场：`@deepseek-ai/dsh-client-ui-deepseek-model-label-1017` 的
+README「Known Limitations and Deferred Work」逐字写着——
+
+> This package occupies a `single` slot. Another model-label plugin at the same
+> priority conflicts; **the two presentations do not compose automatically.**
+
+宿主把「两个模型标签徽章不自动合成」列为**已知限制**，并给出的处置办法是**在配置层禁用**
+（profile patch `disabled: true`），而不是运行时协商。所以本节不是额外施加的洁癖，
+而是与宿主官方口径一致。
+
+> 实测记录：宿主 `0.2.1-rc.2` 起在 web-app 捆绑里新增
+> `@deepseek-ai/dsh-client-ui-deepseek-model-label-1017`，与本插件同占该槽的默认优先级 `0`，
+> 导致本插件注册**抛错**、徽章静默消失。修法只是**换一个不碰撞的优先级**（见
+> `MODEL_LABEL_PRIORITY`），**不引入任何联动**。详见
+> [`DSH-0.2.1-RC3-FOLLOWUP.md`](DSH-0.2.1-RC3-FOLLOWUP.md) §2.3。
+
+---
+
 ## 一、两个项目的分工
 
 | 层 | 来源 | 取什么 |
@@ -370,6 +409,7 @@ dsh-subagent-default-model (MIT) ──► dsh-connect-trae (MIT, LaoDing)      
    - **「未登录」不等于「读不出来」**：两者在 `readAll()` 之后都表现为账号数为 0，此前共用同一句「请重新登录一次」。而加密文件读不出时用户**本来就是登录着的**，那句话指向的是唯一无效的动作。现在 `resolve()` 在失败路径上跑一次 `diagnose()`，把 `encrypted` 单独归为 `WorkBuddyEncryptedCredentialError`（`code` 标记而非 `instanceof`，跨打包边界可靠），给出「安装 App / 用 `WORKBUDDY_APP_EXECUTABLE` 指定」这条**可执行**的建议。健康路径一次探针都不跑。
    - `encrypted` 之所以**只能**来自桌面文件、不需要额外过滤：该原因由 `probeAuthFile()` 赋予，而插件自有副本从不经过它（按自有文档形状解析，损坏时是 `invalid`/`unreadable`）。代码里那句 `source === 'desktop'` 过滤是**不可达**的，已删——留着会让它看起来在防守一件它并没防的事。
 7. **合规** —— 沿用 workbuddy 的免责声明；第三方声明登记 `workbuddy2api` (MIT) 与架构参考。
+8. **不做插件之间的联动（项目级不变量）** —— 见 **§零**。不读别人的槽位注册、不渲染别人的组件、不依赖别人的优先级、不因别人在场而改变行为。副作用是 `single` 槽位里本插件赢下那一格时，别的插件在自己行上的装饰不会被合成；该代价是**刻意接受**的，改动前需先改 §零。守卫测试：`tests/model-label-slot-coexistence.spec.tsx` 的 `no inter-plugin coordination` 一节（含源码结构守卫）。
 
 ---
 
