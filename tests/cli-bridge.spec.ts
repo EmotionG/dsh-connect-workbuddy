@@ -383,6 +383,57 @@ describe('resolveWorkingDir', () => {
     expect(choice).toMatchObject({ ok: true, unattended: false })
     expect(choice.dir).toBe(realpathSync(sessionDir))
   })
+
+  // The projection is the live answer, but it can go STALE — the directory was
+  // deleted, moved, or is an offline mount — while the creation-time header
+  // still names a directory that exists. The ladder falls back to the header in
+  // that case instead of refusing, and says so when even the header is gone.
+  it('falls back to the header when the projection directory no longer exists', () => {
+    const stale = join(base, 'deleted-by-cd')
+    const choice = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected(sessionDir, stale),
+      projectionOf(),
+    )
+    expect(choice).toMatchObject({ ok: true, unattended: false })
+    expect(choice.dir).toBe(realpathSync(sessionDir))
+  })
+
+  it('refuses, naming both sources, when the projection and the header are both unusable', () => {
+    // Two DIFFERENT stale paths: an equal projection/header pair collapses into
+    // one candidate, and the fallback message is about the pair disagreeing.
+    const staleProjection = join(base, 'deleted-by-cd')
+    const staleHeader = join(base, 'deleted-before-open')
+    const choice = resolveWorkingDir(
+      {},
+      options(),
+      executionInProjected(staleHeader, staleProjection),
+      projectionOf(),
+    )
+    expect(choice.ok).toBe(false)
+    expect(choice.dir).toBe('')
+    // The refusal must implicate BOTH sources, so the next reader does not have
+    // to guess which of the two the message is about.
+    expect(choice.reason).toContain(staleProjection)
+    expect(choice.reason).toContain(staleHeader)
+    expect(choice.reason).toContain('都失效')
+  })
+
+  it('does not fall back from an explicit argument that fails validation', () => {
+    // The fallback exists for a source nobody chose THIS turn (the projection).
+    // An explicit working_dir is the caller's own statement; swapping it for the
+    // session header would hide a caller mistake.
+    const stale = join(base, 'deleted-by-cd')
+    const choice = resolveWorkingDir(
+      { working_dir: stale },
+      options(),
+      executionInProjected(sessionDir, stale),
+      projectionOf(),
+    )
+    expect(choice.ok).toBe(false)
+    expect(choice.reason).toBe(`working_dir "${stale}" 不存在。`)
+  })
   it('degrades to the configured default, not to the Host process directory', () => {
     // THE TEST THAT PINS THE WHOLE DESIGN. The Host's own reader answers
     // `stateOf(...) ?? defaultDirectory`, and `defaultDirectory` is the Host process's

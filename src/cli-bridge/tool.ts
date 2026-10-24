@@ -274,18 +274,66 @@ export function sessionDirOf(
   execution: BridgeToolExecution | undefined,
   directoryOf: DirectoryOf | undefined,
 ): string {
+  const dirs = sessionDirCandidates(execution, directoryOf)
+  return dirs.projection !== '' ? dirs.projection : dirs.header
+}
+
+/**
+ * Both session-directory sources, kept APART so the caller can tell them — and
+ * therefore fall back between them — by validity, not just by presence.
+ *
+ * {@link sessionDirOf} collapses these into one answer, which is right for "where
+ * are we" but loses the information "the projection said X, the header says Y".
+ * The ladder in {@link resolveWorkingDir} needs the pair: a projection can go
+ * STALE (the directory was deleted, moved, or is an offline mount) while the
+ * creation-time header still points at a perfectly good directory. Without the
+ * split, a stale projection is a hard refusal even though a usable directory is
+ * one field away.
+ *
+ * Both sources are re-validated the same way as in {@link sessionDirOf}: absolute
+ * and non-blank, so a hand-built session cannot smuggle a relative path through
+ * either field.
+ */
+export function sessionDirCandidates(
+  execution: BridgeToolExecution | undefined,
+  directoryOf: DirectoryOf | undefined,
+): { projection: string; header: string } {
   const session = execution?.agent?.session
+  let projection = ''
   if (session !== undefined && directoryOf !== undefined) {
     const live = directoryOf(session)
     if (typeof live === 'string') {
       const trimmed = live.trim()
-      if (trimmed !== '' && isAbsolute(trimmed)) return trimmed
+      if (trimmed !== '' && isAbsolute(trimmed)) projection = trimmed
     }
   }
   const cwd = session?.header?.cwd
-  if (typeof cwd !== 'string') return ''
-  const trimmed = cwd.trim()
-  return trimmed !== '' && isAbsolute(trimmed) ? trimmed : ''
+  let header = ''
+  if (typeof cwd === 'string') {
+    const trimmed = cwd.trim()
+    if (trimmed !== '' && isAbsolute(trimmed)) header = trimmed
+  }
+  return { projection, header }
+}
+
+/**
+ * Why `path` cannot be a turn's working directory, or `''` when it can.
+ *
+ * The three checks the ladder has always applied (exists / is a directory /
+ * readable), stated once so the projection→header fallback in
+ * {@link resolveWorkingDir} re-runs exactly the same gate instead of a weaker
+ * private copy.
+ */
+function dirRejection(path: string): string {
+  if (!existsSync(path)) return `working_dir "${path}" 不存在。`
+  let isDir = false
+  try {
+    isDir = statSync(path).isDirectory()
+  } catch (error) {
+    return `working_dir "${path}" 无法读取：${error instanceof Error ? error.message : String(error)}`
+  }
+  if (!isDir) return `working_dir "${path}" 不是一个目录。`
+  return ''
 }
 
 /**
@@ -311,7 +359,15 @@ export function resolveWorkingDir(
   execution: BridgeToolExecution | undefined,
   directoryOf?: DirectoryOf,
 ): WorkingDirChoice {
-  const sessionDir = sessionDirOf(execution, directoryOf)
+  const dirs = sessionDirCandidates(execution, directoryOf)
+  // A projection equal to the header is ONE directory, not two rungs: the
+  // primary is the projection unless it does not differ from the header, in
+  // which case the header alone fills the primary slot and the fallback slot
+  // stays empty.
+  const primarySessionDir =
+    dirs.projection !== '' && dirs.projection !== dirs.header ? dirs.projection : dirs.header
+  const fallbackSessionDir =
+    primarySessionDir !== dirs.header && dirs.header !== '' ? dirs.header : ''
   const explicit = typeof args['working_dir'] === 'string' ? args['working_dir'].trim() : ''
 
   let chosen = ''
@@ -327,8 +383,8 @@ export function resolveWorkingDir(
     }
     chosen = explicit
     fromArgument = true
-  } else if (sessionDir !== '') {
-    chosen = sessionDir
+  } else if (primarySessionDir !== '') {
+    chosen = primarySessionDir
   } else if (options.workingDir !== '') {
     chosen = options.workingDir
   } else if (args['allow_unattended'] === true || options.allowUnattended) {
@@ -346,28 +402,43 @@ export function resolveWorkingDir(
     }
   }
 
-  if (!existsSync(chosen)) {
-    return { ok: false, dir: '', unattended: false, reason: `working_dir "${chosen}" 不存在。` }
-  }
-  let isDir = false
-  try {
-    isDir = statSync(chosen).isDirectory()
-  } catch (error) {
+  const rejection = dirRejection(chosen)
+  // A STALE projection is not a refusal when the creation-time header still
+  // names a usable directory: the projection is the live answer, but the header
+  // is where the session verifiably started, and between "no turn" and "a turn
+  // in the last directory known good" the latter is the useful one. The fallback
+  // is scoped to the session rung on purpose — an explicit argument or a
+  // configured default that fails validation must surface its failure, not be
+  // silently swapped for another directory.
+  if (
+    rejection !== '' &&
+    !fromArgument &&
+    chosen === primarySessionDir &&
+    fallbackSessionDir !== '' &&
+    dirRejection(fallbackSessionDir) === ''
+  ) {
+    chosen = fallbackSessionDir
+  } else if (rejection !== '') {
+    const fallbackAlsoFailed =
+      !fromArgument &&
+      chosen === primarySessionDir &&
+      fallbackSessionDir !== '' &&
+      dirRejection(fallbackSessionDir) !== ''
     return {
       ok: false,
       dir: '',
       unattended: false,
-      reason: `working_dir "${chosen}" 无法读取：${error instanceof Error ? error.message : String(error)}`,
+      reason: fallbackAlsoFailed
+        ? `${rejection}（回退的会话目录 "${fallbackSessionDir}" 同样不可用，工作目录投影与会话 header 都失效了。）`
+        : rejection,
     }
-  }
-  if (!isDir) {
-    return { ok: false, dir: '', unattended: false, reason: `working_dir "${chosen}" 不是一个目录。` }
   }
 
   // A turn called from a session may always run in that session, and the
   // configured default is trusted by definition (an operator wrote it).
   const roots: string[] = []
-  if (sessionDir !== '') roots.push(sessionDir)
+  if (primarySessionDir !== '') roots.push(primarySessionDir)
+  if (fallbackSessionDir !== '') roots.push(fallbackSessionDir)
   if (options.workingDir !== '') roots.push(options.workingDir)
   roots.push(...options.allowedDirs)
 
