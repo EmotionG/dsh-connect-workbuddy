@@ -29,6 +29,9 @@
   - `current()` 会**先看**池的运行时轮换标记（`rotatedAccountId`），再看用户保存的选择；而 `accounts()` 回答 `selected` 时只看保存的选择。池子把请求轮换到 B 号后，shim 记在 B 号账上，卡片却把 A 号标成「当前选用」——截图里那枚标记落在被限流的号上，而胶囊与行内数字都属于另一个号。
   - 同一份用量文档还会因此**点名两个账号**：`credential` 取自 `current()`（真正计费的那个），而 `account.accountId` / `accountName` 取自 `accounts()`（保存的那个）。现在 `accounts()` 用与 `current()` **完全相同**的优先级解析标记：有活跃轮换且该账号仍在本地，就标它；轮换指向已消失的账号时与 `current()` 一样回落；其余情况仍按「显式选择 / 默认最新」判断。清除轮换后标记随 `current()` 回到用户自己的选择，轮换本身仍然从不写设置。
   - 面板里还有第二处同源分裂：行的**底色**读 credits 端点的 `selected`（保存的选择），**「当前选用」文字**读池文档的 `current`（被计费的账号）。池子一轮换，两者就指向不同行——报告者看到的「底色在一个号、文字在另一个号」。现在整行（底色、文字、切换按钮的禁用态）都读同一个答案；`selected` 只在没有池文档时才作为兜底。
+- **`keepPromptLast` 认得 billion-context 注入的两类上下文块（#133）。**
+  - 5.8.0 的注入前缀清单只覆盖宿主自家的三类（时间采样、`Current runtime context.`、`<system-reminder>`），而 billion-context 压缩插件同样以 `role=user` 注入内容：压缩摘要块以 `[Compressed conversation section]` 标题行打头，效率提示以 `This is an efficiency` 打头。开了 `keepPromptLast` 后这两类漏网，被当成真实提问留在末尾，用量页「请求」列随之记错——报告者已在本地产物上逐字节验证此修法并实测恢复。
+  - 注入前缀同时做成**可配置**：新增 `extraInjectedPrefixes`（字符串数组，每项按**字面**前缀匹配、正则元字符会被转义，默认空），压缩插件或宿主将来改文案时不必等插件发版。它只在 `keepPromptLast` 开启时参与匹配，默认行为不变。
 - **企业/教育版账号在账号池里丢失 `enterprise` 标记（#129）。**
   - 存储层早就算出了 `enterprise: true`，但三个转发点把它丢了：`otherAccounts`、`localPoolMembers`、`poolMembersOf`（`poolTargets` 在 5.6.0 就已带上）。结果企业账号在池卡片上显示一个**根本不存在的「领取」按钮**和一列「签到」，而企业成员点这两样都只会被 `10001` 拒绝。
   - 现在这三个转发点都带上了标记，池行据此签到列显示「不适用（企业版）」、权益块整段隐藏；领取路由在**发起任何上游请求之前**就用 409 拒绝（`enterprise-account-unsupported`）。**Web 侧只到账号行这一层**：`toWebAccount` 与用量页的池账号行带标记，用量页顶部那个 `account` 对象没有——它这次修的是**名字**（改用 `preferredAccountName`，此前只取 `credential.nickname` 导致企业账号显示为空），不是标记；那里也不渲染签到/领取。输入框胶囊（`workBuddyAccountCredits`）同样不带标记，它不显示这两个按钮，因此没有对应缺陷。

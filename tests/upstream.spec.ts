@@ -474,6 +474,70 @@ describe('prepareChatBody keepPromptLast (issue #132)', () => {
     const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
     expect(String(prepared.at(-1)?.content)).toBe('真实输入')
   })
+
+  it('recognises the two billion-context injection shapes from issue #133', () => {
+    // Measured by the #133 reporter: the compression plugin injects its record
+    // and its efficiency note as `user` messages, and without these prefixes the
+    // usage page recorded them as the prompt.
+    for (const injectedText of [
+      '[Compressed conversation section]\n(压缩摘要正文)',
+      'This is an efficiency nudge to keep responses concise.',
+      '<acp id="c">m00077</acp>[Compressed conversation section]\n摘要',
+    ]) {
+      const source = JSON.stringify({
+        messages: [
+          { role: 'system', content: 'prompt' },
+          real('推荐几个菜谱'),
+          injected(injectedText),
+        ],
+      })
+      const prepared = messagesOf(prepareChatBody(source, { keepPromptLast: true }))
+      expect(String(prepared.at(-1)?.content)).toBe('推荐几个菜谱')
+      expect(prepared).toHaveLength(3)
+    }
+  })
+
+  it('treats configured extra prefixes as injected context (issue #133)', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('真实输入'),
+        injected('SOME-NEW-PLUGIN-CONTEXT:\n未来某插件注入的内容'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, {
+      keepPromptLast: true,
+      extraInjectedPrefixes: ['SOME-NEW-PLUGIN-CONTEXT:'],
+    }))
+    expect(String(prepared.at(-1)?.content)).toBe('真实输入')
+    expect(prepared).toHaveLength(3)
+    // A literal prefix is matched literally: regex metacharacters in the config
+    // must not widen the match.
+    const tricky = messagesOf(prepareChatBody(JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('真实输入'),
+        injected('a[b( c) 看起来像正则的注入'),
+      ],
+    }), { keepPromptLast: true, extraInjectedPrefixes: ['a[b( c)'] }))
+    expect(String(tricky.at(-1)?.content)).toBe('真实输入')
+  })
+
+  it('ignores empty or non-string extra prefix entries', () => {
+    const source = JSON.stringify({
+      messages: [
+        { role: 'system', content: 'prompt' },
+        real('真实输入'),
+        injected('Current runtime context.'),
+      ],
+    })
+    const prepared = messagesOf(prepareChatBody(source, {
+      keepPromptLast: true,
+      extraInjectedPrefixes: ['', 42 as unknown as string],
+    }))
+    // The built-in prefixes still work, and nothing threw.
+    expect(String(prepared.at(-1)?.content)).toBe('真实输入')
+  })
 })
 
 describe('parseUpstreamErrorDetail', () => {

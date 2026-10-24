@@ -554,6 +554,13 @@ export interface Config {
    * an explicit opt-in rather than a silent change on upgrade.
    */
   keepPromptLast?: boolean
+  /**
+   * Extra literal prefixes (issue #133) treated like the harness's injected
+   * context markers when `keepPromptLast` is on, for injected blocks a
+   * companion plugin produces that the built-in list does not recognize. Each
+   * entry is matched literally at the start of a trailing `user` message.
+   */
+  extraInjectedPrefixes?: string[]
 }
 
 const modelConfig = z.object({
@@ -803,6 +810,11 @@ export const Config: z<Config> = z.object({
         "Message count and text are preserved; the one edit is the recorded prompt's own leading " +
         "<acp> marker. Off by default because it changes the message order the upstream counts."),
   ) as unknown as z<boolean>,
+  extraInjectedPrefixes: asVolatile(
+    z.array(z.string())
+      .default([])
+      .description('Extra literal prefixes (issue #133) treated like the harness-injected context markers when keepPromptLast is on — for blocks a companion plugin injects that the built-in list does not recognize. Each entry matches the start of a trailing user message; read only while keepPromptLast is enabled.'),
+  ) as unknown as z<string[]>,
 }) as unknown as z<Config>
 
 /**
@@ -1042,6 +1054,7 @@ export function apply(ctx: Context, config: Config): void {
       logger: ctx.logger,
       channelPerturbation: unwrapVolatile(config.channelPerturbation) ?? 'failure',
       keepPromptLast: unwrapVolatile(config.keepPromptLast) === true,
+      extraInjectedPrefixes: unwrapVolatile(config.extraInjectedPrefixes) ?? [],
       /**
        * Pool routing, bound to THIS region.
        *

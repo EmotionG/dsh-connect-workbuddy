@@ -131,6 +131,13 @@ export interface WorkBuddyShimOptions {
    */
   keepPromptLast?: boolean
   /**
+   * Extra literal prefixes (issue #133) treated like the harness's injected
+   * markers under `keepPromptLast`, for context blocks a companion plugin
+   * injects that the built-in list does not know about. Only read when
+   * `keepPromptLast` is on.
+   */
+  extraInjectedPrefixes?: readonly string[]
+  /**
    * Pool failover for chat requests. Absent means no failover at all — the
    * pre-pool behaviour, where the selected account serves and its failure is
    * reported as-is.
@@ -1433,6 +1440,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
    * silent difference after an upgrade.
    */
   const keepPromptLastEnabled = options.keepPromptLast === true
+  const extraInjectedPrefixes = Array.isArray(options.extraInjectedPrefixes)
+    ? options.extraInjectedPrefixes.filter(entry => typeof entry === 'string' && entry !== '')
+    : []
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -1638,7 +1648,10 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     }
 
     const raw = (await readBody(req)).toString('utf8')
-    const prepared = prepareChatBody(raw, { keepPromptLast: keepPromptLastEnabled })
+    const prepared = prepareChatBody(raw, {
+      keepPromptLast: keepPromptLastEnabled,
+      extraInjectedPrefixes,
+    })
     // The model this request is about, read from the body that goes upstream
     // (issue #61). Read ONCE, so every attempt — the first and each failover
     // retry — is remembered against the same model.

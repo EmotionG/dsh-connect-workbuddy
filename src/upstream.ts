@@ -2325,7 +2325,28 @@ export interface PrepareChatBodyOptions {
    * conversation whose trailing user messages are real turns.
    */
   keepPromptLast?: boolean
+  /**
+   * Additional leading markers that mark a trailing `user` message as injected
+   * context, one literal prefix per entry.
+   *
+   * WHY. The built-in pattern at {@link INJECTED_USER_PREFIX} knows only the
+   * prefixes measured at the time it was written; a companion plugin (or a DSH
+   * update) that starts injecting new text would silently fall back to having
+   * its blocks recorded as the prompt. Each entry is matched LITERALLY at the
+   * start of the message text (after leading whitespace and the
+   * `billion-context` marker, which the built-in pattern tolerates) and OR'ed
+   * with the built-ins; entries are escaped, so no configuration value can turn
+   * the pattern invalid.
+   */
+  extraInjectedPrefixes?: readonly string[]
 }
+
+/**
+ * The optional run of `billion-context` markers every injected-prefix match
+ * tolerates in front of the marker text, and the built-in marker alternatives.
+ */
+const INJECTED_ACP_MARKER_RUN = '(?:<acp\\b[^>]*>m\\d{1,8}<\\/acp>[ \\t]*\\r?\\n?)*'
+const INJECTED_BUILT_IN_PREFIXES = 'Time sampled while preparing turn \\d+, step \\d+:|Current runtime context\\.|<system-reminder>|\\[Compressed conversation section\\]|This is an efficiency nudge'
 
 /**
  * Prefixes the DSH harness uses for the context it injects as `user` messages.
@@ -2333,7 +2354,11 @@ export interface PrepareChatBodyOptions {
  * MEASURED shapes, not guesses: the harness's time-context provider appends
  * `Time sampled while preparing turn N, step M: …`, its runtime-context
  * provider appends `Current runtime context. …`, and its reminders arrive as
- * `<system-reminder>` blocks. `billion-context` may additionally wrap each
+ * `<system-reminder>` blocks. `billion-context` injects its compression record
+ * and its efficiency note as `user` messages too (issue #133): the compressed
+ * section opens with a bracketed `[Compressed conversation section]` heading
+ * line, and the nudge opens with `This is an efficiency …`. `billion-context`
+ * may additionally wrap each
  * message in an `<acp …>mNNNNN</acp>` marker, so the pattern TOLERATES that
  * marker in front of an injected block — the marker itself is never removed
  * from an injected message (see {@link ACP_LEADING_TAG} for where a marker IS
@@ -2343,7 +2368,29 @@ export interface PrepareChatBodyOptions {
  * as it arrived — the alternative (moving "the last non-empty user message")
  * would reorder real conversations from other clients.
  */
-const INJECTED_USER_PREFIX = /^(?:<acp\b[^>]*>m\d{1,8}<\/acp>[ \t]*\r?\n?)*(?:Time sampled while preparing turn \d+, step \d+:|Current runtime context\.|<system-reminder>)/u
+const INJECTED_USER_PREFIX = new RegExp(`^${INJECTED_ACP_MARKER_RUN}(?:${INJECTED_BUILT_IN_PREFIXES})`, 'u')
+
+/**
+ * Escape a user-supplied prefix so it can be embedded as a literal alternative.
+ */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+/**
+ * The prefix pattern for one request: the built-ins plus any configured
+ * extras, each extra matched literally at the same position the built-ins
+ * match (after optional leading whitespace and the `billion-context` marker).
+ * Returns the shared built-in pattern when there are no usable extras.
+ */
+function injectedPrefixPattern(extras?: readonly string[]): RegExp {
+  const literals = (extras ?? []).filter(extra => typeof extra === 'string' && extra !== '')
+  if (literals.length === 0) return INJECTED_USER_PREFIX
+  return new RegExp(
+    `^${INJECTED_ACP_MARKER_RUN}(?:${INJECTED_BUILT_IN_PREFIXES}|${literals.map(escapeRegExp).join('|')})`,
+    'u',
+  )
+}
 
 /**
  * The per-message marker `billion-context` puts in front of every message.
@@ -2406,9 +2453,9 @@ function stripLeadingAcpTag(content: unknown): { value: unknown, changed: boolea
 }
 
 /** Whether this message is one of the harness's injected context blocks. */
-function isInjectedUserMessage(message: Record<string, unknown>): boolean {
+function isInjectedUserMessage(message: Record<string, unknown>, pattern: RegExp): boolean {
   if (message['role'] !== 'user') return false
-  return INJECTED_USER_PREFIX.test(textOfContent(message['content']).replace(/^\s+/u, ''))
+  return pattern.test(textOfContent(message['content']).replace(/^\s+/u, ''))
 }
 
 /**
@@ -2417,7 +2464,7 @@ function isInjectedUserMessage(message: Record<string, unknown>): boolean {
  * Returns `true` when the order changed, so the caller can serialize only once.
  * Never throws, and a body with nothing to move keeps its exact message order.
  */
-function keepPromptLast(messages: unknown[]): boolean {
+function keepPromptLast(messages: unknown[], pattern: RegExp): boolean {
   // Find the LAST user message that is NOT injected: that is the real prompt.
   let promptIndex = -1
   for (let index = messages.length - 1; index >= 0; index--) {
@@ -2425,7 +2472,7 @@ function keepPromptLast(messages: unknown[]): boolean {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const message = value as Record<string, unknown>
     if (message['role'] !== 'user') continue
-    if (isInjectedUserMessage(message)) continue
+    if (isInjectedUserMessage(message, pattern)) continue
     if (textOfContent(message['content']).trim() === '') continue
     promptIndex = index
     break
@@ -2433,12 +2480,12 @@ function keepPromptLast(messages: unknown[]): boolean {
   if (promptIndex < 0) return false
   const trailing = messages.slice(promptIndex + 1).filter(value =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
-      ? isInjectedUserMessage(value as Record<string, unknown>)
+      ? isInjectedUserMessage(value as Record<string, unknown>, pattern)
       : false)
   if (trailing.length === 0) return false
   const kept = messages.filter((value, index) => !(index > promptIndex
     && typeof value === 'object' && value !== null && !Array.isArray(value)
-    && isInjectedUserMessage(value as Record<string, unknown>)))
+    && isInjectedUserMessage(value as Record<string, unknown>, pattern)))
   kept.splice(promptIndex, 0, ...trailing)
   // The prompt is now the LAST `user` message, which is the one the usage page
   // records — so its own leading marker is what still shows up there.
@@ -2495,7 +2542,7 @@ export function prepareChatBody(source: string, options?: PrepareChatBodyOptions
   // gateways require the conversation to OPEN with a system message, and this
   // reorder only ever moves `user` messages among themselves.
   if (options?.keepPromptLast === true && Array.isArray(obj['messages'])) {
-    keepPromptLast(obj['messages'])
+    keepPromptLast(obj['messages'], injectedPrefixPattern(options.extraInjectedPrefixes))
   }
   neutralizeChannelFingerprints(obj)
   normalizeToolChoice(obj)
