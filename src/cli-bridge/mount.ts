@@ -245,6 +245,11 @@ export interface CliBridgeMountInput {
   /** Region-scoped credential stores, in the order the plugin built them. */
   regions: readonly BridgeCredentialRegion[]
   log: BridgeLog
+  /**
+   * Reads a session's live working directory (the Host's `workingDirectory`
+   * projection). Omitted means the header-only behaviour, exactly as before.
+   */
+  directoryOf?: DirectoryOf
   /** Optional host services; absent means "this Host has no such surface". */
   tools: BridgeToolsService | undefined
   commands: BridgeCommandsService | undefined
@@ -258,7 +263,7 @@ export interface CliBridgeMountInput {
  * surface that appears later can be attached without re-mounting the other.
  */
 export function mountCliBridge(input: CliBridgeMountInput): () => void {
-  const runtime = createCliBridgeRuntime(input.settings, input.regions, input.log)
+  const runtime = createCliBridgeRuntime(input.settings, input.regions, input.log, input.directoryOf)
   if (runtime === undefined) return () => {}
 
   const disposeTool = mountToolSurface(runtime, input.tools)

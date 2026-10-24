@@ -1629,6 +1629,16 @@ export function apply(ctx: Context, config: Config): void {
   // session projections and left undefined otherwise, which is exactly the
   // pre-projection behaviour (the ladder then reads the session header).
   let cliDirectoryOf: DirectoryOf | undefined
+  // THE PROBE, not the value. The runtime snapshots `directoryOf` once at
+  // `createCliBridgeRuntime`, but `sessionProjections` can arrive AFTER the
+  // runtime was built on the tools/commands row — and `syncCliBridge` keys the
+  // rebuild on the serialized settings only, so a settings-unchanged rebuild is a
+  // no-op and the runtime would keep the `undefined` it captured at build time.
+  // Wiring the mutable cell through a stable closure makes the runtime read the
+  // CURRENT source on every turn, which is what kills the ordering dependency.
+  // `null` from an unset cell is indistinguishable from "no projection service",
+  // so the header fallback is unchanged.
+  const cliDirectoryProbe: DirectoryOf = (session) => cliDirectoryOf?.(session) ?? null
   let cliRuntime: CliBridgeRuntime | undefined
   let cliRuntimeKey = ''
   let disposeCliTool: (() => void) | undefined
@@ -1654,7 +1664,7 @@ export function apply(ctx: Context, config: Config): void {
         settings,
         REGION_KEYS.map(region => ({ region, store: stacks[region].store })),
         message => ctx.logger.warn(`dsh-connect-workbuddy: ${message}`),
-        cliDirectoryOf,
+        cliDirectoryProbe,
       )
     }
     if (cliRuntime === undefined) {
@@ -1752,10 +1762,12 @@ export function apply(ctx: Context, config: Config): void {
       return trimmed === '' ? null : trimmed
     }
 
-    // The runtime may already exist (settings were applied before this service
-    // appeared). Rebuild it so the new source takes effect on the next call; the
-    // settings key is unchanged, so the shared gate survives and no budget is reset.
-    syncCliBridge(current())
+    // Nothing to rebuild: the runtime was wired with `cliDirectoryProbe`, which
+    // reads THIS cell on every turn, so the source takes effect on the next call
+    // whether the runtime existed before or after this service appeared. (The old
+    // code called `syncCliBridge` here expecting a rebuild, but that path keys on
+    // the serialized settings — unchanged — so it was a no-op and the projection
+    // silently never reached an already-built runtime. The probe is the fix.)
 
     projectionCtx.effect(() => () => {
       cliDirectoryOf = undefined

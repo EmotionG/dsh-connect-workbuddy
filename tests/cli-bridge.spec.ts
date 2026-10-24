@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   CLI_BRIDGE_DEFAULTS,
+  createCliBridgeRuntime,
   mountCliBridge,
   normalizeCliBridgeOptions,
 } from '../src/cli-bridge/mount.ts'
@@ -403,8 +404,12 @@ describe('resolveWorkingDir', () => {
       executionInProjected('', null),
       projectionOf(),
     )
+    // A refusal carries an empty `dir` by construction, so "dir !==
+    // process.cwd()" would pass unconditionally. Pin the refusal itself: an
+    // empty dir, and a reason that never names the Host process directory.
     expect(withoutAnything.ok).toBe(false)
-    expect(withoutAnything.dir).not.toBe(process.cwd())
+    expect(withoutAnything.dir).toBe('')
+    expect(withoutAnything.reason).not.toContain(realpathSync(process.cwd()))
   })
 
   it('falls back to the configured default', () => {
@@ -983,6 +988,57 @@ describe('/codebuddy', () => {
     })
     expect(result.kind).toBe('error')
     expect(result.text).toContain('投影')
+  })
+
+  it('honours a projection that appears AFTER the runtime was built', async () => {
+    // THE ORDERING REGRESSION. In the plugin, `createCliBridgeRuntime` runs on the
+    // tools/commands row, which can arrive BEFORE `sessionProjections`; the rebuild
+    // gate keys on the serialized settings alone, so the late service does NOT
+    // rebuild the runtime. The fix wires a stable probe closure over a mutable
+    // cell, and every turn re-reads that cell. This test mirrors the assembly:
+    // build the runtime while the cell is still empty, mount one surface from the
+    // resulting deps (as index.ts does), THEN fill the cell — and the very next
+    // turn must run in the projection, not in the header. With the pre-fix wiring
+    // (`directoryOf` captured at build time) the turn would land on sessionDir.
+    const sink = captureCommands()
+    let published: DirectoryOf | undefined
+    const probe: DirectoryOf = (session) => published?.(session) ?? null
+    const runtime = createCliBridgeRuntime({ enabled: true }, [], () => {}, probe)
+    if (runtime === undefined) throw new Error('runtime must build with enabled: true')
+    // The runtime holds the probe itself — not a snapshot taken right now.
+    expect(runtime.deps.directoryOf).toBe(probe)
+    const begun: Array<{ entrance: string; workingDir: string }> = []
+    const board = {
+      begin(input: { entrance: string; workingDir: string }) {
+        begun.push({ entrance: input.entrance, workingDir: input.workingDir })
+        return { ...input, id: 'spy-0', startedAt: Date.now(), phase: 'starting' as const } as never
+      },
+      end() {},
+      snapshot() { return { turns: [], serverTime: Date.now() } },
+      size() { return begun.length },
+    }
+    mountCodebuddyCommand(sink.service, {
+      ...runtime.deps,
+      options: options({ allowedDirs: [sessionDir, allowedDir] }),
+      live: board,
+    })
+
+    // The Host publishes its projections AFTER the mount — what index.ts's
+    // `inject(['sessionProjections'])` does. No re-mount, no settings change.
+    published = projectionOf()
+
+    await sink.registered[0]!.handler({
+      agent: {
+        id: 'session-1',
+        session: { header: { cwd: sessionDir }, workingDirectory: allowedDir },
+        inject: vi.fn(),
+        steer: vi.fn(),
+      },
+      rawInput: 'look',
+    })
+    expect(begun).toHaveLength(1)
+    // Header would give sessionDir; the late projection must win without a remount.
+    expect(begun[0]).toMatchObject({ entrance: 'command', workingDir: realpathSync(allowedDir) })
   })
 
   it('refuses a second concurrent turn on the same session', async () => {
