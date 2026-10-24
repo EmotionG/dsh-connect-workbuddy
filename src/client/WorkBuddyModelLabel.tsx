@@ -37,8 +37,18 @@
  *
  * WHY THE HOST STILL OWNS THE NAME. The contract says to keep `model.name` as
  * the text and render the addition beside it, so this component returns the
- * name first — it never replaces it, and it renders nothing at all for a
- * provider that is not ours.
+ * name first and never replaces it.
+ *
+ * FOR A PROVIDER THAT IS NOT OURS IT RENDERS THE PLAIN CATALOG NAME — not
+ * nothing. The distinction is not cosmetic: this slot is `kind: "single"`, so
+ * whatever registers becomes the cell's only occupant, and an occupant that
+ * outputs plain text still occupies it. A previous version of this paragraph
+ * said the component "renders nothing at all" for a foreign provider, which
+ * made the lost-decoration cost look harmless; issue #138 is what that
+ * mis-description looks like from the outside (the host's own 1017 badge
+ * disappears on ITS rows while this plugin holds the cell). Returning `null`
+ * would not free the cell either — occupancy is decided by registration, never
+ * by what the component outputs.
  */
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
@@ -318,7 +328,11 @@ export function WorkBuddyModelLabel(props: WorkBuddyModelLabelProps): ReactEleme
   const { provider, model, placement } = props
   const region = regionOfProvider(provider.id)
   if (region === undefined) {
-    // Another provider's model: the host renders the plain name.
+    // Another provider's model. Returning the plain name is the slot contract's
+    // minimum — but note that it IS an output, and this cell is `single`, so the
+    // other contributor's decoration on these same rows is not rendered at all.
+    // That cost is the `docs/DESIGN.md` §零 trade-off, stated here because this
+    // is the line it happens on (issue #138).
     return <span>{model.name}</span>
   }
   return <WorkBuddyModelLabelInner

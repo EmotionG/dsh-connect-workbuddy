@@ -210,7 +210,16 @@ export function apply(ctx: WorkBuddyClientContext): void {
      *
      * See `MODEL_LABEL_PRIORITY` in `./WorkBuddyModelLabel.tsx` for the full
      * ordering, the measured evidence, and the deliberate absence of any
-     * inter-plugin coordination (project invariant, `docs/DESIGN.md` §六).
+     * inter-plugin coordination (project invariant, `docs/DESIGN.md` §零).
+     *
+     * THE COST IS PAID ON ANOTHER PLUGIN'S ROWS, and it is worth stating where
+     * the registration happens: holding this cell means the host's own
+     * `dsh-client-ui-deepseek-model-label-1017` badge is NOT rendered on the
+     * DeepSeek rows it was written for. That is not a defect and not something
+     * to fix by inspecting the slot ledger — it is the price of §零, recorded in
+     * `docs/DESIGN.md` and argued in the 5.8.2 CHANGELOG. Issue #138 is a user
+     * meeting that price for the first time; the disposition is to state it
+     * plainly rather than to coordinate at runtime.
      */
     const registerModelLabel = (): (() => void) | undefined => {
       try {

@@ -27,6 +27,24 @@
 例如宿主自带的「1017」发布徽章不会出现在本插件渲染的那一行。这是**放弃联动换来的确定性**，
 不是待修的缺陷；想改成联动，先改本节。
 
+**这个代价会被用户当成 bug 报上来（issue #138，2026-10-24）。** 报告者描述完全准确：启用本插件
+后，官方 DeepSeek 行上的「1017」徽标消失，禁用即恢复。他还提了三条修法，逐条处置如下：
+
+1. **「按 provider 决定是否注册」——不采纳。** 注册是**全局一次性**的（`ctx.slots.inject` 一次
+   挂载），而 `provider` 是**逐行渲染时**才传进组件的；要做到「只在 WorkBuddy 行注册」，必须
+   监听模型选择器的当前选中状态、切换时注销再注册。副作用是中间那格会空（闪烁），且本插件
+   开始观察宿主的选中状态——比现在更深的耦合，正是 §零 要避免的。
+2. **「接管时补画官方徽标」——不采纳。** 那要把 `deepseek-official`/`deepseek-account` +
+   `deepseek-flash` 的判断和一个蓝色徽标的样式抄进本插件；而该包自述是 **temporary** 发布徽章、
+   承诺结构化标签上线后移除，抄进来等于绑死一个会被删的东西，且违反本节第 2 条。
+3. **「让宿主把槽改成 `list` / `chain`」——这是唯一能根治的方向**，但属于上游改动，插件侧
+   无论怎么调，一格仍只有一个赢家。
+
+**因此本节的处置是「说清楚」而不是「改行为」**：把注释里那句不准确的
+「renders nothing at all for a provider that is not ours」改成事实（它渲染**纯目录名**，
+而占位与输出无关，`null` 同样不释放格子），并在注册处写明代价由谁承担。不引入开关、
+不做动态注册——若将来要推翻，先改本节。
+
 **为什么这条边界与宿主同向（2026-10-24 实测取证）。** 本节一度被怀疑是「自作自受」，
 但宿主一方早就有书面立场：`@deepseek-ai/dsh-client-ui-deepseek-model-label-1017` 的
 README「Known Limitations and Deferred Work」逐字写着——
@@ -54,7 +72,7 @@ README「Known Limitations and Deferred Work」逐字写着——
 | 连接内核 | `dsh-workbuddy-connect` | 桌面端凭据读取、token 刷新、`copilot.tencent.com` 上游协议、SSE 直通、shim 加固、CLI 诊断、host heartbeat |
 | 体验改善 | 新设计（见下） | 模型管理、账号切换、凭据路径多候选、错误信息可读 |
 
-两项目已有大量同构代码（`web-status.ts` 的 `safeMessage`/`loopbackOrigin`/`json` 三个函数几乎逐字相同，`client/index.tsx` 结构一致），说明这条融合路径是低风险的。
+两项目已有大量同构代码（`web-status.ts` 的 `safeMessage`/`json` 与当时的 `loopbackOrigin` 几乎逐字相同（`loopbackOrigin` 已于 5.8.5 抽成 `src/loopback.ts` 的共享判定），`client/index.tsx` 结构一致），说明这条融合路径是低风险的。
 
 ---
 

@@ -205,6 +205,14 @@ describe('no inter-plugin coordination (project invariant)', () => {
     // The deliberate consequence: the host's badge is NOT composed onto a row we
     // render. `model.name` is the slot's documented minimum for an entry that
     // declines to decorate, so this is correct-and-boring rather than clever.
+    //
+    // This assertion is also what issue #138 looks like from the inside: the
+    // fixture is the host's OWN 1017 row (`deepseek-official` +
+    // `deepseek-flash` + `DeepSeek-V4.1-Flash`), and the expected markup is the
+    // bare name — i.e. "1017" is gone. Note it renders SOMETHING (<span>), which
+    // is why the old comment's "renders nothing at all" was wrong: occupancy
+    // comes from registration, not from output, so even `null` would not have
+    // freed the cell.
     const slotCore = core()
     slotCore.register({ name: SLOT, locale: 'deepseek-model-label-1017' }, Host1017Label)
     slotCore.register({ name: SLOT, priority: MODEL_LABEL_PRIORITY }, WorkBuddyModelLabel)
