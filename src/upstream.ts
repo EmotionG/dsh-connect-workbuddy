@@ -719,8 +719,7 @@ function isAccountRestrictedBody(body: string): boolean {
 }
 
 /** The sentences an account verdict can be stated in: display fields, then `msg`. */
-function accountVerdictText(body: string): string {
-  let parsed: unknown
+function accountVerdictText(body: string): string {  let parsed: unknown
   try {
     parsed = JSON.parse(body) as unknown
   } catch {
@@ -746,6 +745,28 @@ function normalizeVerdictText(text: string): string {
     .replace(/\s+/gu, ' ')
     .trim()
     .toLowerCase()
+}
+
+/**
+ * A `11140` body whose display fields decode to NOTHING at all.
+ *
+ * THE FAILURE MODE THIS CATCHES. `isAccountRestrictedBody` needs the business
+ * code AND a phrase in `displayMsg` / `displayTips` / `msg` — deliberately, so a
+ * shared sentence cannot bench an account. The mirror risk is a MISS: if the
+ * upstream renames those fields, escapes them differently, or moves the
+ * restriction wording somewhere new, every restriction degrades silently to
+ * `policy_reject` and a benched-worthy account keeps taking traffic with no log
+ * line anywhere. A genuine content refusal always carries the fields (its whole
+ * point is a human-facing sentence), so a `11140` that decodes to no display
+ * text at all is an anomalous envelope shape, not a normal refusal — exactly the
+ * narrow condition worth a warning. Bodies WITH display text that merely lack
+ * the restriction phrase are the everyday `policy_reject` and stay silent.
+ *
+ * Pure and side-effect-free: the caller (the transport layer, which holds the
+ * injected logger) decides what to do with the answer.
+ */
+export function isUndecodablePolicyBody(body: string): boolean {
+  return isContentPolicyBody(body) && accountVerdictText(body) === ''
 }
 
 /**
@@ -3136,7 +3157,7 @@ export function requestEvidenceOf(bodyJson: string): {
  */
 export class WorkBuddyUpstreamClient {
   /**
-   * Reports a fallback the catalog reader had to take.
+   * Reports an anomaly the reader or classifier had to tolerate.
    *
    * Injected rather than logged here because this module holds no logger on
    * purpose — it is pure transport + parsing, so it stays importable from
@@ -3181,10 +3202,24 @@ export class WorkBuddyUpstreamClient {
     }
     if (response.ok) return { ok: true, response }
     const text = (await response.text()).slice(0, ERROR_BODY_LIMIT)
+    const kind = classifyUpstreamError(response.status, text)
+    // Anomaly report, not a reclassification: the kind stands as classified.
+    // The point is that a `11140` with no decodable display fields is the one
+    // envelope shape in which a real restriction would be silently MISSED by
+    // `isAccountRestrictedBody` — every such miss keeps a benched-worthy account
+    // in rotation with nothing in the logs. Genuine content refusals carry their
+    // display sentence, so they never reach this line.
+    if (isUndecodablePolicyBody(text)) {
+      this.onFallback?.(
+        `11140 失败体没有任何可解码的 displayMsg/displayTips/msg 字段，` +
+          `若上游调整了限制措辞或字段名，账号停权判定会全部漏判。` +
+          `失败体片段：${text.slice(0, 200)}`,
+      )
+    }
     return {
       ok: false,
       status: response.status,
-      kind: classifyUpstreamError(response.status, text),
+      kind,
       message: text,
       detail: parseUpstreamErrorDetail(text),
     }

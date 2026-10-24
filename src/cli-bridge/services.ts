@@ -41,7 +41,47 @@ export interface BridgeAgentRef {
   /** Equal to the session id; used as the per-session budget key. */
   id?: string
   status?: string
-  session?: { header?: { cwd?: string } }
+  /**
+   * The session this agent is running in, as far as the bridge reads it.
+   *
+   * `header.cwd` is the session's CREATION metadata — the directory the session was
+   * opened with, and never updated since. The live directory is not on the header at
+   * all: the Host keeps it as a projection under `workingDirectory`, which is why
+   * `sessionDirOf` takes a reader rather than reading a field here. `workingDirectory`
+   * on this type is ONLY what tests and the command adapter use to hand the reader a
+   * session-shaped object; the bridge never reads it directly.
+   */
+  session?: { header?: { cwd?: string }; workingDirectory?: string | null }
+}
+
+/**
+ * The Host's session-projection service, typed structurally (see the file header
+ * for why nothing Host-owned is imported here).
+ *
+ * WHY THIS EXISTS. `agent.session.header.cwd` is the session's CREATION-time
+ * directory, not its current one: the Host documents its own session header as
+ * "detached, deep-frozen creation metadata (format version, cwd, lineage...)".
+ * The live directory lives in a session projection the Host maintains —
+ * `key: "workingDirectory"`, `init: header => header.cwd ?? null`, `apply` on every
+ * `working-directory/change` event (the Host's `@deepseek-ai/dsh-working-directory`
+ * package). A `/cd` — which the Host exposes to the model as the
+ * `working_directory` tool — appends one of those events, so afterwards the two
+ * values disagree and the header keeps pointing at a directory nobody is looking
+ * at any more.
+ *
+ * Reading the projection instead makes this bridge agree with what the Host
+ * itself puts in the model's system prompt ("Current working directory: ...").
+ *
+ * `stateOf` is SYNCHRONOUS and does no filesystem I/O, which is what lets the
+ * directory ladder stay the synchronous first step of `execute`.
+ */
+export interface BridgeProjectionReader {
+  /**
+   * The committed state for one session, or `null`/`undefined` when the key has
+   * never been committed for it. Read structurally: the caller validates the
+   * value's type instead of trusting a declared one.
+   */
+  stateOf(session: unknown, key: string): unknown
 }
 
 /** One tool registration, as the Host's `tools.register` accepts it. */

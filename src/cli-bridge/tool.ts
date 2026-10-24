@@ -247,14 +247,93 @@ function isInside(parent: string, child: string): boolean {
   return inner.startsWith(outer.endsWith(sep) ? outer : outer + sep)
 }
 
-/** The session directory this tool call came from, when the Host supplies one. */
-function sessionDirOf(execution: BridgeToolExecution | undefined): string {
-  const cwd = execution?.agent?.session?.header?.cwd
-  if (typeof cwd !== 'string') return ''
-  const trimmed = cwd.trim()
-  // The session service already rejects relative headers; re-check anyway so a
-  // hand-built agent in a test cannot smuggle one through this path.
-  return trimmed !== '' && isAbsolute(trimmed) ? trimmed : ''
+/**
+ * Reads one session's LIVE working directory, or `null` when the Host does not
+ * maintain one (or this plugin was wired without the service).
+ *
+ * Optional on `AskDeps` so a Host without session projections — and every test
+ * that builds `deps` by hand — keeps today's behaviour exactly: a `null` here is
+ * indistinguishable from "no projection service", and the ladder then reads the
+ * session header, which is what it did before.
+ */
+export type DirectoryOf = (session: unknown) => string | null
+
+/** The session directory this call came from, when the Host supplies one.
+ *
+ * THE ORDER INSIDE THIS FUNCTION IS THE FIX. The session's live projection is
+ * read FIRST, because it is the directory the human and the model are actually
+ * in; the session header is the fallback, because it is where that projection
+ * starts from (`init: header => header.cwd ?? null`) and because a session that
+ * never committed a projection has nothing else.
+ *
+ * Both sources are re-validated here: the session service already rejects
+ * relative headers, but a hand-built agent in a test (or a Host with a looser
+ * contract) must not be able to smuggle a relative path through either one.
+ */
+export function sessionDirOf(
+  execution: BridgeToolExecution | undefined,
+  directoryOf: DirectoryOf | undefined,
+): string {
+  const dirs = sessionDirCandidates(execution, directoryOf)
+  return dirs.projection !== '' ? dirs.projection : dirs.header
+}
+
+/**
+ * Both session-directory sources, kept APART so the caller can tell them — and
+ * therefore fall back between them — by validity, not just by presence.
+ *
+ * {@link sessionDirOf} collapses these into one answer, which is right for "where
+ * are we" but loses the information "the projection said X, the header says Y".
+ * The ladder in {@link resolveWorkingDir} needs the pair: a projection can go
+ * STALE (the directory was deleted, moved, or is an offline mount) while the
+ * creation-time header still points at a perfectly good directory. Without the
+ * split, a stale projection is a hard refusal even though a usable directory is
+ * one field away.
+ *
+ * Both sources are re-validated the same way as in {@link sessionDirOf}: absolute
+ * and non-blank, so a hand-built session cannot smuggle a relative path through
+ * either field.
+ */
+export function sessionDirCandidates(
+  execution: BridgeToolExecution | undefined,
+  directoryOf: DirectoryOf | undefined,
+): { projection: string; header: string } {
+  const session = execution?.agent?.session
+  let projection = ''
+  if (session !== undefined && directoryOf !== undefined) {
+    const live = directoryOf(session)
+    if (typeof live === 'string') {
+      const trimmed = live.trim()
+      if (trimmed !== '' && isAbsolute(trimmed)) projection = trimmed
+    }
+  }
+  const cwd = session?.header?.cwd
+  let header = ''
+  if (typeof cwd === 'string') {
+    const trimmed = cwd.trim()
+    if (trimmed !== '' && isAbsolute(trimmed)) header = trimmed
+  }
+  return { projection, header }
+}
+
+/**
+ * Why `path` cannot be a turn's working directory, or `''` when it can.
+ *
+ * The three checks the ladder has always applied (exists / is a directory /
+ * readable), stated once so the projection→header fallback in
+ * {@link resolveWorkingDir} re-runs exactly the same gate instead of a weaker
+ * private copy.
+ */
+function dirRejection(path: string): string {
+  if (!existsSync(path)) return `working_dir "${path}" 不存在。`
+  let isDir = false
+  try {
+    isDir = statSync(path).isDirectory()
+  } catch (error) {
+    return `working_dir "${path}" 无法读取：${error instanceof Error ? error.message : String(error)}`
+  }
+  if (!isDir) return `working_dir "${path}" 不是一个目录。`
+  return ''
 }
 
 /**
@@ -278,8 +357,17 @@ export function resolveWorkingDir(
   args: Record<string, unknown>,
   options: BridgeOptions,
   execution: BridgeToolExecution | undefined,
+  directoryOf?: DirectoryOf,
 ): WorkingDirChoice {
-  const sessionDir = sessionDirOf(execution)
+  const dirs = sessionDirCandidates(execution, directoryOf)
+  // A projection equal to the header is ONE directory, not two rungs: the
+  // primary is the projection unless it does not differ from the header, in
+  // which case the header alone fills the primary slot and the fallback slot
+  // stays empty.
+  const primarySessionDir =
+    dirs.projection !== '' && dirs.projection !== dirs.header ? dirs.projection : dirs.header
+  const fallbackSessionDir =
+    primarySessionDir !== dirs.header && dirs.header !== '' ? dirs.header : ''
   const explicit = typeof args['working_dir'] === 'string' ? args['working_dir'].trim() : ''
 
   let chosen = ''
@@ -295,8 +383,8 @@ export function resolveWorkingDir(
     }
     chosen = explicit
     fromArgument = true
-  } else if (sessionDir !== '') {
-    chosen = sessionDir
+  } else if (primarySessionDir !== '') {
+    chosen = primarySessionDir
   } else if (options.workingDir !== '') {
     chosen = options.workingDir
   } else if (args['allow_unattended'] === true || options.allowUnattended) {
@@ -314,28 +402,43 @@ export function resolveWorkingDir(
     }
   }
 
-  if (!existsSync(chosen)) {
-    return { ok: false, dir: '', unattended: false, reason: `working_dir "${chosen}" 不存在。` }
-  }
-  let isDir = false
-  try {
-    isDir = statSync(chosen).isDirectory()
-  } catch (error) {
+  const rejection = dirRejection(chosen)
+  // A STALE projection is not a refusal when the creation-time header still
+  // names a usable directory: the projection is the live answer, but the header
+  // is where the session verifiably started, and between "no turn" and "a turn
+  // in the last directory known good" the latter is the useful one. The fallback
+  // is scoped to the session rung on purpose — an explicit argument or a
+  // configured default that fails validation must surface its failure, not be
+  // silently swapped for another directory.
+  if (
+    rejection !== '' &&
+    !fromArgument &&
+    chosen === primarySessionDir &&
+    fallbackSessionDir !== '' &&
+    dirRejection(fallbackSessionDir) === ''
+  ) {
+    chosen = fallbackSessionDir
+  } else if (rejection !== '') {
+    const fallbackAlsoFailed =
+      !fromArgument &&
+      chosen === primarySessionDir &&
+      fallbackSessionDir !== '' &&
+      dirRejection(fallbackSessionDir) !== ''
     return {
       ok: false,
       dir: '',
       unattended: false,
-      reason: `working_dir "${chosen}" 无法读取：${error instanceof Error ? error.message : String(error)}`,
+      reason: fallbackAlsoFailed
+        ? `${rejection}（回退的会话目录 "${fallbackSessionDir}" 同样不可用，工作目录投影与会话 header 都失效了。）`
+        : rejection,
     }
-  }
-  if (!isDir) {
-    return { ok: false, dir: '', unattended: false, reason: `working_dir "${chosen}" 不是一个目录。` }
   }
 
   // A turn called from a session may always run in that session, and the
   // configured default is trusted by definition (an operator wrote it).
   const roots: string[] = []
-  if (sessionDir !== '') roots.push(sessionDir)
+  if (primarySessionDir !== '') roots.push(primarySessionDir)
+  if (fallbackSessionDir !== '') roots.push(fallbackSessionDir)
   if (options.workingDir !== '') roots.push(options.workingDir)
   roots.push(...options.allowedDirs)
 
@@ -440,6 +543,15 @@ export interface AskDeps {
    * unobserved, which is the pre-feature behaviour rather than an error.
    */
   live?: LiveBoard
+  /**
+   * Reads the calling session's LIVE working directory.
+   *
+   * Wired from the Host's session projections when it has them (see
+   * `BridgeProjectionReader` in `./services.ts` for what that buys and where it
+   * comes from). Left `undefined` this bridge falls back to the session header's
+   * creation-time `cwd`, which is the pre-projection behaviour.
+   */
+  directoryOf?: DirectoryOf
 }
 
 /** The gate this call must pass, built once per normalized option set. */
@@ -630,7 +742,7 @@ export async function runAsk(
     return result({ ok: false, error: 'message 不能为空：要说清楚这一轮让 CodeBuddy 做什么。' })
   }
 
-  const dir = resolveWorkingDir(args, options, execution)
+  const dir = resolveWorkingDir(args, options, execution, deps.directoryOf)
   if (!dir.ok) return result({ ok: false, error: dir.reason })
 
   // Charge the budget BEFORE resolving credentials: the gate exists to bound how

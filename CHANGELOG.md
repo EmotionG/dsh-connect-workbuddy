@@ -89,15 +89,25 @@
   - 设置其实**已经落盘并通过回读校验**，卡住的只是随后那次用量刷新：写入与刷新共用同一个 `saving` 状态，而刷新可能因为账号被限制、网络抖动或上游慢响应而迟迟不返回，用户于是看到「没保存成功」的假象，草稿也被锁死。
   - 现在 `saving` 只覆盖「已校验的设置写入」这一件事：写成功立刻解除 busy 并丢弃草稿，然后 **`await`** 那次回读（不是「再异步刷新」——它是串行等到的，只是结果只影响显示）。这带来一个明确的取舍：回读完成前，卡片上的行还是旧值；`refreshUsage` 失败时不抛而是 resolve，所以「没抛异常」不等于「读到了新值」，旧契约里「保留草稿直到刷新成功」的写法会在这个窗口里拿陈旧的 `saved` 去比对——因此回读结果与保存判定彻底分开。
   - 刷新失败不影响「已保存」的判定，只显示一条**独立**提示（`row.poolSavedStaleRefresh`：「已保存，但面板未能重新读取。设置已写入；下次刷新后会显示。」），它与「保存失败」是两个节点：前者 `role="status"`、后者 `role="alert"`，不再复用 `row.poolSaveFailed`，也就不会出现「保存失败：已保存，但……」这种自相矛盾的一行。只有写入失败才保留草稿。模型选择的保存路径（`WorkBuddyCard.saveModels`）同步修正。
+- **`/cd` 换过目录之后，CLI 与 `/codebuddy` 仍把 CodeBuddy 拉回创建时的那个目录。**
+  - **症状**：在一个会话里打开 `~/repos/api`，然后用 `working_directory` 工具 `/cd` 到 `~/repos/web`，接着调用 CodeBuddy 或 `/codebuddy`——CodeBuddy 仍然在 `~/repos/api` 里跑，模型在当前上下文里看到的却是 `~/repos/web`。两个入口还互相不一致：工具侧会退到配置里的 `cliBridge.workingDir` 或临时目录，命令侧只有一级、拿不到就直接报错「这个会话没有工作区路径」。
+  - **根因**：两个入口都读 `agent.session.header.cwd`，而 Host 自己的文档把 session header 写成 *detached, deep-frozen creation metadata (format version, cwd, lineage...)*——它是**创建时**的快照，之后再也不更新。活的目录根本不在 header 上：Host 用 `@deepseek-ai/dsh-working-directory` 把它维护成一条 session 投影（`key: "workingDirectory"`，`init: header => header.cwd ?? null`，每次 `working-directory/change` 事件 apply 一次），`/cd` 工具发的就是这种事件。Host 也把这条投影写进模型的系统提示（"Current working directory: ..."），官方插件（auto-review、dsh-tools、user-questions）读的都是投影，不是 header。
+  - **修法**：新增 `DirectoryOf` 依赖，`sessionDirOf()` 优先读 Host 的 `workingDirectory` 投影，读不到（未发布 / 非字符串 / 空白 / 非绝对路径）才回退 `header.cwd`。`resolveWorkingDir()` 的其余四级阶梯与三重校验（`existsSync` / `statSync.isDirectory` / `isInside` 用 realpath 比对）一行未动。
+  - **两个入口同一个裁决器**：`/codebuddy` 改成调用 `sessionDirOf()`，与工具共用同一段逻辑，两边从此不可能再各说各话；都拿不到时的报错文案改为说明「投影与回退都为空」。
+  - **降级是硬约束**：Host 没有发布 `sessionProjections` 时，`cliDirectoryOf` 保持 `undefined`，行为与改动前逐字节一致（`src/index.ts` 里 reactive `inject(['sessionProjections'])` 而非 apply 期采样一次，避免在 Desktop 上重演 tools/commands 被丢的历史）。**故意不回退到投影服务自己的 `defaultDirectory`**——Host 的 `get()` 是 `stateOf ?? defaultDirectory`，而那个值是 `process.cwd()`，照抄等于把「不知道」偷换成「用这个」，是本次唯一不许做的事，测试 `degrades to the configured default, not to the Host process directory` 钉死这条。
+  - **装配顺序缺陷（审核时发现，随本条一并修复）**：`createCliBridgeRuntime` 在 tools/commands 行触发，可能早于 `sessionProjections` 到位；而 `syncCliBridge` 的重建键是序列化后的设置——投影到位时设置没变，重建是 no-op，runtime 里带着 build 时的 `undefined`，投影**永远不生效且无报错**（症状原样保留）。修法：runtime 接的不是值而是**探针闭包** `cliDirectoryProbe`（每回合读当前格），顺序依赖从此消失；投影服务缺席或卸载时格子清零，探针返回 `null`，回退行为不变。测试 `honours a projection that appears AFTER the runtime was built` 钉死这条时序。
+- **行为变化（读投影的必然后果）**：目录阶梯 roots 白名单的第一项现在是**投影目录**（`/cd` 之后的当前目录），不再是创建时的 header 目录。因此显式传 `working_dir` 指向旧目录（header 目录的子树）在 `/cd` 之后会被三重校验拒绝，报错文案会列出当前 roots——这是「会话在哪、CLI 就在哪」的正确形态，不是回归。**凭据、计费、provider 注册与普通请求路径均未改动**；工作目录阶梯的顺序与校验规则不变，只是第一档从「会话创建时的目录」换成了「会话当前的目录」。
 
 ### Docs
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) 补充 `11128` / `11140` 的分类依据（**按业务码，不按 `displayTips`，也不按裸 `request illegal`**）、`account-restricted` 的停权语义与它唯一实测的回池路径（手动「测试」），以及「渠道拒绝不换号、账号限制要停权」的分界。
+- `src/cli-bridge/services.ts` 记下为什么读 Host 的 `workingDirectory` 投影而不是 `session.header.cwd`，以及 `stateOf` 同步、无文件系统 IO 这两个性质如何让目录阶梯仍然是 `execute` 的同步第一步。
 
 ### Tests
 
 - 新增 11128/11140 分类与账号限制切分（含按信封读码、转义/断行措辞、混合体归属三组反向测试）、企业标记贯穿三个池内转发点与 Web 账号行、领取 409 拒绝、保存后草稿丢弃与陈旧刷新提示（两条 UI 测试原先钉住的正是缺陷本身，已改正）、以及「`selected` 必须跟随 `current()` 的轮换优先级」两条（轮换中只许一个标记、轮换指向已消失账号时回落）；会话身份三件套一节 9 条（默认形状不变 / 开启后的 v7+`X-IDE-*`+`X-Request-ID`+`User-Agent` 不变 / 生图不受开关影响）；`keepPromptLast` 一节 10 条（默认不动、搬移正确、`system-reminder` 与 `<acp>` 形状、**取自真实会话的组合注入形状**、**不重排普通对话**这条反向测试、system 仍居首、只剥离被记录那一条的前导标记、array content 两种形状、无注入块时不剥离）。
 - 完整套件 **2205 通过 / 2 条按平台跳过**，`typecheck` 与 `build` 通过。所有「守卫能失败」的说法都做过变异验证，逐条结果：X-IDE 或三件套改成「无视开关」→ 默认形状测试变红；开关改成永不生效 → 对齐测试变红；生图 `'image'` 改成 `'chat'`、或删掉 `shape === 'chat'` 判据 → 生图守卫变红（这条只有把 identity 真正传进 `imageHeaders` 之后才成立——`shape` 曾经是空转参数，那时改它不会变红，是真的假阳性，已修）；删掉 `isFailoverWorthy` 里的 `account_restricted` → 新增的 shim 换号测试变红（此前全绿）；把 11140 的码判定退回紧凑字面量或退回裸 `11140` 文本 → 新增的「按信封读码」测试变红（分别命中 `spaced: client` 与十六进制假阳性）；让 `accounts()` 重新忽略轮换标记 → 新增的「标记跟随被计费账号」测试变红；把面板的底色改回读 `selected` → 新增的「底色与文字指向同一行」测试变红。
+- `tests/cli-bridge.spec.ts` 增 7 条（该文件 82 条全过）：投影优先于 header、投影为空回退 header、非绝对路径的投影被忽略、不得退到 Host 进程目录（`defaultDirectory`）、`/codebuddy` 跑在投影目录里、投影与 header 都为空时拒绝，加一条时序回归（runtime 先建、投影后发布、不重挂也不改设置，下一回合仍须落在投影目录——把 runtime 接回 build 时的快照值，这条就落回 `header.cwd`，当场变红）。本条并入本版后在 Windows 上重跑：完整套件 **132 files / 2214 tests 全过、0 跳过**（上面两条记录的 2205 与 2 条按平台跳过都落在同一批：那 2 条在本平台不跳），`typecheck`（`tsconfig.json` + `tsconfig.client.json`）与 `tsdown` 构建通过。
 
 ## 5.7.0 (2026-10-23)
 

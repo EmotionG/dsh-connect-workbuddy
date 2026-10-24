@@ -13,6 +13,7 @@ import {
   prepareChatBody,
   regionOf,
   globalBase,
+  isUndecodablePolicyBody,
   selectCliModels,
 } from '../src/upstream.ts'
 
@@ -245,6 +246,31 @@ describe('classifyUpstreamError', () => {
     for (const status of [400, 401, 403]) {
       expect(classifyUpstreamError(status, body), `status=${status}`).toBe('account_restricted')
     }
+  })
+
+  it('flags the one 11140 shape in which a restriction would be silently missed', () => {
+    // THE ANOMALY WORTH A LOG. isAccountRestrictedBody needs the code AND a phrase
+    // in the display fields. If the upstream ever renames those fields or moves
+    // the wording, every restriction degrades to policy_reject with no signal —
+    // so a 11140 that decodes to NO display text at all is reported, while the
+    // everyday shapes stay silent.
+    // Anomalous: code present, nothing decodable from any display field.
+    // The nested envelope is the realistic miss — businessCodeOf reads the code
+    // through error.data.code, but the verdict text only reads top-level fields.
+    expect(isUndecodablePolicyBody('{"code":11140}')).toBe(true)
+    expect(isUndecodablePolicyBody('{"error":{"data":{"code":11140,"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}}}')).toBe(true)
+    // Everyday policy refusal: fields present, phrase just not the restriction.
+    expect(isUndecodablePolicyBody('{"code":11140,"msg":"request illegal"}')).toBe(false)
+    expect(isUndecodablePolicyBody(
+      '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"模型无法处理此请求"}}',
+    )).toBe(false)
+    // A restriction body decodes fine and must NOT be flagged.
+    expect(isUndecodablePolicyBody(
+      '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}',
+    )).toBe(false)
+    // Not a 11140 body at all.
+    expect(isUndecodablePolicyBody('{"code":11128,"msg":"unapproved channel"}')).toBe(false)
+    expect(isUndecodablePolicyBody('not json at all')).toBe(false)
   })
 
   it('reads the business code from the envelope, not from one JSON spelling (issue #127 review)', async () => {
@@ -1480,6 +1506,39 @@ describe('WorkBuddyUpstreamClient.chatStream', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     caller.abort()
     await expect(answer).resolves.toMatchObject({ ok: false, status: 0, kind: 'server' })
+  })
+
+  it('warns through the injected logger when a 11140 body decodes to nothing', async () => {
+    // The predicate is only half of the observability: the transport must
+    // actually forward it. The onFallback channel is how this module reports
+    // anomalies without holding a logger.
+    const warning: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"data":{"code":11140,"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}}}',
+      { status: 403 },
+    )))
+    const answer = await new WorkBuddyUpstreamClient(
+      message => warning.push(message),
+    ).chatStream(credential(), '{}')
+    if (answer.ok) throw new Error('expected a failure result')
+    expect(answer.kind).toBe('policy_reject')
+    expect(warning).toHaveLength(1)
+    expect(warning[0]).toContain('11140')
+    expect(warning[0]).toContain('displayMsg/displayTips/msg')
+  })
+
+  it('does not warn for an ordinary content refusal', async () => {
+    const warning: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"code":11140,"msg":"request illegal","displayMsg":{"zh":"模型无法处理此请求"}}',
+      { status: 403 },
+    )))
+    const answer = await new WorkBuddyUpstreamClient(
+      message => warning.push(message),
+    ).chatStream(credential(), '{}')
+    if (answer.ok) throw new Error('expected a failure result')
+    expect(answer.kind).toBe('policy_reject')
+    expect(warning).toHaveLength(0)
   })
 })
 

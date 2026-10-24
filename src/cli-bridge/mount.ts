@@ -32,7 +32,7 @@ import type { LiveBoard } from './live.ts'
 import type { BridgeCommandsService, BridgeLog, BridgeToolsService } from './services.ts'
 import { gateFor } from './tool.ts'
 import { EFFORT_LEVELS, MAX_REPLY_CHARS_CAP, MAX_TURNS_CAP, PERMISSION_MODES, SESSION_CONTINUITY_MODES, TIMEOUT_SECS_CAP, mountAskTool } from './tool.ts'
-import type { AskDeps, BridgeOptions } from './tool.ts'
+import type { AskDeps, BridgeOptions, DirectoryOf } from './tool.ts'
 
 /**
  * The `cliBridge` settings as they arrive from the config schema.
@@ -215,13 +215,18 @@ export function createCliBridgeRuntime(
   settings: CliBridgeSettings | undefined,
   regions: readonly BridgeCredentialRegion[],
   log: BridgeLog,
+  directoryOf?: DirectoryOf,
 ): CliBridgeRuntime | undefined {
   const options = normalizeCliBridgeOptions(settings, message => log(message))
   if (!options.enabled) return undefined
   const live = createLiveBoard()
   // One gate for both surfaces: the budget must not depend on which entrance the
   // call arrived through.
-  return { options, deps: { options, regions, log, gate: gateFor(options), live }, live }
+  return {
+    options,
+    deps: { options, regions, log, gate: gateFor(options), live, ...(directoryOf !== undefined ? { directoryOf } : {}) },
+    live,
+  }
 }
 
 /** Mount `codebuddy_ask` on a tools service, returning its disposer. */
@@ -240,6 +245,11 @@ export interface CliBridgeMountInput {
   /** Region-scoped credential stores, in the order the plugin built them. */
   regions: readonly BridgeCredentialRegion[]
   log: BridgeLog
+  /**
+   * Reads a session's live working directory (the Host's `workingDirectory`
+   * projection). Omitted means the header-only behaviour, exactly as before.
+   */
+  directoryOf?: DirectoryOf
   /** Optional host services; absent means "this Host has no such surface". */
   tools: BridgeToolsService | undefined
   commands: BridgeCommandsService | undefined
@@ -253,7 +263,7 @@ export interface CliBridgeMountInput {
  * surface that appears later can be attached without re-mounting the other.
  */
 export function mountCliBridge(input: CliBridgeMountInput): () => void {
-  const runtime = createCliBridgeRuntime(input.settings, input.regions, input.log)
+  const runtime = createCliBridgeRuntime(input.settings, input.regions, input.log, input.directoryOf)
   if (runtime === undefined) return () => {}
 
   const disposeTool = mountToolSurface(runtime, input.tools)
