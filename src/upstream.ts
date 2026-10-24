@@ -1706,6 +1706,72 @@ const UNAPPROVED_CHANNEL_OPENINGS: readonly string[] = [
 ]
 
 /**
+ * The identity clauses an agent prompt introduces itself with, matched so the
+ * plugin can break them INSIDE rather than in front of.
+ *
+ * WHY {@link UNAPPROVED_CHANNEL_OPENINGS} DOES NOT COVER THESE. That list is a
+ * PREFIX rule, and it is the right rule for the gate the plugin measured on
+ * 2026-10-21. It is the wrong rule for the gate the upstream has been running
+ * since: a case-insensitive EXACT SUBSTRING match ANYWHERE in a scanned
+ * message, which is what this plugin's own issue #125 recorded (three sites in
+ * the live DSH prompt, "只改任意一两处不够，三处全改才 200") and what
+ * `workbuddy2api-hub` #533 independently bisected to the byte on a real 124 KB
+ * request. A prefix prepend cannot break a substring match, because the banned
+ * span is still in the text, intact, one line lower.
+ *
+ * THE THREE MEASURED SITES, and why each needs its own alternative:
+ *
+ *   You are an AI agent powered by DeepSeek Harness.
+ *   You are a coding agent powered by the <model> model.
+ *   You are interacting with the user through the DeepSeek Harness Web GUI …
+ *
+ * The first is on the prefix list. The other two are NOT, and the second is the
+ * one that survives every rung this plugin had: it carries no adjacent
+ * capitalised word pair (so {@link WORD_INTERNAL_BREAK} misses it), no comma or
+ * clause punctuation, and its terminal full stop lands AFTER the banned span (so
+ * the sentence rules miss it too). Measured against a real DSH prompt: sparse
+ * perturbation clears sites 1 and 3 and leaves site 2 byte-identical, which is
+ * exactly the request that kept answering 11128.
+ *
+ * The model name in site 2 is not stable (`qmodel_38max`, `deepseek-v4.1-flash`,
+ * …), so the clause is matched up to `powered by` and the variable tail is left
+ * to the break rule itself.
+ */
+const IDENTITY_CLAUSE =
+  /(you)(\s+are\s+(?:(?:an?\s+)?[\w-]*\s*agent\s+powered\s+by|interacting\s+with\s+the\s+user\s+through\s+the\s+deepseek\s+harness))/giu
+
+/**
+ * Break an identity clause at EVERY word boundary inside it.
+ *
+ * NOT one break, and that is deliberate. The plugin does not know which span the
+ * upstream listed: #533's minimal failing sample is the whole sentence, but the
+ * gate is a substring match, so the listed span could equally be a shorter piece
+ * of it (`a coding agent powered by`). One break at the front defeats only the
+ * spans that start there. Breaking at every internal word boundary defeats every
+ * span inside the clause, whatever its endpoints, for about ten invisible
+ * characters.
+ *
+ * The cost is why this can run on EVERY request instead of only in a rescue:
+ * measured on a real 10,818-character DSH system prompt it adds ~28 characters
+ * (+0.26%), against the dense rescue's 7,742 (+70.7%). Both break all three
+ * sites; only this one is cheap enough to send unconditionally.
+ *
+ * The break goes AFTER each whitespace run, so the text keeps its own spacing
+ * and a reader (or a tokenizer) sees the same words in the same order.
+ *
+ * Naturally idempotent: once a clause carries a break, `IDENTITY_CLAUSE` no
+ * longer matches it — `\s+` does not match U+200B, so the second alternative
+ * fails at the inserted character and the clause is left alone on every later
+ * pass. That is a property this function has to have on its own, because
+ * {@link perturbChannelFingerprints} can no longer refuse to touch text that
+ * already carries an invisible break.
+ */
+export function breakIdentityClauses(text: string): string {
+  return text.replace(IDENTITY_CLAUSE, (clause: string) =>
+    clause.replace(/(\s+)/gu, `$1${ZERO_WIDTH_SPACE}`))
+}
+
+/**
  * Whether this text OPENS with an opening the gateways refuse.
  *
  * The gate is a PREFIX match on the START of a `system` message, so this is
@@ -1802,11 +1868,8 @@ function neutralizeChannelFingerprints(obj: Record<string, unknown>): void {
     if (!scansOpening(message['role'])) continue
     const content = message['content']
     if (typeof content === 'string') {
-      // Leading whitespace currently defeats the gate by itself (measured), but
-      // the gateway can start trimming without notice, so compare the way a
-      // trimming gate would and keep the raw content untouched.
-      if (!isUnapprovedChannelOpening(content)) continue
-      message['content'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${content}`
+      const next = neutralizeScannedText(content)
+      if (next !== undefined) message['content'] = next
       continue
     }
     if (!Array.isArray(content)) continue
@@ -1818,10 +1881,39 @@ function neutralizeChannelFingerprints(obj: Record<string, unknown>): void {
       const type = record['type']
       if (typeof type !== 'string' || type.trim().toLowerCase() !== 'text') continue
       const text = record['text']
-      if (typeof text !== 'string' || !isUnapprovedChannelOpening(text)) continue
-      record['text'] = `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${text}`
+      if (typeof text !== 'string') continue
+      const next = neutralizeScannedText(text)
+      if (next !== undefined) record['text'] = next
     }
   }
+}
+
+/**
+ * Both neutralising transforms, applied to one scanned text part.
+ *
+ * `undefined` means the text goes on the wire byte-for-byte, which is the case
+ * for every ordinary message: an ordinary conversation contains no identity
+ * clause, so this changes nothing at all and the body is not re-serialised.
+ *
+ * THE ORDER IS LOAD-BEARING. The prefix rule reads the START of the text, so it
+ * has to look at the text the HOST wrote; running {@link breakIdentityClauses}
+ * first would insert an invisible break inside `You are an AI agent powered by
+ * DeepSeek Harness`, and {@link isUnapprovedChannelOpening} would then no longer
+ * match it — silently dropping the neutral head the prefix gate still needs. So
+ * the head goes on first, and the clause breaks land in the text underneath it.
+ *
+ * BOTH RUN, because they defend different gates. The head defeats the prefix
+ * match at offset 0; the clause breaks defeat the exact-substring match
+ * anywhere inside. A body that needs only one of them gets only that one:
+ * the Claude Code opening on the prefix list carries no identity clause, and an
+ * identity clause nobody put on the prefix list needs no head.
+ */
+function neutralizeScannedText(text: string): string | undefined {
+  const headed = isUnapprovedChannelOpening(text)
+    ? `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${text}`
+    : text
+  const broken = breakIdentityClauses(headed)
+  return broken === text ? undefined : broken
 }
 
 /**
@@ -2005,13 +2097,19 @@ export function perturbChannelFingerprints(
   if (!Array.isArray(messages)) return undefined
   let changed = false
   const perturb = (text: string): string | undefined => {
-    if (text.includes(ZERO_WIDTH_SPACE)) return undefined
     // Sentence terminators followed by whitespace, the CJK ones without, and
     // clause commas: between them they land inside almost any prose span that
     // is long enough to be worth fingerprinting.
+    //
+    // THE CJK RULE NEEDS A LOOKAHEAD THE OTHERS DO NOT. A latin terminator is
+    // followed by `(\s+)`, and U+200B is not whitespace — so an already-broken
+    // sentence simply stops matching and the rule is naturally idempotent. The
+    // CJK rule has no trailing whitespace to anchor on (CJK punctuation is
+    // written unspaced), so without `(?!\u200b)` it would stack a second break
+    // on every pass, and `第一句！` at end-of-text would grow one ZWS per retry.
     const boundaries = text
       .replace(/([.!?])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
-      .replace(/([。！？])/gu, `$1${ZERO_WIDTH_SPACE}`)
+      .replace(/([。！？])(?!\u200b)/gu, `$1${ZERO_WIDTH_SPACE}`)
       .replace(/([,;])(\s+)/gu, `$1${ZERO_WIDTH_SPACE}$2`)
       .replace(WORD_INTERNAL_BREAK, (whole: string, head: string, tail: string) =>
         `${head}${ZERO_WIDTH_SPACE}${tail}`)

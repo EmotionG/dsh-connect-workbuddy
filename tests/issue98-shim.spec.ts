@@ -102,6 +102,24 @@ function failure(status: number, body: string): WorkBuddyChatResult {
   }
 }
 
+/** How many invisible breaks a body carries. */
+function breaksIn(bodyJson: string): number {
+  return (bodyJson.match(/\u200b/gu) ?? []).length
+}
+
+/**
+ * A body with every invisible break removed — the text the model reads.
+ *
+ * The request path now breaks an agent identity clause before the ladder ever
+ * runs (the exact-substring gate is what refused the real DSH prompt, issue
+ * #125), so "the plain body has no U+200B" is no longer true and must not be
+ * asserted. Comparing the stripped forms keeps the claim the ladder has to
+ * satisfy: it adds no word and removes none.
+ */
+function stripBreaks(bodyJson: string): string {
+  return bodyJson.replace(/\u200b/gu, '')
+}
+
 function contentFrame(content: string): string {
   return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: '' }] })}\n\n`
 }
@@ -236,12 +254,21 @@ describe('the self-healing retry (issue #98)', () => {
 
     expect(reply.status).toBe(400)
     expect(mounted.bodies).toHaveLength(3)
-    // The second body differs from the first only by the invisible characters.
+    // The second body differs from the first only by invisible characters.
+    //
+    // The FIRST body is no longer free of them: `prepareChatBody` breaks the
+    // identity clause itself now, because the substring gate — not the prefix
+    // gate — is what refused the real DSH prompt (issue #125). So the comparison
+    // is between the two bodies with the breaks stripped, which states the same
+    // claim as before ("the perturbation adds no word and removes none")
+    // against the text the model actually reads.
     const first = mounted.bodies[0] ?? ''
     const second = mounted.bodies[1] ?? ''
     expect(second).toContain('\u200b')
-    expect(first).not.toContain('\u200b')
-    expect(second.replace(/\u200b/gu, '')).toBe(first)
+    expect(stripBreaks(second)).toBe(stripBreaks(first))
+    // The sparse rung still ADDS breaks on top of the ones the request path put
+    // there — that is what makes spending this request worth it at all.
+    expect(breaksIn(second)).toBeGreaterThan(breaksIn(first))
     expect(reply.message).toContain('并已用一次不可见扰动与一次密集不可见扰动重试过')
     expect(reply.message).not.toContain('并已用强制中性头')
   })

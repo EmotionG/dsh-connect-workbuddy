@@ -27,6 +27,20 @@ const POLICY_REJECT_BODY = JSON.stringify({
   actions: ['SUBMIT_FEEDBACK', 'COPY_ERROR', 'EDIT_INPUT'],
 })
 
+/**
+ * The wire text with every invisible break removed.
+ *
+ * `prepareChatBody` now breaks an agent identity clause at each of its internal
+ * word boundaries, which is the defence against the gateway's exact-SUBSTRING
+ * match (a different gate from the prefix one, and the one issue #125 measured
+ * as the real refusal). Every WORD survives in its own order, so these
+ * assertions compare the stripped text: that is the contract, and pinning the
+ * byte form would freeze the very change the defence is.
+ */
+function visible(text: string): string {
+  return text.replace(/\u200b/gu, '')
+}
+
 describe('prepareChatBody', () => {
   it('forces streaming and flattens object tool_choice', () => {
     const prepared = JSON.parse(prepareChatBody(JSON.stringify({
@@ -112,7 +126,7 @@ describe('prepareChatBody', () => {
       ],
     }))) as { messages: { role: string; content: unknown }[] }
     expect(prepared.messages).toHaveLength(2)
-    expect(prepared.messages[0]?.content).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
+    expect(visible(prepared.messages[0]?.content as string)).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
     expect(prepared.messages[1]?.content).toBe('hello')
   })
 
@@ -124,18 +138,29 @@ describe('prepareChatBody', () => {
     const prepared = JSON.parse(prepareChatBody(JSON.stringify({
       messages: [{ role: 'system', content: prompt }],
     }))) as { messages: { content: string }[] }
-    expect(prepared.messages[0]?.content).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
+    expect(visible(prepared.messages[0]?.content ?? '')).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${prompt}`)
   })
 
-  it('leaves the fingerprint alone when it is not at the start of the prompt', () => {
-    // The gate reads the opening only: the same sentence inside the prompt body
-    // passes upstream, so a prompt that merely mentions a third-party agent must
-    // stay byte-for-byte intact.
+  it('adds NO neutral head for a fingerprint that is not at the start of the prompt', () => {
+    // THE PREFIX GATE reads the opening only (measured 2026-10-21), so a
+    // mid-text mention earns no head — and prepending one would be a lie about
+    // which gate objected.
+    //
+    // WHAT CHANGED, AND WHY THIS TEST USED TO SAY THE OPPOSITE. It used to
+    // assert the whole text stayed byte-for-byte intact, on the reading that a
+    // mid-text mention "passes upstream". Issue #125 disproved that reading: the
+    // gateway ALSO matches an exact substring ANYWHERE in a scanned message, and
+    // three such spans in the live DSH prompt had to be broken before one request
+    // answered 200 ("只改任意一两处不够，三处全改才 200"). So the mid-text
+    // clause IS now broken — by the substring defence, not by the head. This
+    // assertion keeps the half that is still true (no head) and leaves the
+    // breaking to the identity-clause suite, which pins it directly.
     const prompt = 'Rules: be nice.\n\nYou are an AI agent powered by DeepSeek Harness.'
     const prepared = JSON.parse(prepareChatBody(JSON.stringify({
       messages: [{ role: 'system', content: prompt }],
     }))) as { messages: { content: string }[] }
-    expect(prepared.messages[0]?.content).toBe(prompt)
+    expect(prepared.messages[0]?.content).not.toContain(WORKBUDDY_FALLBACK_SYSTEM_PROMPT)
+    expect(visible(prepared.messages[0]?.content ?? '')).toBe(prompt)
   })
 
   it('neutralizes every system message, not just the head', () => {

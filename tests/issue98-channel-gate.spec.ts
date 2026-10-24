@@ -82,6 +82,25 @@ function prepared(source: unknown): {
   }
 }
 
+/**
+ * The wire text with every invisible break removed.
+ *
+ * WHY THESE ASSERTIONS COMPARE THE STRIPPED TEXT. Since the identity-clause
+ * break, a scanned message that introduces an agent identity carries U+200B
+ * inside that clause — by design, and it is the whole point: the exact-substring
+ * gate matches BYTES, so the bytes have to differ from the listed span while
+ * every WORD the model reads stays exactly where it was.
+ *
+ * Stripping is not a weaker assertion, it is the one that states the actual
+ * contract — "the host's own words, in the host's own order, plus the plugin's
+ * head" — instead of freezing a byte form that one invisible character of
+ * defence has to change. A test that wants the breaks themselves asks for them
+ * explicitly (see the `breakIdentityClauses` suite).
+ */
+function visible(text: string): string {
+  return text.replace(/\u200b/gu, '')
+}
+
 describe('array-shaped system content: every text part is scanned (measured fact 2)', () => {
   it('neutralises a fingerprint in the FIRST part', () => {
     const body = prepared({
@@ -95,7 +114,7 @@ describe('array-shaped system content: every text part is scanned (measured fact
     expect(Array.isArray(content)).toBe(true)
     expect(content).toHaveLength(1)
     expect(content[0]?.type).toBe('text')
-    expect(content[0]?.text).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}\n\nAnd the rest of the prompt.`)
+    expect(visible(content[0]?.text ?? '')).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}\n\nAnd the rest of the prompt.`)
   })
 
   it('neutralises a fingerprint in the SECOND part too', () => {
@@ -160,7 +179,8 @@ describe('array-shaped system content: every text part is scanned (measured fact
     })
     const content = body.messages[0]?.content as { type: string; text: string }[]
     expect(content[0]?.text).toBe('A perfectly ordinary opening.')
-    expect(content[1]?.text).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}\n\nAnd the rest of the prompt.`)
+    expect(content[1]?.text).toBeDefined()
+    expect(visible(content[1]?.text ?? '')).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}\n\nAnd the rest of the prompt.`)
   })
 
   it('survives a malformed part without throwing', () => {
@@ -182,14 +202,19 @@ describe('string-shaped system content keeps behaving exactly as before', () => 
     const body = prepared({
       messages: [{ role: 'system', content: DSH_FINGERPRINT }, { role: 'user', content: 'hi' }],
     })
-    expect(body.messages[0]?.content).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}`)
+    expect(visible(body.messages[0]?.content as string)).toBe(`${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${DSH_FINGERPRINT}`)
     expect(body.messages[1]?.content).toBe('hi')
   })
 
-  it('leaves a non-matching opening untouched', () => {
+  it('does NOT prepend the neutral head to a mid-text fingerprint', () => {
+    // Measured fact 3: the PREFIX gate only reads the START, so a prompt that
+    // merely MENTIONS a third-party identity gets no head. The clause inside it
+    // is still broken by the substring defence — that is a different gate, and
+    // this assertion is about the head only, which is what fact 3 measures.
     const prompt = 'Rules: be nice.\n\nYou are an AI agent powered by DeepSeek Harness.'
     const body = prepared({ messages: [{ role: 'system', content: prompt }] })
-    expect(body.messages[0]?.content).toBe(prompt)
+    expect(visible(body.messages[0]?.content as string)).toBe(prompt)
+    expect(body.messages[0]?.content as string).not.toContain(WORKBUDDY_FALLBACK_SYSTEM_PROMPT)
   })
 
   it('leaves a user message alone even when it opens with a fingerprint', () => {
