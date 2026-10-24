@@ -245,3 +245,60 @@ describe('catalogFingerprint: the repair writes only when something actually dif
     expect(catalogFingerprint([live('a')])).not.toBe(catalogFingerprint([live('b')]))
   })
 })
+
+describe('promotions are LIVE-owned (issue #139 follow-up)', () => {
+  const nightPromo = {
+    id: 'glm-52-night-discount-202607',
+    source: 'promotion' as const,
+    modelIds: ['hy3'],
+    badge: { label: '夜间折扣', display: 'activeOnly' as const },
+    schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '23:00', end: '7:50' }] },
+    priority: 200,
+  }
+
+  it('keeps the LIVE promotions when the saved entry carries none', () => {
+    // Observed defect: a user who had ever saved the directory had `promos`
+    // written into `lastCatalog`; a model whose saved entry predates the
+    // promotion (or whose entry simply had none) then DROPPED the live
+    // promotions, so a model on a night discount drew no badge at all.
+    const merged = mergeRoster([live('hy3')], [live('hy3', { promos: [nightPromo] })])
+    expect(merged[0]?.promos?.map(promo => promo.id)).toEqual([nightPromo.id])
+  })
+
+  it('replaces a STALE saved promotion with the live one', () => {
+    // The other direction, and the one that made a badge lie: the saved copy
+    // described the hours the upstream published at SAVE time, so a campaign
+    // whose window had since moved kept advertising the old hours. A badge is
+    // a function of the clock, not of the save.
+    const stale = { ...nightPromo, id: 'old-hours', schedule: { timezone: 'Asia/Shanghai', daily: [{ start: '22:00', end: '6:00' }] } }
+    const merged = mergeRoster(
+      [live('hy3', { promos: [stale] })],
+      [live('hy3', { promos: [nightPromo] })],
+    )
+    expect(merged[0]?.promos?.map(promo => promo.id)).toEqual([nightPromo.id])
+  })
+
+  it('CLEARS a saved promotion the upstream no longer publishes', () => {
+    // A standing entry (no schedule, e.g. the tier badge) has no absolute
+    // window to expire it on its own, so keeping the saved copy would leave
+    // 「订阅优先」/「Pro Only」 on the row forever after the upstream withdrew it.
+    // The key is DELETED, not set to undefined: an explicit undefined survives
+    // structuredClone and the settings write's strict JSON codec rejects the
+    // whole save.
+    const merged = mergeRoster([live('hy3', { promos: [nightPromo] })], [live('hy3')])
+    expect(merged[0]?.promos).toBeUndefined()
+    expect('promos' in (merged[0] ?? {})).toBe(false)
+  })
+
+  it('invents no promos key when neither side has one', () => {
+    const merged = mergeRoster([live('hy3')], [live('hy3')])
+    expect('promos' in (merged[0] ?? {})).toBe(false)
+  })
+
+  it('does the same through overlayLiveCapabilities directly', () => {
+    const withLive = overlayLiveCapabilities(live('hy3'), live('hy3', { promos: [nightPromo] }))
+    expect(withLive.promos?.map(promo => promo.id)).toEqual([nightPromo.id])
+    const cleared = overlayLiveCapabilities(live('hy3', { promos: [nightPromo] }), live('hy3'))
+    expect('promos' in cleared).toBe(false)
+  })
+})

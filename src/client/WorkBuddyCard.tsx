@@ -23,9 +23,9 @@
  * @module dsh-connect-workbuddy/client/WorkBuddyCard
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useRef, useState } from 'react'
 import { createElement as h } from 'react'
-import type { ReactElement } from 'react'
+import type { ErrorInfo, ReactElement, ReactNode } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import {
   nextRegionCreditPosition,
@@ -460,8 +460,88 @@ function probeResultView(
   }
 }
 
-/** Render WorkBuddy sign-in state, credits, and model selection as one card. */
-export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & { view?: string }) {
+/**
+ * The configuration area's own crash face (issue #139).
+ *
+ * WHY THIS EXISTS. The host wraps every slot entry in its own
+ * `SlotErrorBoundary`, and that boundary's failure face is an EMPTY
+ * `<div data-slot-error>` (`dsh-client-ui-renderer`). So a render-time throw
+ * anywhere inside this card does not look like an error — it looks like the
+ * plugin never installed: the header stays, the whole configuration area
+ * vanishes, and the only trace is one `console.error` line. That is precisely
+ * how issue #139 was reported ("配置区整块消失"), and it is why the reporter
+ * could not tell a real crash from a missing card.
+ *
+ * WHAT IT BUYS. The same catch, with a face that says what happened: the
+ * message goes on screen, so a report can quote it without opening devtools.
+ * It does NOT hide the error — `componentDidCatch` still logs it, so the
+ * console keeps the full stack the host would have printed anyway.
+ *
+ * SCOPE: the BODY only, never the header. A user whose configuration crashed
+ * must still be able to collapse and re-expand the card, and the header is
+ * pure static markup — it cannot be the thing that threw.
+ *
+ * LIMITS, stated so nobody expects more than React gives: a boundary catches
+ * errors thrown during RENDER, in lifecycle methods, and in constructors. It
+ * does NOT catch throws from event handlers, timers, or promise callbacks —
+ * so an async failure still surfaces the way it did before (inline error text
+ * or the console), which is the correct behaviour for those paths.
+ */
+class CardBodyBoundary extends Component<
+  { readonly t: Translate; readonly children: ReactNode },
+  { readonly failed: boolean; readonly message: string | undefined }
+> {
+  state: { readonly failed: boolean; readonly message: string | undefined } = {
+    failed: false,
+    message: undefined,
+  }
+
+  static getDerivedStateFromError(error: unknown): { failed: boolean; message: string | undefined } {
+    // A `SlotAssemblyError` means the SHELL is miswired (a missing provider),
+    // and the host's own boundary deliberately rethrows it rather than
+    // degrading. Swallowing it here would turn a loud wiring fault into a
+    // quiet "configuration failed", so it is rethrown on purpose.
+    if (error instanceof Error && error.name === 'SlotAssemblyError') throw error
+    return { failed: true, message: error instanceof Error ? error.message : String(error) }
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    try {
+      console.error('[dsh-connect-workbuddy] configuration area failed to render:', error, info.componentStack)
+    } catch { /* a host without console must still draw the face */ }
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children
+    return (
+      <div className="dsm-workbuddy-usage">
+        <p className="dsm-workbuddy-usage-error">
+          {this.props.t('row.cardCrashed')}
+        </p>
+        {this.state.message === undefined
+          ? null
+          : <p className="dsm-workbuddy-usage-error dsm-workbuddy-diag-mono">{this.state.message}</p>}
+        <p className="dsm-workbuddy-diag-hint">{this.props.t('row.cardCrashedHint')}</p>
+      </div>
+    )
+  }
+}
+
+/**
+ * Render WorkBuddy sign-in state, credits, and model selection as one card.
+ *
+ * The body is wrapped in {@link CardBodyBoundary} INSIDE the render, not here:
+ * the header must keep working when the body throws (see that class).
+ */
+export function WorkBuddyCard(props: WorkBuddyCardProps & { view?: string }) {
+  // The boundary needs a translation function to draw its face; the body
+  // already refuses to render without one, so this throws the same error the
+  // body would have thrown — just before the boundary could swallow it.
+  if (props.t === undefined) throw new Error('WorkBuddy plugin card requires its translation function')
+  return h(WorkBuddyCardBody, props)
+}
+
+function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { view?: string }) {
   if (t === undefined) throw new Error('WorkBuddy plugin card requires its translation function')
   const [open, setOpen] = useState(view === 'page')
   /** The region whose tab is on screen; each tab is its own provider stack. */
@@ -2233,7 +2313,8 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       </button>
       <div className="dsm-plugin-card-body" hidden={!open}>
         {open
-          ? <div className="dsm-workbuddy-usage">
+          ? <CardBodyBoundary t={t}>
+              <div className="dsm-workbuddy-usage">
               <div className="dsm-workbuddy-tabs" role="tablist" aria-label={title}>
                 {WORKBUDDY_REGIONS.map(region => {
                   const regionStatus = statusByRegion[region]
@@ -2895,6 +2976,20 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                             if (status.credentialRejected === true) failures.push(t('row.credentialRejectedTitle'))
                             if (status.refreshError !== undefined) failures.push(status.refreshError)
                             if (status.creditsError !== undefined) failures.push(status.creditsError)
+                            // Issue #139: a promotion whose published hours could
+                            // not be read draws NO badge and NO discount (see
+                            // `promoWithinDailyWindow`), which is indistinguishable
+                            // from "the promotion ended". Counting them here is what
+                            // makes that visible instead of silent — and this is the
+                            // symptom a future upstream format change will actually
+                            // produce, not the render crash the report guessed at.
+                            const unreadable = status.models.reduce(
+                              (count, model) => count + (model.promos ?? []).filter(
+                                promo => promo.schedule?.dailyUnusable === true,
+                              ).length,
+                              0,
+                            )
+                            if (unreadable > 0) failures.push(t('row.diagPromoUnreadable', { count: unreadable }))
                             // The upstream's OWN text, joined — not a rewritten
                             // sentence. This panel exists to be quoted.
                             return failures.length === 0
@@ -2962,6 +3057,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
                 : null}
               {status.status === 'error' ? <p className="dsm-workbuddy-usage-error">{status.message}</p> : null}
             </div>
+          </CardBodyBoundary>
           : null}
       </div>
     </li>

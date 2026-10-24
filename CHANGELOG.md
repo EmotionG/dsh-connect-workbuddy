@@ -1,5 +1,42 @@
 # Changelog
 
+## 5.9.0 (2026-10-25)
+
+> 健壮性与诊断版本：活动徽标的时窗解析不再能因非字符串端点而抛错，上游改格式时徽标不再**静默**消失，配置区渲染失败不再退化成一片空白；同时修掉一个**徽标被冻结在保存时刻**的静默缺陷。**发往上游的请求体、provider 注册、凭据、计费、换号与路由门禁一律未变**——本轮不新增任何上游请求，也不改动入站路由。
+
+### Fixes
+
+- **`minutesOfClock` 缺运行时类型守卫，非字符串端点会在渲染期抛 `value.trim is not a function`（issue #139）。**
+  - **症状（机制属实，但 issue 的根因链不成立）**：函数签名是 `(value: string)`，只靠调用方 `parseDaily` 的 `text()` 维持不变式。一旦 `{ start: 1380, end: 470 }` 这样的数字端点到达 `withinDailyWindows`（`src/promo.ts:530`），渲染期抛 `TypeError`，宿主 `SlotErrorBoundary` 把它吞成一个空的 `<div data-slot-error>`——页面上表现为「插件像没装上」：卡片只剩头部，配置区整块消失。
+  - **issue 的根因不成立，已核**：客户端 bundle 里 `modelPromotions` / `parseDaily` 的命中数是 **0**（徽标的 `promos` 由宿主解析后经 `status-paths` → `web-status` 投影下来），且宿主 `parseDaily` 对数字端点是**丢弃而非抛错**（`text()` 先挡）。实测国内区三台主机 × 四种 UA，`schedule.daily` 端点全部是字符串（`"23:00"` / `"7:50"` / `"0:00"` / `"23:59"`），无一个数字。另外 `TypeError` 与时刻无关，issue 描述的「只在夜间崩」自相矛盾（13:00 与 23:30 抛的是同一个错）。
+  - **但那条路径并非不可达**：`toPersistedWorkBuddyModel` 保留 `promos`，settings 的 `modelConfig` schema 不剥离未知键，`resolveRoster` 原样携带——所以 `lastCatalog` 是一条**真实的第二入口**，且客户端对它**零运行时校验**。这就是补守卫而不是「纯纵深防御」的理由。
+  - **修法**：签名改 `(value: unknown)`，首行 `if (typeof value !== 'string') return undefined`。**没有**采纳 issue 建议的「数字按当日分钟数解释」：`1380` 确实等于 23:00，但没有任何上游发布过这种形状，为一条上游从未描述过的活动凭空造出时段，正是本模块要防的「说多」。
+  - **验证**：`tests/promo.spec.ts` 新增 2 条——数字端点 `selectPromoBadge` / `selectPromoMultiplier` 均不抛错且返回 `undefined`；`parseWorkBuddyPromos` 对数字端点产出 `dailyUnusable`（「永不运行」）而非「无时段 = 全天」。变异验证：删掉守卫 → 该条变红。
+
+- **上游的促销变更被冻结在用户保存目录的那一刻（本轮审核发现，影响面大于 #139）。**
+  - **症状**：用户只要保存过一次模型目录，`promos` 就被写进 `lastCatalog`，此后**上游的促销变更再也不生效**——徽标与折后价用的都是保存那一刻的快照。两个方向都实测过：saved 无 `promos` + live 有 → 徽标**完全不出现**；saved 有旧 `promos` + live 有新 → **旧的赢**。极端情形：一条无 `schedule` 的常驻徽标（如「订阅优先」）在上游撤下后仍会**永远**挂在模型行上，因为它没有绝对窗口能让它自己过期。
+  - **根因**：`promos` 不在 `LIVE_OWNED_FIELDS`（`src/catalog-sync.ts:77`），而 `overlayLiveCapabilities` 返回 `{ ...saved, ...overlay }`——saved 的 `promos` 原样留下，live 的被整个丢掉。这与 `src/promo.ts` 文件头「徽标是时钟的函数，不是抓取的函数」直接矛盾：它冻在了**保存**时。
+  - **修法**：`promos` 改为 live-owned，但**不能**复用 `LIVE_OWNED_FIELDS` 那个循环（它只写 live 有值的字段，无法表达「清除」）。改为在 `overlayLiveCapabilities` 里单独处理：live 有 `promos` 就整体覆盖；live 没有就**按 key 删除** saved 的那份（不能用 `undefined`——显式 `undefined` 会存活 `structuredClone`，并被设置写入路径的严格 JSON codec 整单拒绝，与 `busyLevel` 的处理同理）。
+  - **验证**：`tests/catalog-sync.spec.ts` 新增 5 条覆盖四个方向 + 直接调用 `overlayLiveCapabilities`。变异验证：让 `promosDiffer` 恒为 false → 4 条变红。
+  - **已知未改**：`catalogFingerprint` 仍不含 `promos`，`lastCatalog` 里那份 `promos` 现在是纯冗余。持久化形状的调整会牵动严格 JSON codec 的历史教训，留待另议。
+
+- **配置区渲染失败时页面一片空白，无法与「插件没装上」区分（issue #139 的报告者正是被这一点拖住）。**
+  - **症状**：宿主 `SlotErrorBoundary` 的失败面是**空** `<div data-slot-error>`，只留一行 `console.error`。issue 贴的 `slot entry crashed in 'plugins.bundle.config': value.trim is not a function` 与该边界逐字吻合。
+  - **修法**：在卡片 **body** 层包一层 `CardBodyBoundary`（**不含 header**——配置区崩了也要能折叠/展开，且 header 是纯静态标记，不可能是抛错源）。失败面显示「配置区渲染失败」+ **错误摘要原文** + 一句「模型服务本身未受影响」，并照旧 `console.error`（含 `componentStack`），因此**不遮蔽**任何本该暴露的错误。
+  - **边界条件**：`SlotAssemblyError`（宿主装配故障）**原样重抛**，不降级——把响亮的装配错误变成安静的「配置失败」是错的。
+  - **范围声明**：React 边界只捕获 render / 生命周期 / 构造期错误，**不捕获**事件处理器、定时器与 promise 回调里的抛错；那些路径仍按原样呈现。本次崩溃发生在 render 期（栈顶 `promo.ts:263`），落点正确。
+  - **验证**：直接渲染抛错的子组件，确认失败面出现、摘要为 `value.trim is not a function`、且 `console.error` 被调用。
+
+- **上游发布了活动时段却一条都读不懂时，徽标静默消失，界面上没有任何解释。**
+  - **症状**：`dailyUnusable` 让该活动按「永不运行」处理（正确），但用户看到的是徽标不见了——与「活动已结束」无法区分。**这才是上游将来改格式时用户真正会遇到的症状**（不崩，静默消失），而 issue 猜的是崩溃。
+  - **修法**：诊断栏的 `row.diagFailures` 行计入 `promoUnreadable`，显示「N 条活动时段读不懂 —— 徽标已隐藏」。`dailyUnusable` 本来就已传到客户端，只是从未显示过。
+  - **验证**：`tests/promo-card.spec.tsx` 新增 2 条（有 `dailyUnusable` 时诊断行出现且不画徽标；全部可解析时该行不出现）。变异验证：删掉该行 → 变红。
+
+- **`parseDaily` 丢弃窗口时完全静默，上游改格式在日志里也留不下痕迹。**
+  - **修法**：丢弃时打一行 `console.warn`，带活动 id 与端点的 `typeof`（`number` 单独命名，因为它正是未来格式变更可能的样子）。
+  - **位置是刻意的**：日志打在**宿主侧** `parseDaily`（每个上游文档跑一次），**不是**客户端 `withinDailyWindows`（卡片每 60s 轮询、每个模型每轮都重算，打在那里会变成每分钟几十行）。
+  - **不泄露上游内容**：只报 `typeof`，不回显原始值。
+
 ## 5.8.5 (2026-10-24)
 
 > 安全与健壮性版本：给设置卡片的 13 条路由（10 条 POST + 3 条 GET）补上缺失的 `Host` 校验（DNS-rebinding），并让测速探针不再发送一个自造的档位值。**发往上游的请求体、provider 注册、凭据、计费与换号规则一律未变**——唯一的上游侧行为变化是测速请求少了一个字段；入站侧（本插件对浏览器请求的接受范围）**确有变化**，见下文两条：Host/Origin 判据的扩展与空 Origin 的统一。

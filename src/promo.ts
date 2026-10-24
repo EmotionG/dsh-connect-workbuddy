@@ -258,8 +258,27 @@ function text(value: unknown): string | undefined {
  *
  * Any other malformed value is left to the caller to drop — a wrong window
  * would hide a live promotion, and guessing is not this parser's job.
+ *
+ * THE TYPE GUARD IS LOAD-BEARING, NOT DEFENSIVE DECORATION (issue #139). The
+ * upstream feeds a string, and `parseDaily`'s own `text()` would already have
+ * dropped a number — but the SAVED `lastCatalog` is a second, independent
+ * entrance to this function, and nothing on that path type-checks. A promotion
+ * object rides through `toPersistedWorkBuddyModel` untouched (the settings
+ * schema keeps unknown keys), survives `resolveRoster`, and reaches the
+ * renderer's `selectPromoBadge`. A numeric `start` there used to throw
+ * `value.trim is not a function` DURING RENDER, which the host's slot error
+ * boundary turned into a blank configuration section — the page looked as if
+ * the plugin had never installed.
+ *
+ * Refusing a non-string is the same answer the parser already gives every
+ * other unreadable shape: drop the window rather than guess. Interpreting a
+ * number as "minutes since midnight" was considered and rejected — `1380`
+ * happens to mean 23:00, but no upstream has ever published that shape, and
+ * inventing hours for a promotion the upstream never described is exactly the
+ * overstatement this module exists to prevent.
  */
-function minutesOfClock(value: string): number | undefined {
+function minutesOfClock(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
   if (match === null) return undefined
   const hours = Number(match[1])
@@ -328,8 +347,28 @@ function parseHover(value: unknown): WorkBuddyPromoHover | undefined {
   }
 }
 
-/** The upstream's `schedule.daily` → the windows this plugin can evaluate. */
-function parseDaily(value: unknown): WorkBuddyPromoWindow[] | undefined {
+/**
+ * What an unreadable endpoint actually was, for the one diagnostic line below.
+ *
+ * Deliberately coarse: a NUMBER is the shape a future upstream format change
+ * would plausibly take (minutes since midnight), so it is named separately
+ * from "some other non-string". Reporting the typeof is enough to tell the two
+ * apart in a log without ever echoing upstream content into the console.
+ */
+function shapeOf(value: unknown): string {
+  if (typeof value === 'number') return 'number'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+/**
+ * The upstream's `schedule.daily` → the windows this plugin can evaluate.
+ *
+ * `label` names the entry for the diagnostic line and is passed in rather than
+ * read from `value`: the entry id lives one level up, in `parsePromo`.
+ */
+function parseDaily(value: unknown, label: string): WorkBuddyPromoWindow[] | undefined {
   if (!Array.isArray(value)) return undefined
   const windows: WorkBuddyPromoWindow[] = []
   for (const entry of value) {
@@ -337,12 +376,28 @@ function parseDaily(value: unknown): WorkBuddyPromoWindow[] | undefined {
     if (raw === undefined) continue
     const start = text(raw['start'])
     const end = text(raw['end'])
-    if (start === undefined || end === undefined) continue
     // A window whose endpoints are not clock times cannot be evaluated, so it
     // is dropped rather than guessed at. Dropping the LAST one, however, must
     // not quietly turn "night only" into "always" — `parseSchedule` records
     // that the list was published-but-unusable (see `dailyUnusable`).
-    if (minutesOfClock(start) === undefined || minutesOfClock(end) === undefined) continue
+    //
+    // THE LOG LIVES HERE, ON THE HOST SIDE, ON PURPOSE. This function runs
+    // once per upstream document (see `withPromos`), not once per render, so a
+    // line per dropped window cannot become a per-minute console flood. The
+    // CLIENT evaluates the same windows on every poll (60s) via
+    // `withinDailyWindows`; logging there would print one line per model per
+    // minute. Issue #139 is what happens when this rejection is silent: the
+    // badge simply stops appearing and nothing anywhere says why.
+    if (start === undefined || end === undefined || minutesOfClock(start) === undefined || minutesOfClock(end) === undefined) {
+      try {
+        console.warn(
+          `[dsh-connect-workbuddy] promotion "${label}": dropped an unreadable daily window `
+          + `(start: ${shapeOf(raw['start'])}, end: ${shapeOf(raw['end'])}); `
+          + 'the upstream may have changed the time format',
+        )
+      } catch { /* a host without console must still parse */ }
+      continue
+    }
     windows.push({ start, end })
   }
   return windows.length === 0 ? undefined : windows
@@ -388,13 +443,13 @@ function parseDiscount(value: unknown): WorkBuddyPromoDiscount | undefined {
 }
 
 /** The upstream's `schedule` → this plugin's schedule shape. */
-function parseSchedule(value: unknown): WorkBuddyPromoSchedule | undefined {
+function parseSchedule(value: unknown, label: string): WorkBuddyPromoSchedule | undefined {
   const raw = record(value)
   if (raw === undefined) return undefined
   const timezone = text(raw['timezone'])
   const validFrom = parseInstant(raw['validFrom'])
   const validUntil = parseInstant(raw['validUntil'])
-  const daily = parseDaily(raw['daily'])
+  const daily = parseDaily(raw['daily'], label)
   // The upstream DID publish `daily` (it is an array with at least one entry)
   // and yet nothing survived parsing. That is a parse failure, not "no hours":
   // report it so the promotion is treated as never-running rather than as a
@@ -425,10 +480,13 @@ function parsePromo(value: unknown, source: 'promotion' | 'tier'): WorkBuddyProm
   const badge = parseBadge(raw['badge'])
   if (badge === undefined) return undefined
   const hover = parseHover(raw['hover'])
-  const schedule = parseSchedule(raw['schedule'])
+  // The id is resolved BEFORE the schedule so that a dropped window can name
+  // the entry it belonged to. `parseSchedule` never reads the id; it only
+  // forwards it to the diagnostic line.
+  const id = text(raw['id']) ?? `${source}:${modelIds.join(',')}`
+  const schedule = parseSchedule(raw['schedule'], id)
   const discount = parseDiscount(raw['discount'])
   const priority = typeof raw['priority'] === 'number' && Number.isFinite(raw['priority']) ? raw['priority'] : 0
-  const id = text(raw['id']) ?? `${source}:${modelIds.join(',')}`
   return {
     id,
     source,

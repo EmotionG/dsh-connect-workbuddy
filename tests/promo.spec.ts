@@ -19,6 +19,7 @@ import {
   parseWorkBuddyPromos,
   promoActiveAt,
   selectPromoBadge,
+  selectPromoMultiplier,
 } from '../src/promo.ts'
 
 /** The observed global-feed promotion, unchanged in shape. */
@@ -300,5 +301,45 @@ describe('which badge holds now', () => {
     // Reversing the order must not change the answer: the tie-break has to be
     // in the comparator, not an accident of which array was read first.
     expect(selectPromoBadge(parseWorkBuddyPromos([price], [access]).reverse(), MORNING_0800)?.id).toBe('price')
+  })
+
+  it('refuses a numeric clock endpoint instead of throwing (issue #139)', () => {
+    // THE REPORTED CRASH. A promotion object reaches the renderer from a
+    // SECOND path besides the upstream document: the card persists `promos`
+    // into `lastCatalog` (the settings schema keeps unknown keys) and
+    // `resolveRoster` carries them back verbatim. Nothing on that path
+    // type-checks, so `selectPromoBadge` can be handed `{ start: 1380 }`.
+    // Before this guard that threw `value.trim is not a function` DURING
+    // RENDER, and the host's slot boundary turned the whole configuration
+    // section into an empty div — the page looked as if the plugin had never
+    // installed.
+    const numeric = [{
+      ...hy3Promotion,
+      id: 'numeric-night',
+      badge: { label: '夜间折扣', display: 'activeOnly' },
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: 1380, end: 470 }] },
+    }] as unknown as Parameters<typeof selectPromoBadge>[0]
+    // The assertion that matters is that this RETURNS. `undefined` is also the
+    // correct answer: a window we cannot read must not be guessed at, and
+    // 1380 is 23:00 only by a coincidence no upstream ever published.
+    expect(() => selectPromoBadge(numeric, NIGHT_2330)).not.toThrow()
+    expect(selectPromoBadge(numeric, NIGHT_2330)).toBeUndefined()
+    expect(() => selectPromoMultiplier(numeric!, NIGHT_2330)).not.toThrow()
+  })
+
+  it('reads a numeric endpoint in the parser as unusable, not as all day', () => {
+    // The upstream path cannot even produce a number (the host's `text()` drops
+    // it first), but the SAVED shape can carry one, and `parseWorkBuddyPromos`
+    // is also what re-parses a profile. It must land on `dailyUnusable` — the
+    // "never running" answer — rather than on "no hours" (which means 24h).
+    const [promo] = parseWorkBuddyPromos([{
+      ...hy3Promotion,
+      id: 'numeric',
+      badge: { label: '夜间折扣', display: 'activeOnly' },
+      schedule: { timezone: 'Asia/Shanghai', daily: [{ start: 1380, end: 470 }] },
+    }], [])
+    expect(promo?.schedule?.dailyUnusable).toBe(true)
+    expect(promo?.schedule?.daily).toBeUndefined()
+    expect(selectPromoBadge([promo!], NIGHT_2330)).toBeUndefined()
   })
 })

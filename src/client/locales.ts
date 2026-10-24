@@ -110,6 +110,16 @@ export const en = {
   'row.diagPoolOff': 'off',
   'row.diagFailures': 'Last failure',
   'row.diagNoFailures': 'Nothing reported.',
+  // Issue #139. The upstream published daily hours for a promotion that this
+  // plugin could not read, so the badge and the discounted price are hidden.
+  // Saying so is the whole point: the alternative is a badge that silently
+  // stops appearing, which reads as "the promotion ended" and is wrong.
+  'row.diagPromoUnreadable': '{count} promotion hour(s) unreadable — badge hidden',
+  // Issue #139. The host's own slot boundary draws an EMPTY div on a render
+  // throw, which reads as "the plugin is not installed". This face says what
+  // actually happened, so the next report can quote it.
+  'row.cardCrashed': 'The configuration area failed to render.',
+  'row.cardCrashedHint': 'The model provider itself is unaffected — chat and credits keep working. Quote the line above in a bug report.',
   'row.modelsTitle': 'Models',
   'row.modelsSummary': '{count} enabled',
   // Shown in the section header while the list is COLLAPSED. The save/discard
@@ -639,6 +649,9 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.diagPoolOff': '关闭',
   'row.diagFailures': '最近一次失败',
   'row.diagNoFailures': '没有报错。',
+  'row.diagPromoUnreadable': '{count} 条活动时段读不懂 —— 徽标已隐藏',
+  'row.cardCrashed': '配置区渲染失败。',
+  'row.cardCrashedHint': '模型服务本身未受影响，对话与积分仍可用。反馈问题时请附上上面这行。',
   'row.modelsTitle': '模型',
   'row.modelsSummary': '已启用 {count} 个',
   // 折叠态显示在标题行。保存/放弃按钮在折叠区里面，没有这个提示，用户会把

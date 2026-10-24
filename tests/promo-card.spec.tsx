@@ -119,3 +119,27 @@ describe('the promotion badge', () => {
     expect(chips(m.container).map(chip => chip.textContent)).toEqual(['High'])
   })
 })
+
+describe('a promotion whose hours could not be read (issue #139)', () => {
+  it('draws no badge, and says so in the diagnostics', async () => {
+    // THE SYMPTOM A FUTURE UPSTREAM FORMAT CHANGE WILL PRODUCE. `dailyUnusable`
+    // means the upstream published hours and none could be evaluated, so the
+    // promotion never counts as running (see `promoWithinDailyWindow`) and no
+    // badge is drawn. Without the diagnostic line that is indistinguishable
+    // from "the promotion ended" — which is why #139 could not tell a parse
+    // failure from a missing card.
+    const m = await render([promo({
+      schedule: { timezone: 'Asia/Shanghai', dailyUnusable: true },
+    })])
+    expect(chips(m.container)).toHaveLength(0)
+    // The fixture's `t` echoes the KEY, so this asserts the row was reached and
+    // counted — the wording itself lives in `locales.ts`.
+    expect(m.container.textContent).toContain('row.diagPromoUnreadable|count=1')
+  })
+
+  it('says nothing when every promotion parsed', async () => {
+    const m = await render([promo()])
+    expect(chips(m.container)).toHaveLength(1)
+    expect(m.container.textContent).not.toContain('row.diagPromoUnreadable')
+  })
+})
