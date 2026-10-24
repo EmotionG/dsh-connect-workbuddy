@@ -434,6 +434,15 @@ export const en = {
   // The image tool is the ONE capability where the model spends on its own
   // (about 5.71 credits a picture, no per-call approval in the host). Opt-in
   // for that reason, so the copy says what it costs instead of only naming it.
+  'row.upstreamHint': 'These change what the gateway sees, not which provider serves the call. All of them are sampled when the plugin mounts, so reload the plugin (or restart DSH) after changing one.',
+  'row.usageIdentityLabel': 'Make the usage page record these calls like the official client',
+  'row.usageIdentityHint': 'Adds the X-IDE-* headers (which fill the 使用端 column, otherwise blank) and sends conversation ids as 32-hex UUIDv7. Display alignment only: the User-Agent and the request body never change. Off by default because the evidence comes from a reporter, not from this plugin.',
+  'row.keepPromptLastLabel': 'Record what you actually typed, not the injected context',
+  'row.keepPromptLastHint': 'Moves the harness-injected runtime context above your real prompt, so the usage page stops showing "Time sampled…" as your question. Message count and text are preserved. Off by default because it changes the message order the upstream counts.',
+  'row.sessionTitleLabel': 'Send session titles to the lightweight model',
+  'row.sessionTitleHint': 'The host fires one title request per new session and bills it at the main model rate. This re-points that one request at a hidden lightweight model. The request still happens either way. Off by default.',
+  'row.sessionTitleModel': 'Target model:',
+  'row.extraPrefixesCount': 'Custom injected prefixes in effect:',
   'row.cliBridgeLabel': 'Let the local CodeBuddy CLI do the work',
   'row.cliBridgeHint': 'Adds the codebuddy_ask tool and the /codebuddy command. Each call spends CodeBuddy quota. injectResult only affects /codebuddy — its result is injected back into the session, costing one DSH turn when the session is idle; tool calls never read it. Rate-limited: 6 turns per session per hour, 20 per process per hour, one turn at a time. Off by default.',
   // The three quick-adjust pins of the route: which model and which reasoning
@@ -940,6 +949,15 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   // 生图工具是本插件里唯一「由模型自己决定花钱」的能力（约 5.71 积分/张，
   // 宿主没有逐次确认的机制），所以默认关闭，文案也必须把单价说出来，
   // 而不是只给它一个名字。
+  'row.upstreamHint': '这一组改的是网关看到什么，不是由哪个 provider 提供服务。四项都在插件挂载时采样，改完需重载插件或重启 DSH。',
+  'row.usageIdentityLabel': '让用量页把调用记成官方客户端的样子',
+  'row.usageIdentityHint': '补上 X-IDE-* 头（「使用端」那一列就不会空白），并把会话 id 改成 32 位十六进制 UUIDv7。只影响显示：User-Agent 与请求正文永不变。默认关闭——证据来自报告者，本插件未在真机复现。',
+  'row.keepPromptLastLabel': '记录你真正输入的话，而不是注入的上下文',
+  'row.keepPromptLastHint': '把宿主注入的运行上下文挪到真实提问前面，用量页就不会再把「Time sampled…」当成你的提问。消息条数与文本都不变。默认关闭——它会改变上游会数到的消息顺序。',
+  'row.sessionTitleLabel': '会话标题请求改用轻量模型',
+  'row.sessionTitleHint': '宿主每个新会话都会发一次标题请求，并按主模型费率计费；开启后这一次改投隐藏的轻量模型。请求无论开不开都会发出。默认关闭。',
+  'row.sessionTitleModel': '目标模型：',
+  'row.extraPrefixesCount': '生效的自定义注入前缀：',
   'row.cliBridgeLabel': '允许调用本机 CodeBuddy CLI 干活',
   'row.cliBridgeHint': '开启后多出 codebuddy_ask 工具与 /codebuddy 指令；每次调用花 CodeBuddy 配额。injectResult 只影响 /codebuddy：其结果回注会话，会话空闲时多花一次 DSH 回合；工具调用不读它。限流：每会话每小时 6 回合、每进程每小时 20 回合、同时只跑一个回合。默认关闭。',
   // 本地 CLI 路由的三个快调旋钮：跑哪个模型、哪个推理档位、按什么顺序

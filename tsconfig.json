@@ -26,6 +26,7 @@
     "tests/off-thinking-card.spec.tsx",
     "tests/context-tiers.spec.tsx",
     "tests/card-credits-switch.spec.tsx",
+    "tests/card-upstream-switches.spec.tsx",
     "tests/image-tool-optin.spec.ts",
     "tests/issue101-context-overflow.spec.ts",
     "tests/tps.spec.ts",

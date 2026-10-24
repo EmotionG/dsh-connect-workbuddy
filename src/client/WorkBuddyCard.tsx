@@ -56,7 +56,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, isFileContentionWriteError, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels } from './account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, extraInjectedPrefixesOf, isFileContentionWriteError, sessionTitleOf, upstreamSwitchOf, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels, writeUpstreamSwitch } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -554,6 +554,21 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
   const [cliBridgeEffortBusy, setCliBridgeEffortBusy] = useState(false)
   const [cliBridgeRegionOrder, setCliBridgeRegionOrder] = useState<string | undefined>(undefined)
   const [cliBridgeRegionOrderBusy, setCliBridgeRegionOrderBusy] = useState(false)
+  /**
+   * The upstream-identity switches the user flipped in this session.
+   *
+   * `undefined` means "not touched here, read the committed settings"; a flipped
+   * value wins until the next snapshot agrees (same rule as `cliBridgeOn`). Each
+   * switch has its own busy flag so flipping one does not disable the others —
+   * they are independent writes, and a shared flag would make the card feel
+   * frozen while one of them is in flight.
+   */
+  const [usageIdentityOn, setUsageIdentityOn] = useState<boolean | undefined>(undefined)
+  const [usageIdentityBusy, setUsageIdentityBusy] = useState(false)
+  const [keepPromptLastOn, setKeepPromptLastOn] = useState<boolean | undefined>(undefined)
+  const [keepPromptLastBusy, setKeepPromptLastBusy] = useState(false)
+  const [sessionTitleOn, setSessionTitleOn] = useState<boolean | undefined>(undefined)
+  const [sessionTitleBusy, setSessionTitleBusy] = useState(false)
   /**
    * Probe results, keyed by region then model id.
    *
@@ -1105,6 +1120,65 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
       if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
     } finally {
       if (mounted.current) setCliBridgeBusy(false)
+    }
+  }
+
+  /**
+   * The three upstream-identity switches, read the same three-level way the CLI
+   * switch is: this card's own successful write, then the settings snapshot.
+   *
+   * Deliberately NOT reading them from the status document: these are
+   * plugin-wide request-shape switches that the Host does not report per region,
+   * and inventing a status field for them would create a second source of truth
+   * for a value the settings document already owns.
+   */
+  const usageIdentityValue = (): boolean =>
+    usageIdentityOn ?? upstreamSwitchOf(settingsScope?.getSnapshot().value, 'usageIdentity')
+
+  const keepPromptLastValue = (): boolean =>
+    keepPromptLastOn ?? upstreamSwitchOf(settingsScope?.getSnapshot().value, 'keepPromptLast')
+
+  const sessionTitleValue = (): { enabled: boolean, model: string } => {
+    const committed = sessionTitleOf(settingsScope?.getSnapshot().value)
+    return sessionTitleOn === undefined ? committed : { ...committed, enabled: sessionTitleOn }
+  }
+
+  /** The custom injected prefixes in effect, used only to REPORT their count. */
+  const extraInjectedPrefixes = (): string[] =>
+    extraInjectedPrefixesOf(settingsScope?.getSnapshot().value)
+
+  /**
+   * Flip one upstream-identity switch.
+   *
+   * No `refreshUsage` afterwards, unlike the CLI switch: these change the shape
+   * of the NEXT request, not any value the usage document currently reports, so
+   * re-reading the usage would only cost an upstream round-trip (the exact
+   * stall #131 was about) for a number that cannot have moved.
+   */
+  const toggleUpstreamSwitch = async (
+    field: 'usageIdentity' | 'keepPromptLast' | 'sessionTitle',
+    enabled: boolean,
+  ): Promise<void> => {
+    if (settingsScope === undefined) return
+    const setBusy = field === 'usageIdentity'
+      ? setUsageIdentityBusy
+      : field === 'keepPromptLast' ? setKeepPromptLastBusy : setSessionTitleBusy
+    const setOwn = field === 'usageIdentity'
+      ? setUsageIdentityOn
+      : field === 'keepPromptLast' ? setKeepPromptLastOn : setSessionTitleOn
+    setBusy(true)
+    try {
+      // `sessionTitle` is the one switch whose field is an OBJECT: preserve the
+      // committed target model instead of writing the transport shape away.
+      const value = field === 'sessionTitle'
+        ? { ...sessionTitleOf(settingsScope.getSnapshot().value), enabled }
+        : enabled
+      await writeUpstreamSwitch(settingsScope, field, value)
+      if (mounted.current) setOwn(enabled)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -2027,6 +2101,69 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
     </div>
   )
 
+  /**
+   * The upstream-identity switches (issue #133 suggestions 2 and 3).
+   *
+   * These govern what the gateway SEES and how it files the call, not which
+   * provider serves it, so they sit in their own group with their own heading
+   * instead of the preference list below (which is all about the card's own
+   * display choices). Every one of them was already settable by hand in
+   * `cordis.patch.yml`; this is only a UI route to the same fields.
+   *
+   * ONE shared hint about reloading, not one per switch: all four are sampled
+   * when the plugin mounts into the shim, so the rule and its reason are the
+   * same sentence for each, and repeating it four times would bury it.
+   */
+  const upstreamSwitches = (
+    <div className="dsm-workbuddy-prefs">
+      <span className="dsm-workbuddy-pref-hint">{t('row.upstreamHint')}</span>
+      {([
+        ['usageIdentity', 'row.usageIdentityLabel', 'row.usageIdentityHint', usageIdentityValue(), usageIdentityBusy, setUsageIdentityOn],
+        ['keepPromptLast', 'row.keepPromptLastLabel', 'row.keepPromptLastHint', keepPromptLastValue(), keepPromptLastBusy, setKeepPromptLastOn],
+        ['sessionTitle', 'row.sessionTitleLabel', 'row.sessionTitleHint', sessionTitleValue().enabled, sessionTitleBusy, setSessionTitleOn],
+      ] as const).map(([field, labelKey, hintKey, on, busy, setOwn]) => (
+        <label key={field} className="dsm-workbuddy-pref dsm-workbuddy-upstream-pref" title={t(hintKey)}>
+          {/* A DISTINCT class, not `dsm-workbuddy-pref-check`: the credit-switch
+              suite (and the layout contract it pins) reads every
+              `.dsm-workbuddy-pref-check` in the card as "the one per-region
+              display switch", so sharing that class would make these appear to
+              be four credit switches. They are not region-scoped display
+              preferences; they change the request the whole plugin sends. */}
+          <input
+            type="checkbox"
+            className="dsm-workbuddy-upstream-check"
+            checked={on}
+            disabled={!canWrite || saving || poolBusy || busy}
+            onChange={(event: { target: { checked: boolean } }) => {
+              void toggleUpstreamSwitch(field, event.target.checked)
+            }}
+          />
+          <span className="dsm-workbuddy-pref-copy">
+            <span className="dsm-workbuddy-pref-label">{t(labelKey)}</span>
+            <span className="dsm-workbuddy-pref-hint">{t(hintKey)}</span>
+            {/* `sessionTitle` is the only one with a second value; it is shown
+                rather than edited because the id is already configurable in
+                `sessionTitle.model` and a free-text field here would be a
+                second, unvalidated way to break the one thing this switch
+                depends on. */}
+            {field === 'sessionTitle' && on
+              ? <span className="dsm-workbuddy-pref-hint">{t('row.sessionTitleModel')} {sessionTitleValue().model}</span>
+              : null}
+            {/* `extraInjectedPrefixes` has no control here ON PURPOSE: it is a
+                list of literal strings, and a checkbox-shaped UI for it would be
+                a worse editor than the config file it already lives in. It is
+                REPORTED while it matters (only `keepPromptLast` reads it), so a
+                user who added prefixes by hand can see they are in effect rather
+                than wondering whether the plugin noticed. */}
+            {field === 'keepPromptLast' && on && extraInjectedPrefixes().length > 0
+              ? <span className="dsm-workbuddy-pref-hint">{t('row.extraPrefixesCount')} {extraInjectedPrefixes().length}</span>
+              : null}
+          </span>
+        </label>
+      ))}
+    </div>
+  )
+
   const creditPreferences = (
     <div className="dsm-workbuddy-prefs">
       {cliBridgePreference}
@@ -2692,6 +2829,7 @@ export function WorkBuddyCard({ t, settingsScope, view }: WorkBuddyCardProps & {
               >
                 <p className="dsm-workbuddy-panel-note">{t('row.panelCapabilitiesHint')}</p>
                 {creditPreferences}
+                {upstreamSwitches}
               </div>
               {/* DIAGNOSTICS — the third section, and the one that earns its tab
                   by holding nothing the other two already say: the facts a bug

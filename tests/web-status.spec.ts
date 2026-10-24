@@ -1490,6 +1490,61 @@ describe('registerWorkBuddyStatusRoute __save with a live-reference config', () 
     const value = ops[0]?.value as Record<string, unknown>
     expect(value).toEqual({ cn: { enabledModelIds: [] } })
   })
+
+  /**
+   * The upstream-identity switches (issue #133 suggestions 2 and 3).
+   *
+   * The card can now drive four fields that used to be config-file only. The
+   * endpoint is the security boundary for that, so what matters here is that it
+   * accepts EXACTLY those four, writes each on its own path, and refuses
+   * everything else — a widened allow-list would let the browser write settings
+   * the config file never exposed.
+   */
+  it('accepts each upstream switch and writes only its own path', async () => {
+    for (const [field, value] of [
+      ['usageIdentity', true],
+      ['keepPromptLast', true],
+      ['extraInjectedPrefixes', ['This is an efficiency nudge']],
+      ['sessionTitle', { enabled: true, model: 'wb-lite' }],
+    ] as const) {
+      const { handler, mutateReceived, dispose } = await mountSaveRoutes()
+      const { res, status } = saveResponse()
+      await handler(saveReq({ field, value }), res)
+      dispose()
+      expect(status(), field).toBe(200)
+      const tuple = mutateReceived[0]
+      expect(tuple?.[0]).toBe('workbuddy')
+      const ops = tuple?.[1] as Array<{ op: string, path: string[], value: unknown }>
+      expect(ops, field).toHaveLength(1)
+      // ONE op, on THIS field's own path — never a merged block that could
+      // carry a sibling back over.
+      expect(ops[0]?.op).toBe('set')
+      expect(ops[0]?.path).toEqual([field])
+      expect(ops[0]?.value).toEqual(value)
+    }
+  })
+
+  it('refuses a field outside the allow-list', async () => {
+    const { handler, mutateReceived, dispose } = await mountSaveRoutes()
+    const { res, status, body } = saveResponse()
+    await handler(saveReq({ field: 'sessionTitleExtra', value: true }), res)
+    dispose()
+    expect(status()).toBe(400)
+    expect(JSON.stringify(body())).toContain('field must be')
+    // And nothing reached the settings service.
+    expect(mutateReceived).toHaveLength(0)
+  })
+
+  it('refuses to write a non-object where an object is expected', async () => {
+    // `cliBridge` and `upstream`-shaped writes go through a merge; handing them
+    // a scalar would make the merge silently produce `{}` and erase the block.
+    const { handler, mutateReceived, dispose } = await mountSaveRoutes()
+    const { res, status } = saveResponse()
+    await handler(saveReq({ field: 'cliBridge', value: 'on' }), res)
+    dispose()
+    expect(status()).toBe(400)
+    expect(mutateReceived).toHaveLength(0)
+  })
 })
 
 /**

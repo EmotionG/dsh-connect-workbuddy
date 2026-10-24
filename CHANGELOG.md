@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.8.3 (2026-10-24)
+
+> 体验版本：把 #132/#133 那几项「只能手改 `cordis.patch.yml` 才生效」的开关搬进插件卡片，用户可以直接勾选，不用再编辑 profile 里的 YAML、也不用知道那个文件在哪。**请求路径、默认字节、计费行为均未改动**：四个开关的默认值与采样时机与 5.8.0 完全一致（三个布尔默认关闭），这次只新增了一条写入它们的 UI 路径。
+
+### Features
+
+- **上游标识开关进入设置卡片（#133 建议 2/3）。**
+  - 卡片「能力」页新增一组开关：`usageIdentity`（让用量页把调用记成官方客户端的样子）、`keepPromptLast`（让用量页记录你真正输入的话）、`sessionTitle`（会话标题请求改用轻量模型）。这三项此前只存在于 `cordis.patch.yml`，用户要手改 profile 里的 YAML 才知道有这个功能。
+  - 每个开关都带一行说明和一个「改完需重载插件或重启 DSH」的统一提示——这四项都在插件挂载时采样进 shim，配置改了但没重载就看不到变化。`sessionTitle` 开启时额外显示当前目标模型（只读：该 id 仍由 `sessionTitle.model` 配置，不在这里做第二个未经校验的编辑入口）。
+  - `extraInjectedPrefixes` **故意不给输入框**：它是一个字符串数组，塞进复选框形状的 UI 只会比配置文件更难用。改为在 `keepPromptLast` 开启时**报告**当前生效条数，让手写过前缀的用户能确认插件确实看见了。
+  - 新增 Host 端点字段：`__save` 现在接受 `usageIdentity` / `keepPromptLast` / `extraInjectedPrefixes` / `sessionTitle` 四个顶层字段，各自 `set` 自己的路径。**不是**塞进 `cliBridge` 块：那四项管的是所有 provider 共享的请求形态，塞进去会让「关掉 CLI 路由」看起来像把它们一起重置了。
+  - 写入沿用既有两条写入器（Host 端点优先、设置作用域兜底）：该命名空间的浏览器镜像在有问题的 0.1.7 部署上被文档标注为陈旧，只「看起来翻过去了」的开关正是「关闭不了」那一类报告。
+
+### Tests
+
+- 新增 [`tests/card-upstream-switches.spec.tsx`](tests/card-upstream-switches.spec.tsx)（9 条）：三个开关按**已提交值**渲染、缺省一律读成 OFF（不是「truthy 就算开」）、翻动只写**本字段**、`sessionTitle` 写入保留 `model`（它的字段是对象，退化成布尔就会把用户设的目标模型抹掉）、POST 到 Host 端点、以及重载提示必须在屏上。读取器另有 3 条单独测（volatile 的 `{get()}` 解包、`sessionTitle` 的缺省/畸形回退、前缀列表的去空去重与非数组防御）。
+- [`tests/web-status.spec.ts`](tests/web-status.spec.ts) 增 3 条端点用例：四个字段各自只写自己的路径、白名单外的字段被 400 拒绝且不触达设置服务、期望对象的字段收到标量时拒绝。
+- 变异验证：把 `sessionTitle` 的写入退化成裸布尔 → 1 条红；把「缺省读 OFF」改成「缺省读 ON」→ 4 条红；把新开关的 class 改回 `.dsm-workbuddy-pref-check` → `card-credits-switch` 5 条红（它按「卡片里只有一个」读那个类）。
+- 完整套件 **2268 通过 / 2 条按平台跳过**（此前 2256），`typecheck` 与 `build` 通过。
+
+### Docs
+
+- 卡片文案中英双语同步新增 8 条 key；`styles.ts` 补上两个新 class 的定义（`client-host-contract` 的「每个渲染出的 class 都必须有样式」守卫要求）。
+
 ## 5.8.2 (2026-10-24)
 
 > 适配版本：跟随宿主 `0.2.1-rc.3`。rc.2 在 web-app 捆绑里新增了官方插件 `@deepseek-ai/dsh-client-ui-deepseek-model-label-1017`（给 DeepSeek 官方 Flash 行画「1017」发布徽章），它与本插件注册**同一个 `single` 槽**、**同一个默认优先级 0**——于是本插件的注册**抛错**，模型选择器里的负载徽章**静默消失**。本版修掉这一处，其余全部兼容。

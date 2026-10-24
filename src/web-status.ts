@@ -567,6 +567,27 @@ function safeMessage(error: unknown): string {
     .slice(0, 500)
 }
 
+/**
+ * The upstream-identity switches the card may write through `__save`.
+ *
+ * These are TOP-LEVEL config fields (see the schema in `index.ts`), not a
+ * nested block, so each is set on its own path and no merge base is involved.
+ * The list is a constant here rather than derived from the schema because this
+ * endpoint must stay a closed allow-list: deriving it would let an unrelated
+ * schema addition quietly widen what the browser can write.
+ *
+ * Every entry is a switch the user can already set by hand in
+ * `cordis.patch.yml`; this list only adds a UI route to the same fields (issue
+ * #133 suggestions 2 and 3), so it can never expose anything the config file
+ * does not already expose.
+ */
+const UPSTREAM_SWITCH_FIELDS: ReadonlySet<string> = new Set([
+  'usageIdentity',
+  'keepPromptLast',
+  'extraInjectedPrefixes',
+  'sessionTitle',
+])
+
 /** A non-null, non-array object: the only shape the slot merge applies to. */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -1810,8 +1831,17 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // `cliBridge` is a GLOBAL scalar bag, not a region map: it skips the
           // region machinery (sibling slots, catalog seeding) and is merged one
           // level through `nextCliBridgeSettings` below.
-          if (field !== 'regions' && field !== 'accounts' && field !== 'cliBridge') {
-            return json(res, 400, { error: 'field must be regions, accounts or cliBridge' })
+          //
+          // The upstream-identity switches are top-level fields and are handled
+          // in their own branch below; they need no merge base because each is a
+          // complete independent value. They exist here so the card can drive
+          // them without a config-file hand edit (issue #133 suggestions 2 and
+          // 3), and they are NOT folded into `cliBridge`: they govern the request
+          // path every provider shares, not the CodeBuddy CLI route, so turning
+          // the CLI route off must not look like it reset them.
+          if (field !== 'regions' && field !== 'accounts' && field !== 'cliBridge'
+            && !(typeof field === 'string' && UPSTREAM_SWITCH_FIELDS.has(field))) {
+            return json(res, 400, { error: 'field must be regions, accounts, cliBridge, usageIdentity, keepPromptLast, extraInjectedPrefixes or sessionTitle' })
           }
           const rows = settings.describe()
           const row = rows.find((r: any) => String(r.ns).includes('workbuddy'))
@@ -1846,6 +1876,15 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
             // Answer the committed block, so the card can mirror the truth
             // instead of re-deriving it from its (documented-stale) mirror.
             return json(res, 200, { ok: true, value: mergedBridge })
+          }
+          // The upstream-identity switches, written as their OWN top-level
+          // fields (`usageIdentity` / `keepPromptLast` / `extraInjectedPrefixes`
+          // / `sessionTitle`). No wrapper bag and no merge base: each is a
+          // complete, independent scalar, so `set` on its own path is exactly
+          // what the schema declares and cannot clobber a sibling.
+          if (UPSTREAM_SWITCH_FIELDS.has(field)) {
+            await settings.mutate(row.ns, [{ op: 'set', path: [field], value: body.value }], undefined)
+            return json(res, 200, { ok: true, value: { [field]: body.value } })
           }
           // Merge TWO levels, and the second level is what stops a save from
           // DELETING data.

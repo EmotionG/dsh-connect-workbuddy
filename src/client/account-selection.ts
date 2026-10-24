@@ -58,6 +58,20 @@ export class WorkBuddySettingsWriteError extends Error {
 }
 
 /**
+ * The upstream-identity switches the card can write (issue #133 suggestions 2/3).
+ *
+ * Each name is a TOP-LEVEL config field the user could already set by hand in
+ * `cordis.patch.yml`; the card only adds a UI route to the same fields. Writing
+ * one never touches its siblings, because the Host `__save` endpoint sets the
+ * field's own path rather than merging a block.
+ */
+export type UpstreamSwitchField =
+  | 'usageIdentity'
+  | 'keepPromptLast'
+  | 'extraInjectedPrefixes'
+  | 'sessionTitle'
+
+/**
  * Whether a save failure is a FILE-CONTENTION refusal.
  *
  * On Windows, replacing a file that another process holds open fails with
@@ -122,7 +136,7 @@ function fieldSnapshotOf(
  * the field's live value, preserving the other region.
  */
 async function saveViaHostEndpoint(
-  field: 'accounts' | 'regions' | 'cliBridge',
+  field: 'accounts' | 'regions' | 'cliBridge' | UpstreamSwitchField,
   region: WorkBuddyWebRegion | undefined,
   value: unknown,
 ): Promise<Record<string, unknown> | undefined> {
@@ -162,6 +176,115 @@ export function cliBridgeEnabledOf(configured: unknown): boolean {
   const bridge = (configured as { cliBridge?: unknown } | undefined)?.cliBridge
   return typeof bridge === 'object' && bridge !== null
     && (bridge as { enabled?: unknown }).enabled === true
+}
+
+/**
+ * Read one upstream-identity boolean switch out of a settings snapshot.
+ *
+ * Only an explicit `true` is ON, exactly like {@link cliBridgeEnabledOf} and for
+ * the same reason: these switches change what gets billed or what bytes go
+ * upstream, so a missing or malformed value must read as OFF, never as consent.
+ *
+ * @param configured - the whole settings snapshot.
+ * @param field - which switch to read.
+ * @returns whether the switch is on.
+ */
+export function upstreamSwitchOf(configured: unknown, field: 'usageIdentity' | 'keepPromptLast'): boolean {
+  const value = (configured as Record<string, unknown> | undefined)?.[field]
+  return unwrapVolatileDeep(value) === true
+}
+
+/**
+ * Read the `sessionTitle` switch's two values out of a settings snapshot.
+ *
+ * Returns the schema's own defaults (`enabled: false`, `model: 'wb-lite'`) for
+ * anything missing or malformed, so the card shows what the plugin will actually
+ * do rather than an empty control.
+ *
+ * @param configured - the whole settings snapshot.
+ * @returns the switch state and target model.
+ */
+export function sessionTitleOf(configured: unknown): { enabled: boolean, model: string } {
+  const raw = unwrapVolatileDeep((configured as Record<string, unknown> | undefined)?.['sessionTitle'])
+  const block = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {}
+  const model = block['model']
+  return {
+    enabled: block['enabled'] === true,
+    model: typeof model === 'string' && model.trim() !== '' ? model.trim() : 'wb-lite',
+  }
+}
+
+/**
+ * Read the extra injected-prefix list out of a settings snapshot.
+ *
+ * A non-array or a list containing non-strings reads as empty: a malformed entry
+ * must not silently start matching messages it was never meant to match.
+ *
+ * @param configured - the whole settings snapshot.
+ * @returns the literal prefixes, trimmed, without blanks or duplicates.
+ */
+export function extraInjectedPrefixesOf(configured: unknown): string[] {
+  const raw = unwrapVolatileDeep((configured as Record<string, unknown> | undefined)?.['extraInjectedPrefixes'])
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (trimmed !== '') seen.add(trimmed)
+  }
+  return [...seen]
+}
+
+/**
+ * Write one upstream-identity switch, verifying it landed.
+ *
+ * Same two writers as {@link writeCliBridgeEnabled} and for the same measured
+ * reason (the browser mirror of this namespace is documented as stale on the
+ * affected 0.1.7 deployments, so a switch that merely *looks* flipped is the
+ * "关闭不了" class of report): the Host endpoint first, the settings scope as a
+ * fallback. The Host writes only this field's own path, so siblings survive.
+ *
+ * @param scope - the bound settings scope for this plugin's namespace.
+ * @param field - which switch to write.
+ * @param value - the desired value.
+ * @throws {WorkBuddySettingsWriteError} when neither writer persists the value.
+ */
+export async function writeUpstreamSwitch(
+  scope: WorkBuddyAccountScope,
+  field: UpstreamSwitchField,
+  value: boolean | readonly string[] | { enabled: boolean, model: string },
+): Promise<void> {
+  let hostError: unknown
+  try {
+    const authoritative = await saveViaHostEndpoint(field, undefined, value)
+    if (authoritative !== undefined) {
+      // Mirror what the Host stored, never a client-side re-merge.
+      try { await scope.set(field, authoritative[field]) } catch { /* optional */ }
+    }
+    return
+  } catch (error) {
+    hostError = error
+  }
+  let delivered = false
+  try {
+    delivered = (await scope.set(field, value)) !== false
+  } catch {
+    delivered = false
+  }
+  if (delivered) {
+    const after = scope.getSnapshot().value
+    const landed = field === 'usageIdentity' || field === 'keepPromptLast'
+      ? upstreamSwitchOf(after, field) === value
+      : field === 'sessionTitle'
+        ? JSON.stringify(sessionTitleOf(after)) === JSON.stringify(value)
+        : JSON.stringify(extraInjectedPrefixesOf(after)) === JSON.stringify([...value as readonly string[]])
+    if (landed) return
+  }
+  throw hostError instanceof Error
+    ? hostError
+    : new WorkBuddySettingsWriteError(field, 'neither the Host save endpoint nor the settings scope persisted the value')
 }
 
 /**
