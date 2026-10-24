@@ -2097,6 +2097,14 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       },
     })
     return () => {
+      // EVERY route registered above must appear here. `benefit/claim` was
+      // missing from this list (issue #86), and the cost is not a stray handler:
+      // the host's WebServer throws on a second register of the same path, so
+      // the leak from mount N makes mount N+1 throw ON this path and abandon
+      // every route registered after it. That is why a hot reload left half the
+      // card's buttons answering `405` with an empty body — the host's own 405,
+      // meaning "no such route".
+      disposeBenefitClaim()
       disposeRefresh()
       disposeCheckin()
       disposeAccounts()

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- **`benefit/claim` 路由的 disposer 从未被调用，热重载一次之后卡片上一半按钮永久 405 空响应（issue #86 的真正触发条件）。**
+  - **症状**：设置卡里点「一键签到」「一键测试」「删除」「扫码登录」「保存」等按钮，报「批量操作接口没有应答（HTTP 405，无响应体）」，或扫码登录报 `登录失败: Failed to execute 'json' on 'Response': Unexpected end of JSON input`。模型本身照常能用——坏掉的只有卡片上的这些接口。
+  - **判定**：插件每个 handler 都回 JSON，**包括它自己的 405**（`json(res, 405, {error:'method not allowed'})`，带 `Content-Type` 与 body）；宿主 HTTP 层回的 405 **没有 body**。所以「405 + 空 body」= 该路径在宿主路由表里根本不存在。
+  - **根因**：`registerWorkBuddyStatusRoute()` 里 13 条路由都写成 `const disposeXxx = ctx.webServer.register({...})`，**唯独 `benefit/claim` 那条声明了 `disposeBenefitClaim` 却没把它放进 cleanup 列表**（`tsc` 不报错：`noUnusedLocals` 未开）。宿主 `WebServer.register()` 对同一 `(kind, path)` 第二次注册**直接抛错**（`webserver: duplicate exact route "…"`，已核 `@deepseek-ai/dsh-host-webserver/lib/index.js:328`），且路由只在 disposer 运行时才从表里移除。于是：第一次挂载 → `benefit/claim` 泄漏；热重载再挂 → 按注册顺序走到它撞上重复路径 → 抛错 → 整个 `ctx.effect` 回调中断 → 排在它后面的 8 条路由（`models/refresh`、`probe`、`tps`、`pool`、`__save`、`oauth`、`transfer`、`cli-live`）一次都没注册上。
+  - **这解释了 issue #86 里「具体触发条件未复现」的那一格**：触发条件不是启动时序，是**热重载过一次**——只有第二次挂载才会撞上第一次的泄漏。所以「重启即恢复」只是把泄漏的那一份清掉，下次热重载再复发，这正是它看起来像「偶发」的原因。
+  - **修法**：把 `disposeBenefitClaim()` 补进 cleanup 列表，与其余 12 条对称。一处一行。并在 cleanup 列表处补注释说明「每条注册都必须在此出现」，因为这个缺陷的代价不是多一个 handler，而是让下一次挂载丢掉一半路由。
+  - **验证**：新增 3 条回归用例（`tests/web-status.spec.ts` → `registerWorkBuddyStatusRoute re-mount (issue #86)`），用一个**按宿主真实语义**的 `webServer` 替身（同路径第二次 `register` 抛错、只有 disposer 才移除）——宽松的替身会带着 bug 一起通过，所以这条属性必须照抄。变异验证：注释掉 `disposeBenefitClaim()` → 2 条变红并复现同一句 `webserver: duplicate exact route "/plugins/dsh-connect-workbuddy/benefit/claim"`。
+  - **代价**：无。请求路径、provider 注册、凭据、计费与换号规则一律未变。
+
 ## 5.8.3 (2026-10-24)
 
 > 体验版本：把 #132/#133 那几项「只能手改 `cordis.patch.yml` 才生效」的开关搬进插件卡片，用户可以直接勾选，不用再编辑 profile 里的 YAML、也不用知道那个文件在哪。**请求路径、默认字节、计费行为均未改动**：四个开关的默认值与采样时机与 5.8.0 完全一致（三个布尔默认关闭），这次只新增了一条写入它们的 UI 路径。

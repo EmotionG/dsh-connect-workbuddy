@@ -1809,3 +1809,105 @@ describe('the CodeBuddy-CLI switch rides on the status answer', () => {
     expect((intl as { cliBridgeEnabled?: boolean }).cliBridgeEnabled).toBe(true)
   })
 })
+
+/**
+ * Re-mounting the routes — issue #86.
+ *
+ * The reported symptom was that half the card's buttons answered `405` with an
+ * EMPTY body, which is the host's own 405 (this plugin answers every method
+ * mismatch with JSON, body and all). "405 + empty body" therefore means "that
+ * path is not in the host's route table".
+ *
+ * The cause was not startup timing, which is why #86 recorded it as
+ * "trigger condition not reproduced": `benefit/claim` was registered but its
+ * disposer was missing from the cleanup list, so the route leaked. The host's
+ * `WebServer.register()` THROWS on a second registration of the same path
+ * (`webserver: duplicate exact route "…"`), so the NEXT mount threw ON that path
+ * and abandoned every route registered after it. A hot reload is exactly that
+ * second mount — and a restart only looks like a fix because it clears the leak.
+ *
+ * These tests therefore live against a webServer double that reproduces the
+ * host's failure mode faithfully (duplicate path throws; only the disposer
+ * removes), because a permissive double would pass with the bug in place.
+ */
+describe('registerWorkBuddyStatusRoute re-mount (issue #86)', () => {
+  /**
+   * A webServer double with the host's real failure mode: registering an exact
+   * path twice throws. The host keeps a route until its disposer runs, so a
+   * cleanup list that skips one route leaves it behind, and the next mount of
+   * the same effect throws on that path and abandons every route after it.
+   */
+  function leakDetectingWebServer(): {
+    name: string
+    inject: readonly string[]
+    apply: (ctx: Context) => void
+    paths: () => string[]
+  } {
+    const table = new Map<string, unknown>()
+    return {
+      name: 'webServer',
+      inject: [] as const,
+      apply(ctx: Context) {
+        ctx.provide('webServer', {
+          register: (entry: { path: string }) => {
+            if (table.has(entry.path)) throw new Error(`webserver: duplicate exact route "${entry.path}"`)
+            table.set(entry.path, entry)
+            return () => { table.delete(entry.path) }
+          },
+        })
+      },
+      paths: () => [...table.keys()],
+    }
+  }
+
+  /** Mount the routes on a fresh context; return the fake plus a disposer. */
+  async function mount(): Promise<{ paths: string[], dispose: () => Promise<void> }> {
+    const fake = leakDetectingWebServer()
+    const ctx = new Context()
+    await ctx.plugin(fake)
+    const { registerWorkBuddyStatusRoute } = await import('../src/web-status.ts')
+    registerWorkBuddyStatusRoute(ctx, deps())
+    return { paths: fake.paths(), dispose: () => ctx.fiber.dispose() }
+  }
+
+  it('registers every route on the first mount', async () => {
+    const mounted = await mount()
+    expect(mounted.paths).toHaveLength(13)
+    await mounted.dispose()
+  })
+
+  it('leaves no route behind when the fiber is disposed', async () => {
+    // The leak is what makes the NEXT mount throw, so it is checked on its own.
+    const fake = leakDetectingWebServer()
+    const ctx = new Context()
+    await ctx.plugin(fake)
+    const { registerWorkBuddyStatusRoute } = await import('../src/web-status.ts')
+    registerWorkBuddyStatusRoute(ctx, deps())
+    expect(fake.paths()).toHaveLength(13)
+    await ctx.fiber.dispose()
+    expect(fake.paths()).toEqual([])
+  })
+
+  it('registers every route again after a reload', async () => {
+    // Two mount/dispose cycles on ONE webServer is what a hot reload does: the
+    // host keeps the routes of the previous mount until their disposers run.
+    // Before the fix the benefit route leaked on the first cycle, so the second
+    // cycle threw on it and registered only the five routes that came before it.
+    const fake = leakDetectingWebServer()
+    const ctx = new Context()
+    await ctx.plugin(fake)
+    const { registerWorkBuddyStatusRoute } = await import('../src/web-status.ts')
+    registerWorkBuddyStatusRoute(ctx, deps())
+    const first = fake.paths()
+    await ctx.fiber.dispose()
+
+    const reloaded = new Context()
+    await reloaded.plugin(fake)
+    registerWorkBuddyStatusRoute(reloaded, deps())
+    const second = fake.paths()
+    await reloaded.fiber.dispose()
+
+    expect(second).toEqual(first)
+    expect(second).toHaveLength(13)
+  })
+})
