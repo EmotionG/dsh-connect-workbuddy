@@ -98,21 +98,26 @@ export function tpsProbeRequestBody(modelId: string): string {
     max_tokens: TPS_PROBE_MAX_TOKENS,
     // Reasoning models would otherwise burn the budget on thinking and report a
     // rate for a stream that never produced content.
-    ...OFF_REASONING_FIELDS,
+    //
+    // The field is OMITTED rather than sent as a "please don't think" spelling,
+    // and the reason is deliberately modest: `none` is not a value any model's
+    // catalog declares (`supportedEfforts` is low/medium/high/xhigh/max), so
+    // sending it means inventing an effort level and hoping every gateway
+    // tolerates the invention. Omitting sends nothing to tolerate.
+    //
+    // `docs/reasoning-investigation.md` §4/§5 measured that a request without
+    // this field returns zero reasoning characters — but on the SINGLE-`effort`
+    // models it covered; that table does not include the models this probe may
+    // target, so "omitting means no thinking" is an inference there, not a
+    // measurement. What IS established is that no literal spelling can be
+    // refused when no spelling is sent.
+    //
+    // This is not the same code path as `dropRefusedReasoning()`, which strips a
+    // literal `'off'` for the models in `REFUSES_OFF_MODEL_IDS`; the two only
+    // reach the same conclusion (send no field).
     stream: true,
   })
 }
-
-/**
- * Ask for the lowest reasoning effort available.
- *
- * A reasoning model asked to count spends its `max_tokens` inside the reasoning
- * channel; the stream then carries thinking deltas and little or no content, and
- * timing it would measure the wrong thing. `none` is the widest supported
- * spelling; gateways that do not know it ignore the field (measured: the CN
- * gateway answers 200 with it).
- */
-const OFF_REASONING_FIELDS = { reasoning_effort: 'none' } as const
 
 /** One parsed run: what the stream told us about its own timing. */
 interface RunReading {

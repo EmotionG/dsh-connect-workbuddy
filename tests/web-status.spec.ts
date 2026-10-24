@@ -674,7 +674,8 @@ describe('registerWorkBuddyStatusRoute', () => {
     return {
       method: 'POST',
       url,
-      headers: { origin: 'http://127.0.0.1' },
+      // Real requests always carry Host; the route refuses a missing one.
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1:62283' },
       on: (ev: string, cb: (c: Buffer) => void) => {
         if (ev === 'data') for (const c of chunks) cb(c)
         if (ev === 'end') (cb as unknown as { (): void }).call(undefined)
@@ -816,9 +817,35 @@ describe('registerWorkBuddyStatusRoute', () => {
     return checkin.handler
   }
 
-  /** Minimal request; an absent Origin header reads as loopback. */
-  function request(method = 'POST', origin?: string, url?: string): { method: string; url: string; headers: { origin?: string } } {
-    return { method, url: url ?? '/', headers: origin === undefined ? {} : { origin } }
+  /**
+   * Minimal request; an absent Origin header reads as loopback.
+   *
+   * `host` defaults to a loopback value because EVERY real HTTP/1.1 request
+   * carries one — a fixture without Host is not a request the routes can ever
+   * see, and they refuse one (DNS-rebinding guard). Defaulting here rather than
+   * adding `host` to ~90 call sites keeps the fixtures honest without making
+   * every test noisy.
+   *
+   * An EMPTY STRING means "omit the header". **Write `''` for that — writing
+   * `undefined` silently gets the loopback default**, because an explicit
+   * `undefined` argument still triggers the default parameter, which would make a
+   * missing-Host test pass for the wrong reason. `''` survives the call and
+   * `hostMatchesListener` already rejects it.
+   */
+  function request(
+    method = 'POST',
+    origin?: string,
+    url?: string,
+    host = '127.0.0.1:62283',
+  ): { method: string; url: string; headers: { origin?: string; host?: string } } {
+    return {
+      method,
+      url: url ?? '/',
+      headers: {
+        ...host === '' ? {} : { host },
+        ...origin === undefined ? {} : { origin },
+      },
+    }
   }
 
   /** Response recorder: json() only needs writeHead + end. */
@@ -927,11 +954,193 @@ describe('registerWorkBuddyStatusRoute', () => {
     expect(status()).toBe(403)
   })
 
+  it('refuses a non-loopback Host with 403 (the DNS-rebinding guard)', async () => {
+    // Origin alone cannot stop rebinding: the attack page is served from the
+    // attacker's domain, so the browser sends THAT domain in Host while the
+    // socket lands on 127.0.0.1. A route that checked only Origin let it
+    // through. This test pins the header the Origin check never looked at.
+    const handler = await mountCheckinHandler()
+    const { res, status, body } = response()
+    await handler(request('POST', undefined, '/', 'evil.example.com'), res)
+    expect(status()).toBe(403)
+    expect(body()).toMatchObject({ error: 'host-not-trusted' })
+  })
+
+  it('refuses a request with NO Host at all, rather than assuming loopback', async () => {
+    // HTTP/1.1 requires Host, so its absence is either malformed or an attempt
+    // to slip past the check. Defaulting to "trusted" would make the guard
+    // removable by deleting one header.
+    const handler = await mountCheckinHandler()
+    const { res, status } = response()
+    await handler(request('POST', undefined, '/', ''), res)
+    expect(status()).toBe(403)
+  })
+
+  it('accepts every genuine loopback Host spelling', async () => {
+    // The positive control: without it, the two refusals above would also pass
+    // on a build that refused every request.
+    const handler = await mountCheckinHandler()
+    for (const host of ['127.0.0.1:62283', 'localhost:62283', '[::1]:62283', '127.0.0.1']) {
+      const { res, status } = response()
+      await handler(request('POST', undefined, '/', host), res)
+      expect(status(), `host ${host} must be accepted`).toBe(200)
+    }
+  })
+
+  it('accepts a LAN Host when the connection arrived on that same interface', async () => {
+    // The `host: '0.0.0.0'` configuration, which the host webserver's README
+    // explicitly supports ("deliberate network exposure"). A user who binds it
+    // and opens the GUI at http://192.168.1.5:3000 sends exactly this, and a
+    // loopback-only guard would 403 every read route for them. `req.socket`
+    // carries the interface the CONNECTION landed on, which is the fact being
+    // compared.
+    const handler = await mountCheckinHandler()
+    const { res, status } = response()
+    await handler({
+      method: 'POST',
+      url: '/',
+      // A real LAN browser sends BOTH: Host names the address it typed, and a
+      // same-origin POST adds Origin with the page's scheme+host+port. A fixture
+      // with only Host would prove the Host half and leave the Origin half
+      // untested — which is exactly how the Origin gate stayed loopback-only
+      // while this test passed.
+      headers: { host: '192.168.1.5:3000', origin: 'http://192.168.1.5:3000' },
+      socket: { localAddress: '192.168.1.5' },
+    }, res)
+    expect(status()).toBe(200)
+  })
+
+  it('refuses a forged Host even when the socket arrives on a LAN interface', async () => {
+    // Rebinding against a 0.0.0.0-bound server: Host is the attacker's domain
+    // while the connection really landed on the LAN interface.
+    const handler = await mountCheckinHandler()
+    const { res, status } = response()
+    await handler({
+      method: 'POST',
+      url: '/',
+      headers: { host: 'evil.example:3000', origin: 'http://evil.example:3000' },
+      socket: { localAddress: '192.168.1.5' },
+    }, res)
+    expect(status()).toBe(403)
+  })
+
   it('refuses non-POST methods with 405', async () => {
     const handler = await mountCheckinHandler()
     const { res, status } = response()
     await handler(request('GET'), res)
     expect(status()).toBe(405)
+  })
+
+  describe('requireLoopback covers every registered route', () => {
+    /** The 13 paths this build registers; a new route must be added here. */
+    const ROUTES: ReadonlyArray<readonly [label: string, path: string, method: string]> = [
+      ['usage', '/plugins/dsh-connect-workbuddy/usage', 'GET'],
+      ['account-credits', '/plugins/dsh-connect-workbuddy/account-credits', 'GET'],
+      ['cli-live', '/plugins/dsh-connect-workbuddy/cli-live', 'GET'],
+      ['accounts/refresh', '/plugins/dsh-connect-workbuddy/accounts/refresh', 'POST'],
+      ['checkin', '/plugins/dsh-connect-workbuddy/checkin', 'POST'],
+      ['benefit/claim', '/plugins/dsh-connect-workbuddy/benefit/claim', 'POST'],
+      ['models/refresh', '/plugins/dsh-connect-workbuddy/models/refresh', 'POST'],
+      ['probe', '/plugins/dsh-connect-workbuddy/probe', 'POST'],
+      ['tps', '/plugins/dsh-connect-workbuddy/tps', 'POST'],
+      ['pool', '/plugins/dsh-connect-workbuddy/pool', 'POST'],
+      ['__save', '/plugins/dsh-connect-workbuddy/__save', 'POST'],
+      ['oauth', '/plugins/dsh-connect-workbuddy/oauth', 'POST'],
+      ['transfer', '/plugins/dsh-connect-workbuddy/transfer', 'POST'],
+    ]
+
+    it('registers exactly the routes this table lists', async () => {
+      // Guards the table itself: a route added to the plugin without a line here
+      // would otherwise go untested and unnoticed.
+      const captured = await mountRoutes()
+      const registered = captured.map(entry => entry.path).sort()
+      const listed = ROUTES.map(([, path]) => path).sort()
+      expect(registered).toEqual(listed)
+    })
+
+    it('refuses a forged Host on every route, before any upstream work', async () => {
+      // The counters must be wired to the REAL dependency names or this test
+      // proves nothing about ordering: an earlier version overrode
+      // `refreshModels` / `claimDailyCheckin`, which are not fields of
+      // `WorkBuddyStatusRouteOptions` at all (the handlers reach the client and
+      // `discoverModels` instead), so those counters could never increment and a
+      // guard moved below the upstream call still passed. `as Partial<...>` was
+      // what silenced the compiler about the bogus keys.
+      // Every counter is on the FIRST side-effecting call of its route, not on a
+      // later one: a guard moved below `store().resolve()` would still leave
+      // `claimDailyCheckin` at zero, so counting only the claim would not notice.
+      const calls = { discover: 0, storeResolve: 0, checkinStatus: 0, claimCheckin: 0, probe: 0, tps: 0 }
+      const captured = await mountRoutes({
+        discoverModels: async () => { calls.discover += 1; return [] },
+        store: (region: WorkBuddyRegion) => {
+          const real = deps().store(region)
+          return {
+            ...real,
+            resolve: async () => { calls.storeResolve += 1; return real.resolve() },
+          } as never
+        },
+        client: {
+          ...deps().client,
+          fetchCheckinStatus: async (credential: never) => {
+            calls.checkinStatus += 1
+            return deps().client.fetchCheckinStatus(credential)
+          },
+          claimDailyCheckin: async () => {
+            calls.claimCheckin += 1
+            return { credit: 0, streakDays: 0, isStreakDay: false }
+          },
+        },
+        probeModels: async () => { calls.probe += 1; return [] },
+        measureTps: async () => { calls.tps += 1; return [] },
+      } as Partial<WorkBuddyStatusRouteOptions>)
+      for (const [label, path, method] of ROUTES) {
+        const entry = captured.find(candidate => candidate.path === path)
+        if (entry === undefined) throw new Error(`route not registered: ${path}`)
+        const { res, status, body } = response()
+        await entry.handler(
+          {
+            method,
+            url: `${path}?region=cn`,
+            // Host forged, NO Origin. This isolates the Host half: sending a
+            // foreign Origin too would let an Origin-only route refuse for the
+            // wrong reason and the table would pass with the Host check missing
+            // (verified by mutation).
+            headers: { host: 'evil.example' },
+            on: () => {},
+          } as never,
+          res as never,
+        )
+        expect(status(), `${label} must refuse a forged Host`).toBe(403)
+        // 403 alone could be an upstream rejection; the code proves the gate
+        // answered. (The check-in route's own test asserts this too, but the
+        // table must not rely on a sibling test for the property it claims.)
+        expect(body(), `${label} must name the gate`).toMatchObject({ error: 'host-not-trusted' })
+      }
+      // The point of the guard: nothing above may have reached the upstream.
+      expect(calls).toEqual({ discover: 0, storeResolve: 0, checkinStatus: 0, claimCheckin: 0, probe: 0, tps: 0 })
+    })
+
+    it('refuses a foreign Origin on every route', async () => {
+      const captured = await mountRoutes()
+      for (const [label, path, method] of ROUTES) {
+        const entry = captured.find(candidate => candidate.path === path)
+        if (entry === undefined) throw new Error(`route not registered: ${path}`)
+        const { res, status, body } = response()
+        await entry.handler(
+          {
+            method,
+            url: `${path}?region=cn`,
+            headers: { host: '127.0.0.1:62283', origin: 'https://evil.example.com' },
+            on: () => {},
+          } as never,
+          res as never,
+        )
+        expect(status(), `${label} must refuse a foreign Origin`).toBe(403)
+        // 403 alone could come from an upstream rejection; the error code proves
+        // the gate answered, not the provider.
+        expect(body(), `${label} must name the gate`).toMatchObject({ error: 'origin-not-trusted' })
+      }
+    })
   })
 })
 
@@ -1204,7 +1413,8 @@ describe('registerWorkBuddyStatusRoute __save with a live-reference config', () 
     return {
       method: 'POST',
       url: '/plugins/dsh-connect-workbuddy/__save',
-      headers: { origin: 'http://127.0.0.1' },
+      // Real requests always carry Host; the route refuses a missing one.
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1:62283' },
       on: (ev: string, cb: (c: Buffer) => void) => {
         if (ev === 'data') for (const c of chunks) cb(c)
         if (ev === 'end') (cb as unknown as { (): void }).call(undefined)
@@ -1567,7 +1777,10 @@ describe('registerWorkBuddyStatusRoute probe route', () => {
     return {
       method: 'POST',
       url,
-      headers: { origin: 'http://127.0.0.1' },
+      // `host` is not decoration: every real request carries one, and the route
+      // refuses a missing Host (DNS-rebinding guard). A fixture without it would
+      // exercise a state no browser can produce.
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1:62283' },
       on: (ev: string, cb: (c: Buffer) => void) => {
         if (ev === 'data') for (const c of chunks) cb(c)
         if (ev === 'end') (cb as unknown as { (): void }).call(undefined)
@@ -1699,7 +1912,11 @@ describe('registerWorkBuddyStatusRoute probe route', () => {
     await handler({
       method: 'POST',
       url: '/plugins/dsh-connect-workbuddy/probe',
-      headers: { origin: 'http://evil.example' },
+      // `host` must be present and loopback, or the Host guard rejects first and
+      // this test would silently stop exercising the ORIGIN guard. Verified by
+      // mutation: with no host here, deleting the Origin check entirely left
+      // this test green.
+      headers: { origin: 'http://evil.example', host: '127.0.0.1:62283' },
       on: () => {},
     }, res)
     expect(status()).toBe(403)
@@ -1910,4 +2127,21 @@ describe('registerWorkBuddyStatusRoute re-mount (issue #86)', () => {
     expect(second).toEqual(first)
     expect(second).toHaveLength(13)
   })
+
+/**
+ * Every registered route must clear the gate, not just the one route the other
+ * tests happen to drive.
+ *
+ * The route-level tests above all exercise the check-in handler because it is the
+ * cheapest one to drive. That left the other twelve unverified: reverting any one
+ * of them to an Origin-only check kept the suite green. This block walks the
+ * ROUTES THE PLUGIN ACTUALLY REGISTERED, so a route added later without the gate
+ * fails here instead of shipping.
+ *
+ * It also pins the ORDER: a refusal must happen before the handler can reach the
+ * upstream, which is why each case asserts the upstream double was never called
+ * rather than only the status code. A guard placed after `claimDailyCheckin`
+ * would still answer 403, so status alone cannot prove it.
+ */
+
 })

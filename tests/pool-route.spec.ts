@@ -16,8 +16,15 @@ function request(
   method = 'POST',
   url = `${WORKBUDDY_POOL_PATH}?region=cn&action=test`,
   origin?: string,
-): { method: string, url: string, headers: { origin?: string } } {
-  return { method, url, headers: origin === undefined ? {} : { origin } }
+): { method: string, url: string, headers: { origin?: string, host?: string } } {
+  // Real HTTP/1.1 requests always carry Host, and the route refuses a missing
+  // one (DNS-rebinding guard). Omitting it here would test a state no browser
+  // can produce.
+  return {
+    method,
+    url,
+    headers: { host: '127.0.0.1:62283', ...origin === undefined ? {} : { origin } },
+  }
 }
 
 /**

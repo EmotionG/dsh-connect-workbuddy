@@ -272,7 +272,7 @@
 | 项 | Host | 客户端 | 判定 |
 | --- | --- | --- | --- |
 | 方法 | 非 POST → 405（`web-status.ts:776`） | `method: 'POST'`（`AccountPool.tsx:337`） | ✅ 一致 |
-| 来源 | `loopbackOrigin` 拒绝非回环（`web-status.ts:777`，`:264-273`） | `credentials: 'same-origin'`（`:339`） | ✅ 一致 |
+| 来源 | 拒绝非本机来源（当时为 `loopbackOrigin`，`web-status.ts:777`、`:264-273`；5.8.5 起为 `src/loopback.ts` 的 `requireLoopback`） | `credentials: 'same-origin'`（`:339`） | ✅ 一致 |
 | 区域参数 | `regionOfStatusUrl`，缺省 `cn`、未知 400（`:89-94`） | `withWorkBuddyRegionAndAction` 拼 `?region=`（`:336`，`status-paths.ts:62-68`） | ✅ 一致 |
 | 动作参数 | `poolActionOf` 只认 `checkin`/`test`（`status-paths.ts:54-59`） | 同上函数生成 | ✅ 同一函数，不会漂移 |
 | 成功码 | `200` + `{ action, rows }`（`:804, 826`） | `if (!response.ok) throw`（`:344`），随后读 `body.rows`（`:347, 366`） | ✅ 一致 |

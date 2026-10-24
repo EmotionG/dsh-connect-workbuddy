@@ -71,13 +71,28 @@ describe('the request shape', () => {
     expect(inputChars).toBeLessThan(400)
   })
 
-  it('asks for output volume without asking for reasoning', () => {
+  it('omits reasoning_effort entirely rather than sending a spelling for "off"', () => {
     // A reasoning model would spend its budget thinking and the stream would
     // carry reasoning deltas rather than content, so the run would either time
     // the wrong thing or report no speed at all.
-    const body = JSON.parse(tpsProbeRequestBody('hy3')) as Record<string, unknown>
-    expect(body['reasoning_effort']).toBe('none')
+    //
+    // The fix is OMISSION, and the assertion is `in`-based on purpose. This test
+    // used to pin `reasoning_effort === 'none'` — a value no model declares, sent
+    // in the hope that every gateway tolerates it. An equality assertion against
+    // `undefined` would silently pass a body that forgot the decision, while `in`
+    // states the actual contract: the key is absent.
+    //
+    // What this pins is exactly "we send no effort field". It does NOT claim the
+    // model then stays silent: `docs/reasoning-investigation.md` §4/§5 measured
+    // zero reasoning characters for a request without this field, but only on the
+    // single-`effort` models it covered. See the note in `src/tps.ts`.
+    const body = JSON.parse(tpsProbeRequestBody('gpt-6-astra')) as Record<string, unknown>
+    expect('reasoning_effort' in body).toBe(false)
     expect(body['stream']).toBe(true)
+    // Assert the id actually travels, so this test is about the model named in it.
+    // Without this, any id would do and the choice of `gpt-6-astra` would be
+    // decoration rather than a statement about the model field.
+    expect(body['model']).toBe('gpt-6-astra')
   })
 })
 

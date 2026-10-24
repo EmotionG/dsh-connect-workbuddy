@@ -191,7 +191,9 @@ async function call(
   if (route === undefined) throw new Error(`route not mounted: ${path} (have ${routes.map(r => r.path).join(', ')})`)
   const { res, status, body } = response()
   await route.handler(
-    { method: init.method ?? 'GET', url: init.url ?? path, headers: {} } as never,
+    // `host` is required, not decoration: every real request carries one and the
+    // routes refuse a missing Host (DNS-rebinding guard).
+    { method: init.method ?? 'GET', url: init.url ?? path, headers: { host: '127.0.0.1:62283' } } as never,
     res as never,
   )
   return { status: status(), body: body() }

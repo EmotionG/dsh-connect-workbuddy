@@ -24,7 +24,7 @@
 | # | 缺口 | 上游来源 | 本仓库证据 | 影响 |
 |---|------|---------|-----------|------|
 | 1 | 未接 `resolveImageAccess` | `a3fb1ba`（issue #52） | `src/adapter.ts:105` 只有 `resolveAttachments`；`src/index.ts:1397` 只传它；全仓 `resolveImageAccess` 零命中 | 图片句柄文本不含本地归一化路径，模型 `read_image` 只能瞎猜 sha256 路径 |
-| 2 | web 状态路由缺 Host 头回环校验 | `bd6a77d`（PR #11 review） | `src/web-status.ts:279` `loopbackOrigin()` 只查 Origin，且 `origin === undefined` 时返回 `true`；Host 校验只存在于 `src/shim.ts:190` | 状态文档（昵称、剩余积分、模型费率）可被 DNS-rebinding 页面读取 |
+| 2 | web 状态路由缺 Host 头回环校验 | `bd6a77d`（PR #11 review） | `src/web-status.ts:279` `loopbackOrigin()` 只查 Origin，且 `origin === undefined` 时返回 `true`；Host 校验只存在于 `src/shim.ts:190`（**已于 5.8.5 修复**：`src/loopback.ts` 的 `requireLoopback` 对 13 条路由同时校验 Host 与 Origin） | 状态文档（昵称、剩余积分、模型费率）可被 DNS-rebinding 页面读取 |
 | 3 | Linux 桌面凭据只探 XDG config home | `38c1e5a`（issue #43） | `src/auth.ts:273` Linux 分支只有 `XDG_CONFIG_HOME ?? ~/.config`，无 `~/.local/share` | UOS/deepin 版把登录写成「未登录」 |
 
 ### 平台发现能力差距（同一成因：只枚举默认安装路径）

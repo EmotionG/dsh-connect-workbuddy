@@ -198,7 +198,9 @@ function response(): {
 }
 
 function usageRequest(url: string): { method: string, url: string, headers: Record<string, string> } {
-  return { method: 'GET', url, headers: {} }
+  // Real HTTP/1.1 requests always carry Host, and the route refuses a missing
+  // one (DNS-rebinding guard).
+  return { method: 'GET', url, headers: { host: '127.0.0.1:62283' } }
 }
 
 type PoolBody = {

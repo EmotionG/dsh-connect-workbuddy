@@ -25,6 +25,7 @@ import { preferredAccountName } from './auth.ts'
 import type { WorkBuddyCredential, WorkBuddyCredentialStore } from './auth.ts'
 import { isVaultAccountId } from './auth.ts'
 import { lastRefusalFor, offRefused } from './off-thinking.ts'
+import { hostMatchesListener, originIsLoopback } from './loopback.ts'
 import type { WorkBuddyBusyLevel } from './busy.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { applyContextBudgets } from './catalog.ts'
@@ -670,16 +671,46 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
-/** Loopback browser origins only; other devices are refused until trusted origins exist. */
-function loopbackOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    const { hostname } = new URL(origin)
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
-  } catch {
+/**
+ * The full gate a state-changing route must clear: Host AND Origin.
+ *
+ * Origin alone is not enough. It answers "did a foreign page cause this?", but a
+ * DNS-rebinding attack arrives with the attacker's domain in `Host` and no
+ * useful Origin, so the Host check is what drops it — and until this function
+ * existed, all thirteen routes below (ten POST, three GET) had only the Origin
+ * half while the shim's chat route had both. The asymmetry was invisible per-file.
+ *
+ * Both halves are cheap and NEITHER IS AUTHENTICATION. A local process — or any
+ * peer that can reach the listener when it is bound to a LAN address — may send
+ * whatever Host and Origin it likes. What these two checks buy is narrow and
+ * worth stating precisely:
+ *
+ * - they stop a BROWSER on a foreign page from driving these routes (the browser
+ *   chooses Origin for us, and rebinding fails the Host comparison), which is
+ *   the CSRF / rebinding family;
+ * - they do NOT stop a program that can already open a socket to the port.
+ *
+ * There is no per-route secret here: `req.headers` is read for `host` and
+ * `origin` and nothing else. Every route that spends credit or returns token
+ * material is protected by the same two forgeable headers as the read routes, so
+ * binding this listener to a non-loopback address exposes those routes to the
+ * local network. That is a property of the whole surface, not of this function,
+ * and it must not be described as though a stronger guard existed.
+ *
+ * Absent Host is refused: HTTP/1.1 requires it, and its absence on a
+ * credit-spending surface is not worth the benefit of the doubt. Absent Origin
+ * passes, because that is the shape of the plugin's own fetch and of curl.
+ */
+function requireLoopback(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!hostMatchesListener(req.headers.host, req.socket?.localAddress)) {
+    json(res, 403, { error: 'host-not-trusted' })
     return false
   }
+  if (!originIsLoopback(req.headers.origin, req.socket?.localAddress)) {
+    json(res, 403, { error: 'origin-not-trusted' })
+    return false
+  }
+  return true
 }
 
 /** Map the credit answer to the card's compact document. */
@@ -1376,10 +1407,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           json(res, 405, { error: 'method not allowed' })
           return
         }
-        if (!loopbackOrigin(req)) {
-          json(res, 403, { error: 'origin-not-trusted' })
-          return
-        }
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         // `detail=fast` is the card's first paint (issue #77): local state only,
@@ -1399,7 +1427,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_ACCOUNT_CREDITS_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         try {
@@ -1414,7 +1442,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_ACCOUNTS_REFRESH_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         try {
@@ -1444,7 +1472,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_CHECKIN_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         try {
@@ -1469,7 +1497,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         // always made ROW BY ROW in the card: there is no batch action, so no
         // request can spend six accounts' entitlements in one call.
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -1526,7 +1554,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_MODELS_REFRESH_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         if (deps.discoverModels === undefined) return json(res, 503, { error: 'model refresh unavailable' })
         const region = requestRegion(req, res)
         if (region === undefined) return
@@ -1545,7 +1573,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_PROBE_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         if (deps.probeModels === undefined) return json(res, 503, { error: 'model probe unavailable' })
         const region = requestRegion(req, res)
         if (region === undefined) return
@@ -1583,7 +1611,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_TPS_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         if (deps.measureTps === undefined) return json(res, 503, { error: 'tps measurement unavailable' })
         const region = requestRegion(req, res)
         if (region === undefined) return
@@ -1619,7 +1647,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         // account, and a test spends real credits. So POST + loopback, the same
         // guards the card's other mutations carry.
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         const action = poolActionOf(req.url ?? '/')
@@ -1810,7 +1838,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: '/plugins/dsh-connect-workbuddy/__save',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         // Host-side save path: on DSH 0.1.7 the browser-side ConfigForm never
         // delivered a write on this deployment while the Host-side mutate is
         // proven healthy by direct probe, so the card saves through this
@@ -1980,7 +2008,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         // Both steps mutate session state (start) or the vault (poll), so the
         // same write guards as the pool route apply.
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         const action = oauthActionOf(req.url ?? '/')
@@ -2014,7 +2042,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         // arbitrary file text: POST + loopback like every other mutation, so
         // another origin can neither pull credentials nor plant them.
         if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         const region = requestRegion(req, res)
         if (region === undefined) return
         const action = transferActionOf(req.url ?? '/')
@@ -2088,7 +2116,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       path: WORKBUDDY_CLI_LIVE_PATH,
       handler: (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
-        if (!loopbackOrigin(req)) return json(res, 403, { error: 'origin-not-trusted' })
+        if (!requireLoopback(req, res)) return
         try {
           json(res, 200, deps.cliLive?.() ?? { turns: [], serverTime: Date.now() })
         } catch (error: unknown) {

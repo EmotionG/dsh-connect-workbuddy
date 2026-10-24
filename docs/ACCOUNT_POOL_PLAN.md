@@ -43,7 +43,7 @@
 **串行而非并发**：签到是写操作，且上游有频率限制；并发签到正是把整批打成 429 的最快方式。逐账号串行 + 每个账号之间留一个小的固定间隔。
 
 **幂等与安全**：签到是**写入**，因此
-- 路由必须是 `POST`，且沿用既有 `loopbackOrigin(req)` 回环来源校验；
+- 路由必须是 `POST`，且沿用既有的来源校验（当时是 `loopbackOrigin(req)` 只查 Origin；5.8.5 起统一为 `requireLoopback(req, res)`，即 Host + Origin 两道门，见 `src/loopback.ts`）；
 - **不提供定时自动签到**（完全不做，不是「默认关闭的开关」）——见第 5 节。
 
 ## 3. 功能二：一键测试所有账号 × 该区域的免费模型
@@ -244,7 +244,7 @@ regions: {
 - `src/status-paths.ts`：新增
   - `WORKBUDDY_POOL_CHECKIN_PATH = '/plugins/dsh-connect-workbuddy/pool/checkin'`
   - `WORKBUDDY_POOL_TEST_PATH = '/plugins/dsh-connect-workbuddy/pool/test'`
-- `src/web-status.ts`：注册上述路由，复用 `loopbackOrigin` + `requestRegion`。
+- `src/web-status.ts`：注册上述路由，复用来源校验 + `requestRegion`（现为 `requireLoopback`，见 `src/loopback.ts`）。
 - 放宽 `WORKBUDDY_PROBE_PATH` 的「一次只允许一个模型」限制的方式：**不改它**，而是让 pool 路由在 Host 内部循环调用 `probeModel`，保持那条防「按钮变花钱循环」的护栏仍然有效。
 
 **Config 侧**（`src/index.ts` 的 schemastery）

@@ -581,7 +581,9 @@ describe('account selection through the settings seam', () => {
     const call = async (): Promise<{ accountName: string; selectionExplicit: boolean }> => {
       let payload = ''
       const res = { writeHead: () => {}, end: (body: string) => { payload = body } }
-      await usage.handler({ method: 'GET', headers: {}, url: `${WORKBUDDY_USAGE_PATH}?region=cn` }, res)
+      // `host` is required: every real request carries one and the route refuses
+      // a missing Host (DNS-rebinding guard).
+      await usage.handler({ method: 'GET', headers: { host: '127.0.0.1:62283' }, url: `${WORKBUDDY_USAGE_PATH}?region=cn` }, res)
       return JSON.parse(payload) as { accountName: string; selectionExplicit: boolean }
     }
 
