@@ -1,5 +1,41 @@
 # Changelog
 
+## 5.8.5 (2026-10-24)
+
+> 安全与健壮性版本：给设置卡片的 13 条路由（10 条 POST + 3 条 GET）补上缺失的 `Host` 校验（DNS-rebinding），并让测速探针不再发送一个自造的档位值。**发往上游的请求体、provider 注册、凭据、计费与换号规则一律未变**——唯一的上游侧行为变化是测速请求少了一个字段；入站侧（本插件对浏览器请求的接受范围）**确有变化**，见下文两条：Host/Origin 判据的扩展与空 Origin 的统一。
+
+### Fixes
+
+- **测速探针硬编码 `reasoning_effort: 'none'`，导致部分模型的速度永远测不出来。**
+  - **症状**：在 global 区对 `gpt-6-astra`（以及其它拒绝该字面量的模型）点「测速」，三次采样全部失败，卡片显示无速度；同类模型在 CN 区正常。
+  - **根因（推论，不是本仓实测）**：`src/tps.ts` 的 `tpsProbeRequestBody()` 无条件带上 `reasoning_effort: 'none'`，而 `none` 不是任何模型目录声明过的档位值（`supportedEfforts` 只有 low/medium/high/xhigh/max），属于我们自造的拼写。**本仓库没有记录过任何模型对该字面量的反应**——这条结论来自对一个社区分支（`longge1213812138/dsh-workbuddy-connect`）源码的阅读，其注释称 `none` 被 GPT-5.6 家族与 GLM 接受、被 `gpt-6-astra` 拒绝，我们未复测。已知的相邻事实只有 `src/off-thinking.ts` 记的「10 个模型拒绝字面量 `off`，而省略该字段全数返回 200」。因此这个修复的**确切收益是「不再发送一个自造的、未经验证的档位值」**，而不是「修好了一个已证实的 400」。
+  - **修法**：**不发这个字段**，而不是换一个拼写。依据是 `docs/reasoning-investigation.md` §4/§5 的两网关实测：请求不带 `reasoning_effort` 时上游返回 **0 个思考字符**——注意那批实测覆盖的是单数 `effort` 形态的模型（deepseek / hy3 / kimi / minimax 一类），**不含 `gpt-6-astra`**，所以对后者「省略即零思考」是合理推断而非已证事实。结论上仍然成立：不思考本来就不需要任何拼写，而任何拼写都可能被某个模型拒绝。注意这与 `dropRefusedReasoning()` 只是**结论**一致，不是同一段代码——那个函数只对 `REFUSES_OFF_MODEL_IDS` 名单内的模型删字面量 `'off'`，TPS 根本不经过它。
+  - **验证**：`tests/tps.spec.ts` 的断言从 `reasoning_effort === 'none'` 改为 `'reasoning_effort' in body === false`，并把模型 id 换成 `gpt-6-astra` 且额外断言 `body.model` 确实进入请求体——这样这条用例描述的是「该模型 + 无该字段」这个组合，而不是任意 id 都成立的巧合。用 `in` 而不是 `=== undefined` 是有意的：后者在「忘了做决定」的 body 上也会通过。变异验证：把字面量加回去 → 该条变红。
+
+- **设置卡片的 13 条路由（10 条 POST + 3 条 GET）只校验 `Origin`、不校验 `Host`，DNS-rebinding 页面可以打到其中的读路由。**
+  - **症状**：安全缺口，无用户可见现象。**真实的暴露面是 3 条读路由**（`usage` / `account-credits` / `cli-live`）——浏览器对同源 POST 一定带 `Origin`，所以 rebinding 页面打 10 条 POST 时会被旧的 Origin 门拒掉；而同源 GET 不带 `Origin`，旧门直接放行。修复价值真实，但「13 条写路由全可被打」的说法不成立。
+  - **根因**：回环判定被写了两份。`src/shim.ts` 的 chat 路由有 `hostIsLoopback` + `originIsLoopback` 两道门，而 `src/web-status.ts` 的 13 条卡片路由只有 `originIsLoopback`（名为 `loopbackOrigin`）。**Origin 挡不住 rebinding**：攻击页面由攻击者域名提供，浏览器把**那个域名**写进 `Host`，socket 却落在 127.0.0.1，于是一条只查 Origin 的 GET 路由会放它过去。这个缺口在 `docs/UPSTREAM-0.7.0-REVIEW.md:27` 早有记录，不是新发现；两份实现各自内部一致，是这次抽共享模块才把差异摆到一处。
+  - **修法**：把回环判定抽到新模块 `src/loopback.ts`，shim 与 web-status 共用同一份；13 条路由统一改走 `requireLoopback(req, res)`，即 Host + Origin 两道门，拒绝时分别回 `host-not-trusted` / `origin-not-trusted`。**缺失 `Host` 一律拒绝**（HTTP/1.1 要求该头，在能花积分面上不值得网开一面）；**缺失 `Origin` 仍然放行**（这正是插件自己 fetch 与 curl 的形态，拒了会打断插件自身调用）。
+  - **Host 判据不是「必须是回环」，而是「必须是本机地址」**（`hostMatchesListener(host, req.socket.localAddress)`），且「本机」包含整个 IPv4 回环段 `127/8` 与本次连接落在的那个接口。这一点是审核阶段两次纠正的：初稿只认 `127.0.0.1`/`localhost`/`[::1]` 三个字面量，而**宿主实际运行的 0.2.1-rc.3 虽然拒绝 wildcard 绑定（其报错原文要求「bind one concrete IPv4 or IPv6 address of a local interface」），却允许绑定任意一个具体的本机地址——包括局域网 IP**；宿主自己的信任层就接受「监听绑定的那个 IP 字面量，任意端口」。只认回环字面量会把这类部署的 3 条**读路由**从「可用」打成 403（10 条 POST 在旧代码下本来就因 Origin 是局域网地址被拒，所以回归面只在这 3 条 GET）。`localAddress` 是连接实际落到哪个接口的事实，攻击者伪造不了：rebinding 的 Host 是攻击者域名而连接落在 127.0.0.1 或某个本机地址，两者不等即被拦下。`0.0.0.0` / `[::]` 显式排除（bind 通配符，不是客户端会合法发出的地址）。**同时把 Host 与 Origin 两条路径的「本机」判定统一为同一个 `isLocalHostname()`**：此前 `127.0.0.2` 与尾点（`localhost.`）在两条路径上给出不同答案，同一个概念两套解析必然漂移。
+  - **审核阶段自查出的一处实现缺陷（已修）**：初版 `hostMatchesListener` 直接用 `hostname === localAddress` 比较，于是当两侧都是同一个**主机名**时也返回 true。生产环境里 `localAddress` 来自 socket、永远是 IP 字面量，所以这不是可达的漏洞；但它把「比较两个地址」写成了「比较两个字符串」，一旦有人把主机名传进来（测试替身、未来某个代理头），门禁就会静默放宽成「只要名字相同就放行」。现在右侧必须是 IP 字面量才参与比较，答案重新变成关于地址的判断。同时处理了 IPv6 的括号差异（Host 带括号、`localAddress` 不带）。
+  - **Origin 判据同步对齐（审核发现的「只修了一半」）**：Host 判据升级为「本机地址」后，`originIsLoopback` 仍只认回环，而真实局域网浏览器对**同源 POST** 一定发 `Origin: http://192.168.1.5:3000` ——于是 Host 门放行、Origin 门拒绝，10 条写路由（签到 / 测速 / 探针 / 保存模型 / OAuth / 转存 / 账号池）对局域网部署仍然全 403。初版的一处测试把 LAN 场景写成「只有 Host、没有 Origin」，恰好让这个缺口躲过了自己的测试。现在 `originIsLoopback(origin, localAddress)` 与 Host 复用同一套 `isLocalHostname` + `hostMatchesListener` 判定（只比 hostname，不比端口——Origin 永远带页面端口而 `localAddress` 不带），LAN 测试的 fixture 也补上了真实浏览器会发的 `Origin`。变异验证：把 Origin 门改回不传 `localAddress` → 该条立即变红。
+  - **已知限制（未能消除，两条）**：
+    1. **任何主机名形式的访问都会 403**，不只是 `trustedHosts` 里的域名——`my-mac.local`（mDNS）、反向代理域名、自定义 hosts 条目都算，因为判据只认 IP 字面量与 `localhost`。插件无从知道某个任意域名指向本机，也不该去猜；要用域名访问就得让插件路由进入宿主的信任层，那是另一个改动。
+    2. **Origin 只比对 hostname，不比对端口**。同主机其它端口上的页面会通过 Origin 门。这不是本次能消除的威胁（那需要本机已运行代码，等价于本地权限），且反向代理常常在另一个端口终结 TLS、再转发到本机的本端口，比对端口会误伤这类部署。这一取舍写在 `src/loopback.ts` 的注释里。
+  - **一处有意的语义统一**：空字符串 / 纯空白的 `Origin` 从「拒绝」变成「放行」。旧 `web-status` 只判 `origin === undefined`，而 shim 的实现一直判 `origin.trim() === ''`——两个文件对同一件事有两种答案，正是这次重构要消除的分裂，所以统一取 shim 的语义。安全性无变化（浏览器对 http(s) 请求不可能发空 Origin，能发空 Origin 的非浏览器客户端本就伪造得了 Host），在此记录以免日后被当成缺陷。
+  - **这不是认证，也没有更硬的第二道防线**：两者都能被本机进程、或被任何能连到该端口的对端伪造。它挡的是「外部页面里的浏览器」（浏览器替我们决定 Origin，rebinding 又过不了 Host 比对），挡不住「已经能对这个端口开 socket 的程序」。**`src/web-status.ts` 里没有任何按路由的密钥**——`req.headers` 只读 `host` 与 `origin` 两个字段。所以会花积分、会返回 token 材料的路由与只读路由受同等保护，一旦把监听绑到非回环地址，这些路由就等于对局域网开放。这是整个面的性质，不是本函数能解决的；审核阶段发现初稿把「已有进程内密钥」当成了既有防线，那是错的，已删。
+  - **验证**：路由级逐条用例（13 条路径的表驱动块，含「注册集合与表一致」的守卫断言，并断言每条 403 来自门禁而非上游、且上游计数器为 0）与 5 条专项用例——恶意 `Host` → 403 且 `error: 'host-not-trusted'`；完全无 `Host` → 403；四种合法回环 `Host` → 200（**正向对照**，没有它前两条在「全拒」的实现上也会通过）；局域网 `Host` + 同接口 `localAddress` → 200（**证明 0.0.0.0 回归已消除**）；局域网接口上伪造 `Host` → 403。另有 `tests/loopback.spec.ts` 29 条单元用例覆盖两个判据本身。变异验证三次：删掉 Host 那一支 → 2 条红；把判据退回「只认回环」 → LAN 放行那条红；删掉 Origin 那一支 → Origin 门禁条红。
+  - **顺带修掉一个既有缺陷**：`hostnameOfHost()` 对 `[::1]evil.example` 这种「方括号回环前缀 + 任意尾巴」的输入会截成 `[::1]` 并判为回环——也就是说它把**外来源**读成了本机。真实浏览器不会发这种 Host，但这是安全边界，解析器应当 fail closed 而不是抢救前缀。现在方括号后只允许空或 `:<数字>`，其余一律整串返回（不匹配任何回环名）。这个缺陷此前一直躺在 `shim.ts` 里，抽出共享模块时才暴露出来。
+  - **代价**：测试替身需要补 `host` 头（5 个调用点 + 新增的 loopback 单测），因为它们此前构造的是浏览器**永远不会发出**的请求形态。这是修 fixture 而不是放宽实现。
+
+### Docs
+
+- **修正注释里一句与代码不符的描述（issue #138）。** `WorkBuddyModelLabel.tsx` 的文件头写着本组件「renders nothing at all for a provider that is not ours」，但它实际返回 `<span>{model.name}</span>`——**渲染纯目录名**，只是不去装饰。
+  - 这不是纯文字问题：该槽是 `kind: "single"`，**占位由注册决定，与组件输出什么无关**，所以返回 `null` 也不会释放格子。那句注释让「丢掉别人的装饰」这个代价看起来无害，issue #138 报告者正是引着它来论证，并在外部把它当成了 bug。
+  - **行为一行未改**：保留 §零 的取舍（不做联动、不读别人的注册、`-0.5` 优先级），也**不加**「不占用模型标签槽」开关、**不做**按 provider 动态注册。理由是注册是全局一次性的而 `provider` 是逐行传入的，动态注册会造成空格闪烁并引入对宿主选中状态的观察；这三条处置与理由已写进 `docs/DESIGN.md` §零，供下次讨论直接引用，不必重新论证。
+  - 三处注释同步：`WorkBuddyModelLabel.tsx` 文件头（说清「渲染纯目录名 ≠ 什么都不渲染」）、`WorkBuddyModelLabel()` 里那个 `return <span>` 分支（说清代价发生在这行）、`index.tsx` 的 `registerModelLabel` 上方（说清代价由宿主 1017 的行承担，且这是 §零 的价格而非缺陷）。
+  - 守卫测试的 docblock 也补了对应关系：`tests/model-label-slot-coexistence.spec.tsx` 那条 `renders the plain catalog name for a foreign row` 的 fixture 正是宿主的 1017 行（`deepseek-official` + `deepseek-flash` + `DeepSeek-V4.1-Flash`），断言 `<span>DeepSeek-V4.1-Flash</span>` 且不含 `1017` —— 它就是 issue #138 的机器可验证形式。
+
 ## 5.8.4 (2026-10-24)
 
 > 修复版本：热重载一次之后设置卡片上一半按钮永久 405 的那一格（issue #86）。根因不是「宿主在跑旧代码」——是 `benefit/claim` 路由的 disposer 从未被调用，泄漏的路由让**下一次**热重载在它身上抛错，于是排在它后面的 8 条路由一条都没注册上。**请求路径、provider 注册、凭据、计费与换号规则一律未变**；改动是 cleanup 列表里的一行。
