@@ -18,9 +18,17 @@
  *   - `gemini-*`  ：什么都不加
  *   - 其它        ：`response_format: 'b64_json'` + 可选 `n` / `quality` / `style` / `background`
  *
- * 国内区产品配置里带 `text-to-image` 标签的只有 `hunyuan-image-alpha`，
- * 带 `image-to-image` 的只有 `hunyuan-image-alpha-edit`，因此实际走的就是
- * hunyuan 分支、响应里是 COS 签名 URL（24h 有效），单张约 5.71 credits。
+ * 两个区的目录各有一条媒体模型，互不重叠（2026-10-25 实测）：
+ *   - 国内区（61 条模型）：`text-to-image` 只有 `hunyuan-image-alpha`，
+ *     `image-to-image` 只有 `hunyuan-image-alpha-edit`。走 hunyuan 分支，
+ *     响应是 COS 签名 URL（24h 有效），单张约 5.71 credits。
+ *   - 国际区（29 条模型）：`hy-image-3.5` 同时带 `text-to-image` 与
+ *     `image-to-image`。走「其它」分支（带 `response_format: 'b64_json'`），
+ *     实测单张约 0.03 credits，返回的同样是 ap-singapore 的 COS 签名 URL。
+ *
+ * 两个数不是一个价目表的两个档位：目录条目只有 id/name/tags，**没有价格**，
+ * 价格只在上游结算时以 `data.usage.credit` 返回，所以工具只能回报实扣、
+ * 不能预先报价。
  *
  * @module dsh-connect-workbuddy/image-gen
  */
@@ -33,8 +41,26 @@ export const IMAGE_TAG_IMAGE_TO_IMAGE = 'image-to-image'
 export const DEFAULT_IMAGE_SIZE = '1024x1024'
 /** 生图路由。 */
 export const IMAGE_GENERATIONS_PATH = '/v2/images/generations'
-/** 改图路由（本版未接进工具，先把常量放在这里，供二期使用）。 */
+/** 改图路由：官方 CLI 的 `ImageService.editImage` 打的就是这条（2026-10-25 国际区实测 200）。 */
 export const IMAGE_EDITS_PATH = '/v2/images/edits'
+/** 产品配置里「文生视频」模型的标签。 */
+export const VIDEO_TAG_TEXT_TO_VIDEO = 'text-to-video'
+/** 产品配置里「图生视频」模型的标签。 */
+export const VIDEO_TAG_IMAGE_TO_VIDEO = 'image-to-video'
+
+/**
+ * 本插件认作「媒体模型」的全部标签。
+ *
+ * 目录只读一次就返回全部媒体条目，由调用方按 tag 分组：生图工具只认两个 image
+ * 标签，卡片清单则把视频条目一并列出来。这样 `fetchMediaModels` 不必为每种能力
+ * 各读一遍 `/v3/config`。
+ */
+export const MEDIA_TAGS: readonly string[] = [
+  IMAGE_TAG_TEXT_TO_IMAGE,
+  IMAGE_TAG_IMAGE_TO_IMAGE,
+  VIDEO_TAG_TEXT_TO_VIDEO,
+  VIDEO_TAG_IMAGE_TO_VIDEO,
+]
 
 /**
  * 产品配置 `data.models` 里的一个媒体模型条目。
@@ -105,13 +131,17 @@ function stringList(value: unknown): string[] {
 /**
  * 从产品配置的 `data.models` 里挑出带指定 tag 的媒体模型。
  *
+ * `tag` 可以是一组标签，命中任一即算——目录只读一次就返回全部媒体条目（{@link MEDIA_TAGS}），
+ * 调用方再按能力分组过滤，比每种能力各读一遍 `/v3/config` 少一次往返。
+ *
  * 去重按 `id`：上游目录里同一个 id 只应出现一次，但目录是外部数据，
  * 重复条目不该让卡片或工具参数里出现两个同名选项。
  */
 export function selectMediaModels(
   rawModels: unknown,
-  tag: string = IMAGE_TAG_TEXT_TO_IMAGE,
+  tag: string | readonly string[] = IMAGE_TAG_TEXT_TO_IMAGE,
 ): WorkBuddyMediaModel[] {
+  const wanted = typeof tag === 'string' ? [tag] : tag
   if (!Array.isArray(rawModels)) return []
   const out: WorkBuddyMediaModel[] = []
   const seen = new Set<string>()
@@ -121,44 +151,67 @@ export function selectMediaModels(
     const id = asString(record['id'])
     if (id === undefined || seen.has(id)) continue
     const tags = stringList(record['tags'])
-    if (!tags.includes(tag)) continue
+    if (!wanted.some(one => tags.includes(one))) continue
     seen.add(id)
     out.push({ id, name: asString(record['name']) ?? id, tags })
   }
   return out
 }
 
+/** tag 的人话名字，只用在错误信息里。 */
+function tagLabel(tag: string): string {
+  if (tag === IMAGE_TAG_IMAGE_TO_IMAGE) return '图生图'
+  if (tag === IMAGE_TAG_TEXT_TO_IMAGE) return '文生图'
+  return tag
+}
+
 /**
- * 选出生图模型：优先用调用方点名的那个，否则用目录里的第一个。
+ * 按能力标签选一个图像模型：先在该标签组内找调用方点名的那个，否则取组内第一个。
  *
- * 点名的模型必须在目录里——不在目录里就直接报错，而不是把它发上去让上游
- * 回一个「route config not found」。这样报错信息能指出真正的问题（模型名写错
- * 或该区没有这个模型），而不是一句上游 404。
+ * 点名的模型必须在**这一组**里——写错名字或拿改图模型来文生图都直接报错，
+ * 而不是把它发上去让上游回一个「route config not found」。这样报错信息能指出
+ * 真正的问题（模型名写错，或该区这一组没有模型），那句话里还会列出本组可用项。
  */
-export function pickImageModel(
+export function pickMediaModel(
   models: readonly WorkBuddyMediaModel[],
   requested: string | undefined,
+  tag: string = IMAGE_TAG_TEXT_TO_IMAGE,
 ): WorkBuddyMediaModel {
+  const group = models.filter(model => model.tags.includes(tag))
   if (requested !== undefined && requested !== '') {
-    const found = models.find(model => model.id === requested)
+    const found = group.find(model => model.id === requested)
     if (found === undefined) {
-      const known = models.map(model => model.id).join(', ')
+      const known = group.map(model => model.id).join(', ')
       throw new WorkBuddyImageError(
-        `workbuddy image: 目录里没有生图模型「${requested}」。可用：${known === '' ? '（空）' : known}`,
+        `workbuddy image: 目录里没有${tagLabel(tag)}模型「${requested}」。可用：${known === '' ? '（空）' : known}`,
         'NO_IMAGE_MODEL',
       )
     }
     return found
   }
-  const first = models[0]
+  const first = group[0]
   if (first === undefined) {
     throw new WorkBuddyImageError(
-      'workbuddy image: 该区账号的产品配置里没有任何带 text-to-image 标签的模型。'
-      + '国内区应有 hunyuan-image-alpha；国际区当前没有生图模型。',
+      `workbuddy image: 该区账号的产品配置里没有任何带 ${tag} 标签的模型（${tagLabel(tag)}）。`
+      + '国内区文生图应是 hunyuan-image-alpha、改图是 hunyuan-image-alpha-edit；'
+      + '国际区 hy-image-3.5 同时带这两个标签；一个都没有说明该区目录暂时没有这类模型。',
       'NO_IMAGE_MODEL',
     )
   }
   return first
+}
+
+/**
+ * 文生图模型的选择：{@link pickMediaModel} 的 `text-to-image` 快捷方式。
+ *
+ * 保留这个旧名字，是因为它读起来就把用途说完了；改图路径显式传标签，
+ * 免得两种能力在调用点长得一样、看不出用的是哪一组。
+ */
+export function pickImageModel(
+  models: readonly WorkBuddyMediaModel[],
+  requested: string | undefined,
+): WorkBuddyMediaModel {
+  return pickMediaModel(models, requested, IMAGE_TAG_TEXT_TO_IMAGE)
 }
 
 /** 按官方 CLI 的 `buildBaseRequestBody` 分支规则拼请求体。 */
@@ -177,6 +230,97 @@ export function buildImageBody(request: WorkBuddyImageRequest): Record<string, u
   body['response_format'] = 'b64_json'
   if (request.n !== undefined) body['n'] = request.n
   return body
+}
+
+/**
+ * 改图请求体：生图那一套字段 + `image`（data URL 数组）+ 可选 `input_fidelity`。
+ *
+ * 顺序照抄官方 CLI 的 `editImage`：先 `buildBaseRequestBody`，再补 `image`，
+ * 再可选补 `input_fidelity`。`image` 上游只认字符串数组，单个字符串会被拒。
+ */
+export function buildEditBody(
+  request: WorkBuddyImageRequest & {
+    readonly image: readonly string[]
+    readonly inputFidelity?: string
+  },
+): Record<string, unknown> {
+  const body = buildImageBody(request)
+  body['image'] = [...request.image]
+  if (request.inputFidelity !== undefined && request.inputFidelity !== '') {
+    body['input_fidelity'] = request.inputFidelity
+  }
+  return body
+}
+
+/** 输入图的大小上限。上游没说，但一张改图输入不该比产物大一个量级，8 MB 足够。 */
+export const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
+
+/** 按扩展名猜输入图的 MIME；不认识就返回 undefined（交给嗅探）。 */
+const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+}
+
+export function imageMimeForPath(path: string): string | undefined {
+  const lower = path.toLowerCase()
+  const dot = lower.lastIndexOf('.')
+  if (dot < 0) return undefined
+  return IMAGE_MIME_BY_EXTENSION[lower.slice(dot)]
+}
+
+/**
+ * 按魔数嗅探图片 MIME，照抄官方 CLI 的 `detectMimeTypeFromBase64`。
+ *
+ * 认不出来时兜底 `image/png`（CLI 也是这么兜的）：宁可让上游按 png 试一次，
+ * 也不要因为一个我们没见过的头就拒掉用户给的图。
+ */
+export function sniffImageMime(bytes: Uint8Array): string {
+  const at = (index: number): number => bytes[index] ?? -1
+  if (at(0) === 0x89 && at(1) === 0x50 && at(2) === 0x4e && at(3) === 0x47) return 'image/png'
+  if (at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return 'image/jpeg'
+  if (at(0) === 0x47 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x38) return 'image/gif'
+  if (at(0) === 0x52 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x46
+    && at(8) === 0x57 && at(9) === 0x45 && at(10) === 0x42 && at(11) === 0x50) return 'image/webp'
+  if (at(0) === 0x42 && at(1) === 0x4d) return 'image/bmp'
+  return 'image/png'
+}
+
+/** 拼出上游唯一接受的输入形态：`data:<mime>;base64,<base64>`。 */
+export function imageDataUrl(mime: string, base64: string): string {
+  return `data:${mime};base64,${base64}`
+}
+
+/** 解析一个 data URL 形式的输入图；不是 `data:image/*;base64,` 就返回 undefined。 */
+export function parseImageDataUrl(value: string): { readonly mime: string; readonly base64: string } | undefined {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(value.trim())
+  if (match === null) return undefined
+  const mime = match[1] ?? ''
+  const base64 = match[2] ?? ''
+  if (!mime.startsWith('image/') || base64 === '') return undefined
+  return { mime, base64 }
+}
+
+const BARE_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
+
+/**
+ * 看起来像「裸 base64」而不是路径吗？
+ *
+ * 判据照抄 CLI 的 `processImageInput`：不含路径分隔符、足够长、字符集是 base64。
+ * 长度门槛是必要的——`a.png` 这种文件名同样不含分隔符，短到不足以是图片数据。
+ */
+export function isBareBase64Image(value: string): boolean {
+  const text = value.trim()
+  if (text.length < 100) return false
+  if (text.includes('/') || text.includes('\\')) return false
+  return BARE_BASE64.test(text)
 }
 
 /**
@@ -268,7 +412,7 @@ export function describeImageFailure(status: number, bodyText: string): WorkBudd
   }
   if (status === 404) {
     return new WorkBuddyImageError(
-      `workbuddy image: 上游没有这条生图路由（HTTP 404）。全球区没有生图模型，请用国内区账号。${detail === '' ? '' : ` ${detail}`}`,
+      `workbuddy image: 上游没有这条生图路由（HTTP 404）——该区网关没有开放生图接口。${detail === '' ? '' : ` ${detail}`}`,
       'NO_ROUTE',
     )
   }

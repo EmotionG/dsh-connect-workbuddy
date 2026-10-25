@@ -1,8 +1,8 @@
-# 生图工具：`workbuddy_draw_image`
+# 生图 / 改图工具：`workbuddy_draw_image`
 
-> 日期：2026-10-21 · 取证与联调时版本：4.13.2（`upstream/main` = `dfe7ab3`）
-> 工具名：`workbuddy_draw_image` · 只在国内区账号下注册
-> 真实成本：**实测 5.71 积分/张**（一次真实联调已花掉 5.71）
+> 日期：2026-10-21 取证；2026-10-25 跨区复测 + 改图接入 · 取证与联调时版本：4.13.2（`upstream/main` = `dfe7ab3`）
+> 工具名：`workbuddy_draw_image` · 国内区与国际区都能注册（逐区打开「允许模型自主生图」）
+> 真实成本：**按区不同**——国内区实测 **5.71** 积分/张（一次真实联调花掉 5.71），国际区实测 **0.03** 积分/张
 
 ## 结论
 
@@ -15,9 +15,14 @@
    `data.data[0].url` 指向 `ai-corpus-backup-1258344699.cos.ap-beijing.myqcloud.com`，
    带 `q-sign-time`（起止各 24h）。插件把这个 URL 原样交给模型与用户，并在返回值里
    写明「约 24 小时失效，要长期保留请及时下载」。
-3. **只有国内区有生图模型。** 国内区 `/v3/config` 的 62 条模型里只有
-   `hunyuan-image-alpha` 带 `text-to-image` 标签；国际区**一条都没有**。所以工具
-   **只在国内区注册**——国际区注册出来只会是一个每次调用都报「没有生图模型」的按钮。
+3. **两个区都有生图模型，但它们是两个不同的模型。** 国内区 `/v3/config` 的 61 条模型里
+   `hunyuan-image-alpha`（`text-to-image`）与 `hunyuan-image-alpha-edit`（`image-to-image`）
+   各带一个标签；国际区 29 条模型里 `hy-image-3.5` **同时**带 `text-to-image` 与
+   `image-to-image`。所以工具**两个区都注册**，用哪个区由「哪个区既启用了供应商、又打开了
+   「允许模型自主生图」」决定，两区都符合时**优先国内区**（这是唯一向后兼容的顺序：本功能
+   此前只能走国内区，升级不能悄悄把老用户的支出挪到另一个网关）。两区的媒体模型目录**完全
+   不重叠**，**5.71 与 0.03 是两个模型 × 两个区域共同变化的结果，不是同一张图的跨区差价**；
+   两个区的积分池也各自独立，两个数字之间没有任何汇率含义。
 4. **模型目录要多读一次同一份文档。** 生图工具需要 `data.models` 里的媒体标签，
    而聊天目录投影时会把它们丢掉，所以它**另外发一次只读 GET** `/v3/config`（国内区
    同样走 `/v3` → `/v2` 降级，与聊天目录一致），工具侧对结果做 5 分钟缓存。它只读、
@@ -32,15 +37,71 @@
 | 项 | 值 |
 | --- | --- |
 | 名称 | `workbuddy_draw_image` |
-| 参数 | `prompt`（必填，非空字符串）、`size`（可选，默认 `1024x1024`）、`model`（可选） |
-| 输出 | `url`、`model`、`prompt`、`hint` 必填；`credit`、`path` 可选 |
+| 参数 | `prompt`（必填，非空字符串）、`size`（可选，默认 `1024x1024`）、`model`（可选）、`image`（可选，见「改图」） |
+| 输出 | `url`、`mode`、`model`、`prompt`、`hint` 必填；`credit`、`path` 可选 |
 | 超时 | 180 000 ms（实测单张 12.9–38.7 秒，留足余量） |
 | 执行模式 | 独占（不声明 `isConcurrencySafe`） |
-| 注册条件 | 国内区启用（`regionEnabled(config, 'cn')`）且有 `tools` 服务 |
+| 注册条件 | 宿主有 `tools` 服务，且**至少一个区**既启用了供应商（`regionEnabled`）又打开了该区的「允许模型自主生图」；两区都符合时取国内区 |
 
 `model` 填了但目录里没有时**直接报错**并列出可用模型，不会把不存在的模型 id 发上去
 换一个上游 404——那样报错只会是「route config not found」，读者无从知道是名字写错了。
 
+## 改图（image-to-image）
+
+同一个工具、同一条命令，**给不给 `image` 决定模式**——不新增 `mode` 参数，否则就会
+出现「`mode=edit` 但没图」这种自相矛盾的请求：
+
+| 传了 `image`？ | 模式 | 走的端点 | 选模型用的标签 |
+| --- | --- | --- | --- |
+| 否 | 文生图 | `POST /v2/images/generations` | `text-to-image` |
+| 是 | 改图 | `POST /v2/images/edits` | `image-to-image` |
+
+`model` 的校验也按当次模式的标签组做：拿文生图模型去改图会直接报
+「目录里没有图生图模型「xxx」。可用：…」，不会把不匹配的 id 发上去换一个上游 404。
+
+### `image` 收哪几种形态
+
+官方 CLI 的 `processImageInput` 收下面四种，这里全部支持；**一律先归一成
+`data:<mime>;base64,<b64>`** 再发上去（那是上游唯一接受的形态）：
+
+| 形态 | 例子 | 说明 |
+| --- | --- | --- |
+| 本地绝对路径 | `C:\\Users\\me\\pic.png` | 直接读盘 |
+| `file://` URL | `file:///C:/Users/me/pic.png` | 先 `fileURLToPath` 再读盘 |
+| `http(s)` URL | `https://example.com/pic.jpg` | 宿主侧下载，30 秒超时 |
+| data URL | `data:image/png;base64,iVBOR…` | 校验 `data:image/*;base64,` 前缀后原样使用 |
+| 裸 base64 | `iVBORw0KGgo…` | 长度 ≥ 100、无路径分隔符、字符集合法才认，否则当成路径 |
+
+**上限 8 MB**（`MAX_INPUT_IMAGE_BYTES`），超了报 `INVALID_ARGS` 并在消息里给出实际大小。
+体积按**解码后的字节数**算，不按 base64 字符串长度——base64 比原始字节长约 4/3，
+拿字符串长度比会把合法的 6 MB 图误判成超限。四条输入路径（`http(s)` / 裸 base64 /
+本地路径 / data URL）都过同一个 `assertInputImageBytes()` 闸门，所以「空文件」与
+「超限」的文案只有一份、不可能各自漂移。
+**不做缩放、裁剪、格式转换**：用户给什么就传什么，免得悄悄改了输入图。mime 的判定顺序
+是「HTTP `Content-Type` 的 `image/*`」→「按扩展名」→「按魔数嗅探」（PNG / JPEG /
+GIF / WEBP / BMP，兜底 `image/png`）。
+
+### 输入图的失败不进冷却
+
+读不到文件、下载失败、格式不对、体积超限——这些**请求一次都没发出去**，一分钱没花，
+所以统一走 `INVALID_ARGS`，不触发 30 秒冷却（冷却只看「请求是否真的发出去了」）。
+紧接着再调一次仍然能立刻执行。
+
+> 这条闸门曾经漏掉 data URL 一条路径：`resolveImageInput` 的 `data:` 分支校验完格式就
+> `return`，超限的 data URL 会被原样发到上游，再按「已计费失败」吃一次冷却。四条的
+> 检查合并到同一个 `assertInputImageBytes()` 之后不再可能各自漂移，回归用例见
+> `tests/image-gen.spec.ts` 的「超限的 data URL → INVALID_ARGS」。
+
+### 每组只有一个模型，所以卡片只做只读清单
+
+两个区今天每个标签组都只有 1 个模型（国内区 `hunyuan-image-alpha` /
+`hunyuan-image-alpha-edit`，国际区 `hy-image-3.5` 同时带两个标签）。给长度 1 的列表
+配下拉框是假选择，所以卡片只显示「这区有哪些媒体模型、各带什么标签」的只读清单
+（`POST /plugins/dsh-connect-workbuddy/media-models`，只读免费，宿主侧缓存 5 分钟，
+卡片上的「重新读取」带 `refresh=1` 跳过缓存）。切换能力的方式就是工具的 `model` 参数。
+
+为什么这条端点和 `models/refresh` 分开：聊天目录投影时会把媒体条目丢掉（`selectCliModels`
+不认它们），所以刷新聊天目录永远看不到图像模型；这条端点返回的是未经投影的媒体条目。
 ## 上游协议
 
 请求头（`imageHeaders()`，`src/upstream.ts:1026`）：
@@ -98,20 +159,33 @@ base64 直接灌进对话。
 
 - **模型发现**：国内区 `/v3/config` → `selectMediaModels(data.models, 'text-to-image')`
   → `[{"id":"hunyuan-image-alpha","name":"Hunyuan Image Alpha","tags":["text-to-image"]}]`。
-- **真实出图**：同一凭据 `POST /v2/images/generations` → HTTP 200、12.9 秒、
+- **真实出图（国内区）**：同一凭据 `POST /v2/images/generations` → HTTP 200、12.9 秒、
   `credit: 5.71`、COS 签名 URL；下载产物 2 065 707 字节、PNG magic
   `89-50-4E-47-0D-0A-1A-0A`、1024×1024，画面与提示词一致（水彩橘猫、窗台、暖光），
   右下角带「AI生成 WorkBuddy」水印。
-- **测试**：`tests/image-gen.spec.ts` 33 条，覆盖模型筛选与去重、`pickImageModel`、
+- **真实出图（国际区，2026-10-25）**：凭据来自 `www.workbuddy.ai`，
+  `POST /v2/images/generations` + `hy-image-3.5` → HTTP 200、`credit: 0.03`，
+  产物同样是 COS 签名 URL（`ap-singapore` 桶）。`buildImageBody` 的「其它」分支
+  （带 `response_format: 'b64_json'`）被原样接受，**协议层不用改**。同一轮探针还确认
+  国际区 `/v2/api-keys` 回 503、`/agenttool/v1/tempkey` 回 500，而国内区后者回 200 ——
+  即「3D 那条临时密钥链路」在国际区整个不存在（图片走的是产品内置的 ImageGen，不经它）。
+- **测试**：`tests/image-gen.spec.ts` 57 条，覆盖模型筛选与去重（含多标签 `MEDIA_TAGS`）、
+  `pickMediaModel` 按标签组校验（含国际区
+  `hy-image-3.5` 两组都能选、拿文生图模型去改图的报错文案）、`buildEditBody`、
+  输入图归一（mime / 魔数嗅探 / data URL 解析 / 裸 base64 判定）、改图走
+  `editImage` 且 `mode: 'edit'`、输入图读不到报 `INVALID_ARGS` 且不进冷却、
   三分支请求体、响应解析（url / b64 / `code !== 0` / 空结果）、失败分类、工具的
   schema 形状与「返回值键严格落在 `output.schema` 里」、冷却只对计费失败生效、
-  目录 TTL 只读一次、base64 落盘、`render` 的 markdown。
+  目录 TTL 只读一次、base64 落盘、`render` 的 markdown、小数积分原样印出（0.03 不会被
+  抹成 0）；`tests/image-tool-optin.spec.ts` 12 条，覆盖逐区 opt-in、`imageToolRegionOf` 的
+  两区优先级与「区关着时勾选不算授权」。
 
 ## 没做的事（如实登记）
 
-- **图生图（`/v2/images/edits`）与视频（`/v2/videos/generations`）没有暴露成工具。**
-  两条端点的存在与模型名（`hunyuan-image-alpha-edit`、`minimax-video-h3`、
-  `kling-video-v3`）已由探针确认，但**没有跑通一次真实调用**，所以不给用户一个
-  「看起来能用」的按钮。要做就单独做一轮联调再开。
-- **国际区不支持**：不是没做，是上游目录里没有媒体模型。
+- **视频（`/v2/videos/generations`）没有暴露成工具。** 端点的存在与模型名
+  （`minimax-video-h3`、`kling-video-v3`）已由探针确认，但**没有跑通一次真实调用**，
+  所以不给用户一个「看起来能用」的按钮。要做就单独做一轮联调再开。工具已把四类媒体
+  标签（`MEDIA_TAGS`）都读进目录，加视频只是接一次 `submitVideo()`。
+- **国际区已支持**（2026-10-25 起）：国际区目录里的 `hy-image-3.5` 带 `text-to-image`，实测可用；
+  此前「国际区一条都没有」的观测已过期，不要再据此禁用它。
 - **不做批量**：一次调用一张图、一份积分。没有「一次画四张」的参数——那是一次不可控支出。

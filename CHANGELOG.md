@@ -1,5 +1,51 @@
 # Changelog
 
+## 5.10.0 (2026-10-25)
+
+> 特性版本：`workbuddy_draw_image` 从「只在国内区注册、只能文生图」扩成「国内区与国际区都能用、文生图 + 改图（图生图）」，卡片「能力」栏新增该区媒体模型的只读清单。**请求路径、provider 路由、计费口径与凭据处理一律未变**：改图打的是官方 CLI `ImageService.editImage` 早就用的 `POST /v2/images/edits`，选模型仍然只看该区 `/v3/config` 的媒体标签。
+
+### Features
+
+- **国际区账号也能用 `workbuddy_draw_image`（逐区授权，国内优先）**
+  - **起因**：此前文档与代码都写着「只有国内区有生图模型，国际区一条都没有」，工具因此硬编码成 `regionEnabled(config, 'cn')` 才注册。那句话是 **2026-10-21 的观测**，已经过期。
+  - **2026-10-25 跨区实测**：国际区 `GET /v3/config` 29 条模型里 `hy-image-3.5` **同时**带 `text-to-image` 与 `image-to-image`；同一份凭据 `POST /v2/images/generations` + `hy-image-3.5` → HTTP 200、`usage.credit = 0.03`、产物是 `ap-singapore` 的 COS 签名 URL。`buildImageBody()` 的「其它」分支（带 `response_format: 'b64_json'`）被原样接受，**协议层一行都不用改**。同一轮探针确认国际区 `/v2/api-keys` 回 503、`/agenttool/v1/tempkey` 回 500（而国内区后者回 200）——即 3D 那条临时密钥链路在国际区整个不存在，与生图无关。
+  - **修法（区域选择集中到一处）**：`src/index.ts` 新增 `imageToolRegionOf(config)`——按 `REGION_KEYS`（`cn` 在前）遍历，跳过被关闭的供应商，返回第一个**既启用又打开了「允许模型自主生图」**的区域，都不满足返回 `undefined`。`syncImageTool()` 的注册判定改为 `imageToolRegionOf(value) !== undefined`；`resolveCredential` 改为每次调用时读当前配置、遍历被授权的区逐个 `resolve()`，某区未登录就试下一个区，全失败返回 `undefined`。**CN 优先是唯一向后兼容的顺序**：升级前这个工具只能走国内区，升级不能悄悄把老用户的支出挪到另一个网关。
+  - **文案层同步拆除「只有国内区」的前提**：`ImageToolDeps` 删掉 `regionLabel` 字段；工具描述改为「两个区都可用 + 各自的模型名 + 单价随区与模型不同 + 以返回的 `credit` 为准」；`NOT_LOGGED_IN` 改为「要么两个区都没登录，要么已登录的那个区没打开该开关」；`hint` 不再写死 5.71，有 `credit` 时印本次实扣；`describeImageFailure()` 的 404 文案与 `pickImageModel()` 的空目录文案不再断言「国际区没有生图模型」。
+  - **卡片**：`imageToolPreference` 不再包在 `activeRegion === 'cn' ? … : null` 里，两个 tab 都显示；勾选仍然只写**当前这一区**的 `imageToolEnabled`，两区都关着时工具根本不注册。
+  - **价格口径（README 中英各改一段）**：5.71（国内 `hunyuan-image-alpha`）与 0.03（国际 `hy-image-3.5`）是**两个模型 × 两个区域**同时变化的结果，不是同一张图的跨区差价；两区的积分池彼此独立，两个数字之间没有任何汇率含义。
+- **改图（image-to-image）：同一个工具，给了 `image` 就切模式**
+  - **起因**：`/v2/images/edits` 与 `hunyuan-image-alpha-edit` 的存在早在 4.13.2 取证时就写在 `docs/IMAGE_GEN.md` 的「没做的事」里——没做，是因为当时没跑通一次真实调用。这次跑通了，才把它接出来。
+  - **模式由「有没有输入图」唯一决定，不新增 `mode` 参数**：多一个参数就多一个「`mode=edit` 但没给图」的自相矛盾状态。`image` 存在 → `editImage` + `image-to-image` 组；不存在 → `generateImage` + `text-to-image` 组。
+  - **`model` 的校验跟着模式走**：`pickMediaModel(models, requested, tag)` 按当次标签组挑模型。拿文生图模型点名去改图会直接报「目录里没有图生图模型「xxx」。可用：…」，而不是把不匹配的 id 发上去换一个上游 404——那样报错只会是 `route config not found`，读者无从知道是名字写错了。`selectMediaModels` 同时接受单个标签与标签数组，目录一次读回四类媒体标签（`MEDIA_TAGS`），为将来的视频留位。
+  - **`image` 收官方 CLI `processImageInput` 的全部四种形态**：本地绝对路径、`file://`、`http(s)`（宿主侧下载、30 秒超时）、data URL，另加裸 base64（长度 ≥ 100、无路径分隔符、字符集合法才认，否则当路径）。**一律先归一成 `data:<mime>;base64,…`** —— 上游唯一接受的形态。mime 判定顺序：HTTP `Content-Type` 的 `image/*` → 按扩展名 → 按魔数嗅探（PNG / JPEG / GIF / WEBP / BMP，兜底 `image/png`）。
+  - **不做缩放、裁剪、格式转换**（`MAX_INPUT_IMAGE_BYTES = 8 MB` 只是上限）：用户给什么就传什么。悄悄改输入图是比失败更糟的行为。
+  - **输入图的所有毛病都在「请求没发出去」之前**，所以统一 `INVALID_ARGS`、不进 30 秒冷却、不花积分：读不到文件、下载失败、data URL 格式不对、空文件、超 8 MB。紧接着再调一次仍能立刻执行——判据与既有规则一致（冷却只看「请求是否真的发出去了」）。
+  - **返回值与 `render` 区分两种模式**：output schema 新增必填 `mode`（`'generate'` | `'edit'`），`render` 显示「改图 · 模型：`xxx`」、markdown alt 由「WorkBuddy 生图」改为「WorkBuddy 文生图/改图」。
+  - **上游**：`src/upstream.ts` 新增 `editImage(credential, {model, prompt, size?, image, inputFidelity?})`，`src/image-gen.ts` 新增 `buildEditBody()`（在 `buildImageBody` 之上追加 `image` 数组，`input_fidelity` 仅在非空时写入）。
+- **卡片的「能力」栏新增媒体模型只读清单**
+  - `POST /plugins/dsh-connect-workbuddy/media-models`（`WORKBUDDY_MEDIA_MODELS_PATH`）：405 非 POST → 403 外部 Origin → 503 未接线 → `region` 查询参数（缺省 `cn`）→ 200 `{models:[{id,name,tags}]}`。空清单是**合法回答**（网关不发布媒体模型），不是错误——卡片为它单独写了一句话，而不是显示一个失败。
+  - **为什么单独一条端点**：`models/refresh` 返回的是**聊天**目录，投影时媒体条目被 `selectCliModels` 丢掉，刷新它永远看不到图像模型。
+  - 宿主侧 5 分钟缓存（复用 `MEDIA_MODEL_TTL_MS`），`refresh=1` 绕过——刚在上游启用了图像模型的用户不该等 TTL 到期才看见。读失败不写缓存。
+  - **只读，不做下拉**：两区今天每个标签组只有 1 个模型，长度 1 的下拉是假选择。切换能力的方式就是工具的 `model` 参数。清单**惰性读取**（只在能力面板打开时读、每区只读一次），失败只落在块内，绝不并进 `statusByRegion`——那会把图像模型写进 `lastCatalog`，adapter 就会拿它当聊天模型。
+- **文案与文档**：`docs/IMAGE_GEN.md` 新增「改图」整节（四种形态、模式自动判定、每组模型、8 MB 上限、为什么不给 `mode` 参数），并把「图生图没做」那条从「没做的事」里删掉；README 中英各补一段。
+
+### Fixes
+
+- **超限的 data URL 会绕过 8 MB 与空文件闸门，被原样发到上游，然后按「已计费失败」冷却 30 秒（本轮合并前审核发现）。**
+  - **症状**：`resolveImageInput` 的 `data:` 分支校验完格式就 `return text`，而空文件与 `MAX_INPUT_IMAGE_BYTES` 的检查都在 `encodeInputImage` 里——只有 `http(s)`、裸 base64、本地路径这三条路径会走到它。于是 `data:image/png;base64,<12 MB>`（解码后 9 MB）会被整个塞进请求体发出去；上游拒绝后 `sent` 已是 `true`，再吃一次 30 秒冷却。
+  - **与本 PR 自己的声明直接冲突**：工具描述、`docs/IMAGE_GEN.md` 的「输入图的失败不进冷却」小节，以及 `image-tool.ts` 里 `inputImageError()` 的注释都写着「输入图的一切毛病都发生在请求发出去之前，所以统一 `INVALID_ARGS`、不花积分、不进冷却」。这不是缺一条边界用例，是四条路径里有三条遵守、一条不遵守。
+  - **修法**：新增 `assertInputImageBytes(byteLength, source)` 作为唯一的体积/空文件闸门，`encodeInputImage` 与 `data:` 分支都调它——文案因此只有一份，四条路径不可能再各自漂移。
+  - **口径**：体积按**解码后**的字节数比上限，不按 base64 字符串长度。base64 比原始字节长约 4/3，拿字符串长度比会把一张合法的 6 MB 图（8 MB base64 字符）误判成超限，并在错误信息里报出一个虚高的 MB 数。
+  - **验证**：`tests/image-gen.spec.ts` 新增 3 条——超限 data URL 报 `INVALID_ARGS` 且 `editImage` 没被调用、紧接着再调一次**不进冷却**；6 MB 输入（8 MB base64 字符）仍被接受；`data:image/png;base64,====`（形似 data URL 但解码为空）报 `INVALID_ARGS`。变异验证：把 `data:` 分支改回直接 `return`，前两条与空内容那条中的两条立刻变红。
+
+### Tests
+
+- `tests/image-gen.spec.ts`：38 → **60 条**。新增 `pickMediaModel` 按组校验（含国际区 `hy-image-3.5` 两组都能选、拿文生图模型去改图的报错文案）、`selectMediaModels` 的多标签形态、`buildEditBody`（字段顺序 / `n:1` / 空 `input_fidelity` 不写入 / `image` 是拷贝）、输入图归一（扩展名大小写、五种魔数 + 兜底、data URL 只认 `data:image/*;base64,`、裸 base64 的字符集判定、8 MB 常量），以及改图路径的 9 条端到端（走 `editImage` 且 `mode:'edit'`、不给图走 `generateImage`、读不到图 `INVALID_ARGS` 且**不进冷却**、`data:text/plain` 被拒、**超限 data URL 被拒且不进冷却**、**上限按解码后字节数算**、**空内容 data URL 被拒**、点名错组模型不发请求、`render` 文案）。国际区夹具换成真实形状（`hy-image-3.5` 双标签 + `kling-video-v3`），新增「国际区目录同样能选出默认模型」「工具描述同时交代两个区」「`render` 原样印出 0.03（不能被抹成 0）」；404 与未登录两条用例从「断言点名国内区」翻转为「断言不再点名」。一条旧断言从「WorkBuddy 生图」改为「WorkBuddy 文生图」——`render` 现在分两种模式。
+- `tests/image-tool-optin.spec.ts`：12 条。新增 `imageToolRegionOf` 四条（都没授权 → `undefined`、供应商关着时勾选不算授权、只开国际区 → `'global'`、两区都开 → `'cn'`），卡片源码断言改为「不再 CN-only」。
+- `tests/web-status.spec.ts`：新增媒体端点 7 条（200 只回 id/name/tags 且 region 透传、空清单 200、`refresh=1` 透传且 `refresh=0`/缺省读作 false、GET 405、外部 Origin 403、未接线 503、上游抛错 500），以及路由顺序断言。
+- `tests/card-media-models.spec.tsx`（新文件，6 条，jsdom 真渲染）：只在能力面板打开后**每区读一次**、按钮才带 `refresh=1`；行里同时显示 name / 工具要用的 `id` / 翻译过的 tag；空清单读成一句话而不是失败；上游 500 只落在块内、同面板的其它开关照常可用；半形行被丢弃而不是抛异常（一个只读列表不值得把整张卡带下去）。
+- 全量 `vitest run`：138 文件 / 2362 条通过（本功能相关的 image-gen 60 + image-tool-optin 12 + card-media-models 6 共 78 条）；两个 tsconfig 的 `tsc` 均 0 错。
+
 ## 5.9.0 (2026-10-25)
 
 > 健壮性与诊断版本：活动徽标的时窗解析不再能因非字符串端点而抛错，上游改格式时徽标不再**静默**消失，配置区渲染失败不再退化成一片空白；同时修掉一个**徽标被冻结在保存时刻**的静默缺陷。**发往上游的请求体、provider 注册、凭据、计费、换号与路由门禁一律未变**——本轮不新增任何上游请求，也不改动入站路由。

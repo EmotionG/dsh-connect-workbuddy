@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { workBuddyAccountCredits, workBuddyWebStatus } from '../src/web-status.ts'
 import type { WorkBuddyStatusRouteOptions } from '../src/web-status.ts'
@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import {
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
+  WORKBUDDY_MEDIA_MODELS_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_OAUTH_PATH,
   WORKBUDDY_TRANSFER_PATH,
@@ -15,6 +16,11 @@ import {
   withWorkBuddyRouteAction,
 } from '../src/status-paths.ts'
 import { FALLBACK_WORKBUDDY_MODELS } from '../src/catalog.ts'
+import {
+  IMAGE_TAG_IMAGE_TO_IMAGE,
+  IMAGE_TAG_TEXT_TO_IMAGE,
+  VIDEO_TAG_TEXT_TO_VIDEO,
+} from '../src/image-gen.ts'
 import type { WorkBuddyCredential } from '../src/auth.ts'
 import { WorkBuddyCredentialRejectedError } from '../src/upstream.ts'
 import type { WorkBuddyRegion } from '../src/upstream.ts'
@@ -578,6 +584,11 @@ describe('registerWorkBuddyStatusRoute', () => {
       // The one claim route (issue #79): POST + loopback, one account per call.
       '/plugins/dsh-connect-workbuddy/benefit/claim',
       '/plugins/dsh-connect-workbuddy/models/refresh',
+      // The read-only media roster (image/video models) the capability panel
+      // shows. Separate from models/refresh because that route answers with the
+      // CHAT catalog, from which the adapter has already dropped every media
+      // entry — the roster is the opposite selection, not a wider one.
+      '/plugins/dsh-connect-workbuddy/media-models',
       '/plugins/dsh-connect-workbuddy/probe',
       // Output-speed measurement (issue #92). Its own route because it asks the
       // opposite question with the opposite request shape: tiny input, long
@@ -766,6 +777,111 @@ describe('registerWorkBuddyStatusRoute', () => {
     // checkbox has to stay unchecked rather than being pre-checked on a guess.
     expect(hy3.supportsImages).toBeUndefined()
     expect('supportsImages' in hy3).toBe(false)
+  })
+
+  /** Mount the status routes; return the media-roster handler. */
+  async function mountMediaModelsHandler(
+    options: Partial<WorkBuddyStatusRouteOptions> = {},
+  ): Promise<CapturedEntry['handler']> {
+    const captured = await mountRoutes(options)
+    const media = captured.find(entry => entry.path === WORKBUDDY_MEDIA_MODELS_PATH)
+    if (media === undefined) throw new Error('media model route was not registered')
+    return media.handler
+  }
+
+  it('answers the media roster with id/name/tags and nothing else', async () => {
+    // The card renders exactly these three fields; forwarding the upstream
+    // document wholesale would ship fields the client has no rule for.
+    const seen: WorkBuddyRegion[] = []
+    const handler = await mountMediaModelsHandler({
+      mediaModels: async region => {
+        seen.push(region)
+        return [
+          { id: 'hunyuan-image-alpha', name: 'Hunyuan Image Alpha', tags: [IMAGE_TAG_TEXT_TO_IMAGE] },
+          { id: 'hunyuan-image-alpha-edit', name: 'Edit', tags: [IMAGE_TAG_IMAGE_TO_IMAGE] },
+          { id: 'kling-video-v3', name: 'Kling', tags: [VIDEO_TAG_TEXT_TO_VIDEO] },
+        ]
+      },
+    })
+    const { res, status, body } = response()
+    await handler(request('POST', undefined, `${WORKBUDDY_MEDIA_MODELS_PATH}?region=global`), res)
+    expect(status()).toBe(200)
+    expect(seen).toEqual(['global'])
+    expect(body()).toEqual({
+      models: [
+        { id: 'hunyuan-image-alpha', name: 'Hunyuan Image Alpha', tags: [IMAGE_TAG_TEXT_TO_IMAGE] },
+        { id: 'hunyuan-image-alpha-edit', name: 'Edit', tags: [IMAGE_TAG_IMAGE_TO_IMAGE] },
+        { id: 'kling-video-v3', name: 'Kling', tags: [VIDEO_TAG_TEXT_TO_VIDEO] },
+      ],
+    })
+  })
+
+  it('treats an empty roster as a legitimate answer, not an error', async () => {
+    // A gateway that publishes no media model is a real state, and the card has
+    // a sentence for it. Answering 4xx/5xx would make the panel show a failure
+    // where the truth is simply "this account has none".
+    const handler = await mountMediaModelsHandler({ mediaModels: async () => [] })
+    const { res, status, body } = response()
+    await handler(request('POST'), res)
+    expect(status()).toBe(200)
+    expect(body()).toEqual({ models: [] })
+  })
+
+  it('defaults the region to cn and passes refresh=1 through to the reader', async () => {
+    const calls: { region: string, refresh: boolean }[] = []
+    const handler = await mountMediaModelsHandler({
+      mediaModels: async (region, options) => {
+        calls.push({ region, refresh: options?.refresh === true })
+        return []
+      },
+    })
+    await handler(request('POST', undefined, WORKBUDDY_MEDIA_MODELS_PATH), response().res)
+    await handler(request('POST', undefined, `${WORKBUDDY_MEDIA_MODELS_PATH}?region=cn&refresh=1`), response().res)
+    // Absent refresh must read as "use the cache", not as "bypass it": the
+    // parameter defaults to `undefined` and only an explicit 1 refreshes.
+    await handler(request('POST', undefined, `${WORKBUDDY_MEDIA_MODELS_PATH}?refresh=0`), response().res)
+    expect(calls).toEqual([
+      { region: 'cn', refresh: false },
+      { region: 'cn', refresh: true },
+      { region: 'cn', refresh: false },
+    ])
+  })
+
+  it('refuses a GET with 405 before reading the store', async () => {
+    const mediaModels = vi.fn(async () => [])
+    const handler = await mountMediaModelsHandler({ mediaModels })
+    const { res, status } = response()
+    await handler(request('GET', undefined, WORKBUDDY_MEDIA_MODELS_PATH), res)
+    expect(status()).toBe(405)
+    expect(mediaModels).not.toHaveBeenCalled()
+  })
+
+  it('refuses a foreign Origin with 403 (account-scoped data stays on the loopback)', async () => {
+    const mediaModels = vi.fn(async () => [])
+    const handler = await mountMediaModelsHandler({ mediaModels })
+    const { res, status, body } = response()
+    await handler(request('POST', 'https://evil.example', WORKBUDDY_MEDIA_MODELS_PATH), res)
+    expect(status()).toBe(403)
+    expect(body()).toMatchObject({ error: 'origin-not-trusted' })
+    expect(mediaModels).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 when the Host did not wire the reader', async () => {
+    const handler = await mountMediaModelsHandler()
+    const { res, status, body } = response()
+    await handler(request('POST'), res)
+    expect(status()).toBe(503)
+    expect(body()).toMatchObject({ error: 'media model list unavailable' })
+  })
+
+  it('answers 500 with the reason when the upstream read fails', async () => {
+    const handler = await mountMediaModelsHandler({
+      mediaModels: async () => { throw new Error('config read failed') },
+    })
+    const { res, status, body } = response()
+    await handler(request('POST'), res)
+    expect(status()).toBe(500)
+    expect(body()).toMatchObject({ error: 'config read failed' })
   })
 
   it('routes the region query to that region\'s store, defaulting to cn', async () => {
@@ -1032,7 +1148,7 @@ describe('registerWorkBuddyStatusRoute', () => {
   })
 
   describe('requireLoopback covers every registered route', () => {
-    /** The 13 paths this build registers; a new route must be added here. */
+    /** The 14 paths this build registers; a new route must be added here. */
     const ROUTES: ReadonlyArray<readonly [label: string, path: string, method: string]> = [
       ['usage', '/plugins/dsh-connect-workbuddy/usage', 'GET'],
       ['account-credits', '/plugins/dsh-connect-workbuddy/account-credits', 'GET'],
@@ -1041,6 +1157,7 @@ describe('registerWorkBuddyStatusRoute', () => {
       ['checkin', '/plugins/dsh-connect-workbuddy/checkin', 'POST'],
       ['benefit/claim', '/plugins/dsh-connect-workbuddy/benefit/claim', 'POST'],
       ['models/refresh', '/plugins/dsh-connect-workbuddy/models/refresh', 'POST'],
+      ['media-models', '/plugins/dsh-connect-workbuddy/media-models', 'POST'],
       ['probe', '/plugins/dsh-connect-workbuddy/probe', 'POST'],
       ['tps', '/plugins/dsh-connect-workbuddy/tps', 'POST'],
       ['pool', '/plugins/dsh-connect-workbuddy/pool', 'POST'],
@@ -2089,7 +2206,7 @@ describe('registerWorkBuddyStatusRoute re-mount (issue #86)', () => {
 
   it('registers every route on the first mount', async () => {
     const mounted = await mount()
-    expect(mounted.paths).toHaveLength(13)
+    expect(mounted.paths).toHaveLength(14)
     await mounted.dispose()
   })
 
@@ -2100,7 +2217,7 @@ describe('registerWorkBuddyStatusRoute re-mount (issue #86)', () => {
     await ctx.plugin(fake)
     const { registerWorkBuddyStatusRoute } = await import('../src/web-status.ts')
     registerWorkBuddyStatusRoute(ctx, deps())
-    expect(fake.paths()).toHaveLength(13)
+    expect(fake.paths()).toHaveLength(14)
     await ctx.fiber.dispose()
     expect(fake.paths()).toEqual([])
   })
@@ -2125,7 +2242,7 @@ describe('registerWorkBuddyStatusRoute re-mount (issue #86)', () => {
     await reloaded.fiber.dispose()
 
     expect(second).toEqual(first)
-    expect(second).toHaveLength(13)
+    expect(second).toHaveLength(14)
   })
 
 /**

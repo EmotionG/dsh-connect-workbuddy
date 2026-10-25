@@ -174,6 +174,27 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-pref-lead{display:flex;align-items:center;justify-content:flex-start;gap:10px;min-width:0}
 .dsm-workbuddy-pref-lead .dsm-workbuddy-pref-label{flex:none}
 .dsm-workbuddy-pref-hint{color:var(--dsw-alias-label-tertiary,#999);font-size:12px;line-height:17px}
+/* The media roster: a READ-ONLY list, so it is drawn as quiet rows rather than
+   as a table — it answers "what can this tab draw with" in passing, and must
+   not compete with the switches above it for attention. The id is monospace
+   and dimmer than the name because it is the string a tool call has to pass,
+   not the thing a human reads; the tag chips carry the only colour, one hue
+   per direction (text→image vs image→image), so the grouping is visible
+   without a legend. */
+/* Aligned with the indented rows above it, but under its OWN class: the
+   credit position picker owns .dsm-workbuddy-pref-indent, and the card suite
+   resolves that selector expecting the picker. This block is a block (lead
+   row + hint + list), not a single indented line. */
+.dsm-workbuddy-media{padding-left:25px}
+.dsm-workbuddy-media-list{margin:2px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
+.dsm-workbuddy-media-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;min-width:0}
+.dsm-workbuddy-media-name{color:var(--dsw-alias-label-secondary,#b8bcc4);font-size:12px}
+.dsm-workbuddy-media-id{color:var(--dsw-alias-label-tertiary,#8b8f98);font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.dsm-workbuddy-media-tags{display:inline-flex;flex-wrap:wrap;gap:4px}
+.dsm-workbuddy-media-tag{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:0 6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8b8f98)}
+.dsm-workbuddy-media-empty,.dsm-workbuddy-media-error{font-size:12px;line-height:17px}
+.dsm-workbuddy-media-empty{color:var(--dsw-alias-label-tertiary,#8b8f98)}
+.dsm-workbuddy-media-error{color:var(--dsw-alias-label-error,#e5675f)}
 /* The supplement to the host's fixed quota sentence (issue #63). The plugin no
    longer claims the host's shell.quota-notice chain seat, so this no longer
    paints into shell.overlay — that seat is the reason the previous build's

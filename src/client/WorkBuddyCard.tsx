@@ -37,6 +37,7 @@ import {
   regionImageToolEnabledOf,
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
+  WORKBUDDY_MEDIA_MODELS_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_GITHUB_URL,
   WORKBUDDY_PROBE_PATH,
@@ -49,6 +50,7 @@ import {
 } from '../status-paths.ts'
 import type {
   WorkBuddyCreditPosition,
+  WorkBuddyWebMediaModel,
   WorkBuddyWebModel,
   WorkBuddyWebProbeResult,
   WorkBuddyWebTpsResult,
@@ -135,6 +137,31 @@ const CLI_BRIDGE_REGION_ORDERS = ['cn,global', 'global,cn', 'cn', 'global'] as c
  * text-only model and an unverified one look identically broken next to their
  * checked siblings.
  */
+/**
+ * The media roster from the Host's JSON, tolerantly.
+ *
+ * Anything that is not a row with a string id and a name is DROPPED, never
+ * rendered: this is a read-only list, and a half-shaped entry is not worth an
+ * exception that would take down the whole card. A Host older than the route
+ * (or any other answer without `models`) yields an empty list, which the block
+ * shows as "this tab publishes none" instead of as a failure.
+ */
+function readMediaRoster(value: unknown): readonly WorkBuddyWebMediaModel[] | undefined {
+  const models = (value as { models?: unknown } | null | undefined)?.models
+  if (!Array.isArray(models)) return undefined
+  const rows: WorkBuddyWebMediaModel[] = []
+  for (const entry of models as readonly unknown[]) {
+    const record = entry as { id?: unknown, name?: unknown, tags?: unknown } | null
+    if (record === null || typeof record !== 'object') continue
+    if (typeof record.id !== 'string' || record.id === '') continue
+    const tags = Array.isArray(record.tags)
+      ? (record.tags as readonly unknown[]).filter((tag): tag is string => typeof tag === 'string')
+      : []
+    rows.push({ id: record.id, name: typeof record.name === 'string' ? record.name : record.id, tags })
+  }
+  return rows
+}
+
 function imageCheckboxHint(model: { id: string }, t: Translate): string {
   switch (nativeModalityOf(model.id)) {
     case 'multimodal': return t('row.modelImage')
@@ -592,6 +619,18 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
   const [switchingAccount, setSwitchingAccount] = useState(false)
   /**
+   * The region's MEDIA model roster (read-only), keyed by region.
+   *
+   * NOT part of `statusByRegion`: the usage document is the editable model
+   * directory, and folding media rows into it would put them in the saved
+   * `lastCatalog` — where the adapter would offer an image model as a chat
+   * model. It is a separate, cheap, read-only read that only the capability
+   * panel needs.
+   */
+  const [mediaByRegion, setMediaByRegion] = useState<Partial<Record<WorkBuddyWebRegion, readonly WorkBuddyWebMediaModel[]>>>({})
+  const [mediaError, setMediaError] = useState<string | undefined>(undefined)
+  const [mediaBusy, setMediaBusy] = useState(false)
+  /**
    * Whether the account pool's save is in flight. Both sections write into one
    * region slot and the Host merges per-region, so two concurrent saves can
    * interleave on a stale base and revert each other while both report success
@@ -926,6 +965,7 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
       controller.abort()
     }
   }, [open, activeRegion, refreshUsage, status.status])
+
 
   /**
    * Re-detect the local sign-ins and refresh the panel.
@@ -1385,6 +1425,70 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
       if (mounted.current) setTogglingCredits(undefined)
     }
   }
+
+  /**
+   * Read the active region's media roster. Read-only and free (the same GET the
+   * image tool performs), so it is safe to run whenever the capability panel is
+   * shown; `refresh` bypasses the Host's 5-minute cache for the explicit
+   * button, because a user who just enabled an image model upstream should not
+   * have to wait out a TTL to see it.
+   *
+   * A failure lands in `mediaError` INSIDE the block and nowhere else: it must
+   * not touch `statusByRegion`, or one unreachable roster would replace the
+   * whole panel with an error screen.
+   */
+  const loadMediaModels = useCallback(async (
+    region: WorkBuddyWebRegion,
+    refresh: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    try {
+      const url = refresh
+        ? `${withWorkBuddyRegion(WORKBUDDY_MEDIA_MODELS_PATH, region)}&refresh=1`
+        : withWorkBuddyRegion(WORKBUDDY_MEDIA_MODELS_PATH, region)
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        ...signal === undefined ? {} : { signal },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const models = readMediaRoster(await response.json().catch(() => undefined))
+      if (models === undefined) throw new Error(`HTTP ${response.status}`)
+      if (!mounted.current || signal?.aborted === true) return
+      setMediaByRegion(prev => ({ ...prev, [region]: models }))
+      setMediaError(undefined)
+    } catch (error: unknown) {
+      if (!mounted.current || signal?.aborted === true) return
+      // The message only: `row.mediaModelsError` supplies the sentence.
+      setMediaError(error instanceof Error ? error.message : t('row.requestFailed'))
+    }
+  }, [t])
+  /**
+   * Regions whose media roster has already been asked for, so showing the
+   * capability panel does not re-read the roster on every render — and so a
+   * FAILED read is not retried in a loop. The explicit "re-read" button is the
+   * only thing that asks twice, because a user who just enabled a model
+   * upstream is the one case where a fresh answer is the point.
+   */
+  const mediaRequested = useRef(new Set<WorkBuddyWebRegion>())
+
+  /**
+   * Read the media roster once per region, when the capability panel is opened.
+   *
+   * Lazy rather than alongside the usage fetch: the roster is only visible in
+   * this one panel, and the usage fetch runs for BOTH regions on every open. If
+   * the secret store happens to hold a credential for the region the user is not
+   * looking at, an eager read would spend a request nobody asked for.
+   */
+  useEffect(() => {
+    if (!open || panel !== 'capabilities' || !hasAccounts) return
+    if (mediaRequested.current.has(activeRegion)) return
+    mediaRequested.current.add(activeRegion)
+    const controller = new AbortController()
+    void loadMediaModels(activeRegion, false, controller.signal)
+    return () => { controller.abort() }
+  }, [open, panel, activeRegion, hasAccounts, loadMediaModels])
 
   const refreshModels = async (): Promise<void> => {
     setBusy(true)
@@ -2010,35 +2114,104 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
    *
    * It sits first because it is the only preference here that authorizes SPEND
    * rather than display: the credit line is a readout, this one lets the model
-   * buy an image (about 5.71 credits) without asking again. CN-only, because the
-   * upstream publishes a `text-to-image` model on the CN gateway and none at all
-   * internationally — showing the box on the global tab would offer a control
-   * that can never do anything.
+   * buy an image without asking again. Shown on BOTH tabs: each gateway now
+   * publishes its own `text-to-image` model (CN `hunyuan-image-alpha`,
+   * international `hy-image-3.5`, measured 2026-10-25), so the global box is no
+   * longer a control that can never do anything. The flag is per-region and the
+   * tool uses whichever region is BOTH enabled and switched on (CN first), so
+   * ticking it here only ever authorizes spending on THIS tab.
    */
-  const imageToolPreference = activeRegion === 'cn'
-    ? (
-      <label className="dsm-workbuddy-pref" title={t('row.imageToolHint')}>
-        <input
-          type="checkbox"
-          /* Its OWN class, not the shared `.dsm-workbuddy-pref-check`: that class
-             is the contract the credit-switch suite selects on ("exactly one
-             switch"), and a second element carrying it makes every
-             single-checkbox selector resolve to the wrong box. Same styling,
-             carried by the mirrored rule in `styles.ts`. */
-          className="dsm-workbuddy-image-tool-check"
-          checked={activeRegionOn ? imageToolOn(activeRegion) : false}
-          disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
-          onChange={(event: { target: { checked: boolean } }) => {
-            void toggleImageTool(activeRegion, event.target.checked)
-          }}
-        />
-        <span className="dsm-workbuddy-pref-copy">
-          <span className="dsm-workbuddy-pref-label">{t('row.imageToolLabel')}</span>
-          <span className="dsm-workbuddy-pref-hint">{t('row.imageToolHint')}</span>
+  const imageToolPreference = (
+    <label className="dsm-workbuddy-pref" title={t('row.imageToolHint')}>
+      <input
+        type="checkbox"
+        /* Its OWN class, not the shared `.dsm-workbuddy-pref-check`: that class
+           is the contract the credit-switch suite selects on ("exactly one
+           switch"), and a second element carrying it makes every
+           single-checkbox selector resolve to the wrong box. Same styling,
+           carried by the mirrored rule in `styles.ts`. */
+        className="dsm-workbuddy-image-tool-check"
+        checked={activeRegionOn ? imageToolOn(activeRegion) : false}
+        disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+        onChange={(event: { target: { checked: boolean } }) => {
+          void toggleImageTool(activeRegion, event.target.checked)
+        }}
+      />
+      <span className="dsm-workbuddy-pref-copy">
+        <span className="dsm-workbuddy-pref-label">{t('row.imageToolLabel')}</span>
+        <span className="dsm-workbuddy-pref-hint">{t('row.imageToolHint')}</span>
+      </span>
+    </label>
+  )
+  /**
+   * What this region can actually draw, READ-ONLY.
+   *
+   * There is deliberately no picker here. Each tag group holds exactly one
+   * model in both regions today (measured 2026-10-25), so a dropdown would be a
+   * choice of one — the card would be inviting a decision that does not exist.
+   * What the user DOES need is the answer to "can this tab draw at all, and
+   * with what" — which is also what makes the image-tool switch above
+   * meaningful on the international tab.
+   *
+   * Indented like the position picker, because it is a property of the switch
+   * above it rather than a fourth independent setting.
+   */
+  const mediaTagLabels: Record<string, string> = {
+    'text-to-image': t('row.mediaTagTextToImage'),
+    'image-to-image': t('row.mediaTagImageToImage'),
+    'text-to-video': t('row.mediaTagTextToVideo'),
+    'image-to-video': t('row.mediaTagImageToVideo'),
+  }
+  const activeMedia = mediaByRegion[activeRegion]
+  const mediaModelsPreference = (
+    <div className="dsm-workbuddy-pref dsm-workbuddy-media">
+      <span className="dsm-workbuddy-pref-copy">
+        <span className="dsm-workbuddy-pref-lead">
+          <span className="dsm-workbuddy-pref-label">{t('row.mediaModelsLabel')}</span>
+          {/* Not `dsm-workbuddy-pref-indent`: that class belongs to the credit
+              position picker and the suite resolves it with querySelector,
+              which must keep landing on the picker. The roster is a block of
+              its own anyway — it has a lead row, a hint and a list — so it is
+              aligned by its own style rule instead of borrowing the picker's. */}
+          <button
+            type="button"
+            className="dsm-btn dsm-btn-outline"
+            disabled={mediaBusy || !activeRegionOn}
+            onClick={() => {
+              setMediaBusy(true)
+              void loadMediaModels(activeRegion, true).finally(() => {
+                if (mounted.current) setMediaBusy(false)
+              })
+            }}
+          >
+            {mediaBusy ? t('row.mediaModelsRefreshing') : t('row.mediaModelsRefresh')}
+          </button>
         </span>
-      </label>
-    )
-    : null
+        <span className="dsm-workbuddy-pref-hint">{t('row.mediaModelsHint')}</span>
+        {mediaError !== undefined
+          ? <span className="dsm-workbuddy-media-error">{t('row.mediaModelsError', { message: mediaError })}</span>
+          : activeMedia === undefined
+            ? null
+            : activeMedia.length === 0
+              ? <span className="dsm-workbuddy-media-empty">{t('row.mediaModelsEmpty')}</span>
+              : <ul className="dsm-workbuddy-media-list">
+                  {activeMedia.map(model => (
+                    <li key={model.id} className="dsm-workbuddy-media-row">
+                      <span className="dsm-workbuddy-media-name">{model.name}</span>
+                      <span className="dsm-workbuddy-media-id">{model.id}</span>
+                      <span className="dsm-workbuddy-media-tags">
+                        {model.tags.map(tag => (
+                          <span key={tag} className="dsm-workbuddy-media-tag">
+                            {mediaTagLabels[tag] ?? tag}
+                          </span>
+                        ))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>}
+      </span>
+    </div>
+  )
 
   /**
    * The CLI-route switch.
@@ -2252,6 +2425,7 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
           off, where it would configure nothing. */}
       {cliBridgeSwitchedOn() ? cliBridgePickers : null}
       {imageToolPreference}
+      {mediaModelsPreference}
       <label
         className="dsm-workbuddy-pref"
         title={activeRegion === 'cn' ? t('row.showCreditsCnHint') : t('row.showCreditsGlobalHint')}

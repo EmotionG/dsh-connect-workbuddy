@@ -12,7 +12,7 @@
  * and cannot spend anything. These cases pin that contract.
  */
 import { describe, expect, it } from 'vitest'
-import { regionStateOf } from '../src/index.ts'
+import { imageToolRegionOf, regionStateOf } from '../src/index.ts'
 import {
   nextRegionImageToolEnabled,
   regionImageToolEnabledOf,
@@ -82,18 +82,48 @@ describe('the config default is OFF', () => {
   })
 })
 
-describe('the card shows the opt-in on the CN tab only', () => {
-  it('puts the checkbox in the preference block, not the account pool', async () => {
+describe('imageToolRegionOf', () => {
+  it('answers none when neither region was opted in', () => {
+    expect(imageToolRegionOf({})).toBeUndefined()
+    // Provider switch alone is not the opt-in — same separation as the reader.
+    expect(imageToolRegionOf({ regions: { cn: { enabled: true }, global: { enabled: true } } })).toBeUndefined()
+    expect(imageToolRegionOf({ regions: { cn: { imageToolEnabled: false }, global: { imageToolEnabled: false } } })).toBeUndefined()
+  })
+
+  it('ignores an opt-in on a disabled provider', () => {
+    // The flag means "let the model spend"; the provider switch means "may this
+    // gateway be used at all". A ticked box on a switched-off region must not
+    // make that region the tool's source of credentials.
+    expect(imageToolRegionOf({ regions: { cn: { enabled: false, imageToolEnabled: true } } })).toBeUndefined()
+  })
+
+  it('picks the international region when only it was opted in', () => {
+    expect(imageToolRegionOf({ regions: { global: { imageToolEnabled: true } } })).toBe('global')
+    // And the real fallback shape: CN switched off with an explicit OFF, global on.
+    expect(imageToolRegionOf({ regions: { cn: { imageToolEnabled: false }, global: { imageToolEnabled: true } } })).toBe('global')
+  })
+
+  it('prefers the CN region when both were opted in', () => {
+    // CN-first is the only backward-compatible order: before this change the
+    // tool could ONLY ever use the CN gateway, so an upgrade must not silently
+    // move an existing CN user's spending to the other gateway.
+    expect(imageToolRegionOf({ regions: { cn: { imageToolEnabled: true }, global: { imageToolEnabled: true } } })).toBe('cn')
+  })
+})
+
+describe('the card shows the opt-in on BOTH tabs', () => {
+  it('renders the checkbox in the preference block, for whichever tab is open', async () => {
     // It lives among the credit preferences rather than inside AccountPool so a
     // Host that reports no pool state still renders it — the same reason the
     // credit switch sits there.
     const { readFileSync } = await import('node:fs')
     const source = readFileSync(new URL('../src/client/WorkBuddyCard.tsx', import.meta.url), 'utf8')
-    // CN-only: the upstream publishes a `text-to-image` model on the CN gateway
-    // and none at all internationally, so the box on the global tab would be a
-    // control that can never do anything.
-    expect(source).toContain("activeRegion === 'cn'")
-    expect(source).toContain('toggleImageTool')
+    // Both gateways publish a `text-to-image` model now (CN hunyuan-image-alpha,
+    // international hy-image-3.5; measured 2026-10-25), so the box is no longer
+    // gated on the CN tab: it writes the flag of whichever tab is open.
+    expect(source).not.toContain("imageToolPreference = activeRegion === 'cn'")
+    expect(source).toContain('toggleImageTool(activeRegion')
+    expect(source).toContain('imageToolOn(activeRegion)')
     // Its own class: `.dsm-workbuddy-pref-check` is the contract the
     // credit-switch suite selects on ("exactly one switch"), so a second element
     // carrying it would make every single-checkbox selector resolve wrongly.

@@ -56,7 +56,8 @@ import { createContextRescue } from './context-rescue.ts'
 import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context-rescue.ts'
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
-import { registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
+import { MEDIA_MODEL_TTL_MS, registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
+import type { WorkBuddyMediaModel } from './image-gen.ts'
 import {
   createCliBridgeRuntime,
   mountCommandSurface,
@@ -642,25 +643,30 @@ const regionStateConfig = z.object({
   /**
    * Whether the model may call the image-generation tool (opt-IN, default off).
    *
-   * Per-REGION like the credit switches, and only meaningful on `cn`: the image
-   * catalog has a `text-to-image` model on the CN gateway and none at all on the
-   * international one (measured, see `docs/IMAGE_GEN.md`).
+   * Per-REGION like the credit switches, and it now means the same thing on both
+   * tabs: each region's catalog carries its own `text-to-image` model (CN
+   * `hunyuan-image-alpha`, international `hy-image-3.5`; measured 2026-10-25,
+   * see `docs/IMAGE_GEN.md`). Whichever region is switched on AND opted in owns
+   * the tool; CN wins when both qualify (see `imageToolRegionOf`).
    *
    * Every other spending path in this plugin requires a human action: a chat
    * request is one the user sent, and the per-model "test" button is one the
    * user clicked. `workbuddy_draw_image` is the first capability where the
    * MODEL decides to spend — it calls the tool on its own, at about 5.71 credits
-   * an image, and there is no per-call approval seam in the host to ask the user
-   * first (`needsApproval` / `toolApproval` do not exist; verified against the
-   * shipped `app.asar`).
+   * an image on CN and 0.03 on the international gateway (measured, not a price
+   * list: the media catalog carries no cost, so the tool reports the
+   * `usage.credit` the upstream actually settles), and there is no per-call
+   * approval seam in the host to ask the user first (`needsApproval` /
+   * `toolApproval` do not exist; verified against the shipped `app.asar`).
    *
    * So it is opt-in, the same way the account pool's credit-based rotation is
    * opt-in (3.0.0's reasoning): a feature that can move money on its own must be
    * one the user switched on, not one that arrives with an upgrade. Off also
-   * means the tool is not REGISTERED at all, so the model never sees it and
-   * cannot attempt a call that would be refused.
+   * means that region contributes nothing, and with no opted-in region at all
+   * the tool is not REGISTERED, so the model never sees it and cannot attempt a
+   * call that would be refused.
    */
-  imageToolEnabled: z.boolean().default(false).description('Let the model call workbuddy_draw_image on its own (opt-in; each image costs ~5.71 credits and there is no per-call approval). Off by default, and off means the tool is not registered at all.'),
+  imageToolEnabled: z.boolean().default(false).description('Let the model call workbuddy_draw_image on its own (opt-in; an image costs ~5.71 credits on the CN gateway and ~0.03 on the international one, and there is no per-call approval). Off by default, and off means no region registers the tool at all.'),
   /**
    * Per-model override of whether thinking `off` is offered, keyed by model id
    * (issue #34). An ABSENT key means "use the built-in rule" — the upstream's
@@ -914,6 +920,30 @@ interface WorkBuddyRegionStack {
 
 /** Every region, in card tab order. */
 const REGION_KEYS: readonly WorkBuddyRegion[] = ['cn', 'global']
+
+/**
+ * The region that owns the image tool right now, or `undefined` when no region
+ * has it switched on.
+ *
+ * BOTH gates are required, and both are read live: the region's provider switch
+ * must be ON (`regionEnabled`, opt-OUT) and the user must have opted IN to the
+ * model spending credits there (`imageToolEnabled`, opt-IN). Absence of
+ * `imageToolEnabled` is never consent.
+ *
+ * CN wins when both regions qualify, and that order is the only backward
+ * compatible one: before the international gateway carried a `text-to-image`
+ * model (measured 2026-10-25: `hy-image-3.5`) CN was the only region that could
+ * ever be opted in, so a profile that opted in there keeps using CN even after
+ * the global tab is switched on as well. That is exactly `REGION_KEYS`' order;
+ * it is not incidental.
+ */
+export function imageToolRegionOf(config: Config): WorkBuddyRegion | undefined {
+  for (const region of REGION_KEYS) {
+    if (!regionEnabled(config, region)) continue
+    if (regionStateOf(config, region).imageToolEnabled === true) return region
+  }
+  return undefined
+}
 
 /**
  * The account id a region should select, or `undefined` for the documented
@@ -1413,6 +1443,32 @@ export function apply(ctx: Context, config: Config): void {
     const keep = regionStateOf(current(), region).enabledModelIds ?? []
     return client.fetchModels(credential, signal, keep)
   }
+  /**
+   * The region's MEDIA models, cached briefly for the card's read-only roster.
+   *
+   * Two callers ask the same question — the image tool (to validate a model
+   * argument) and the card's roster block (to SHOW what exists) — and both get
+   * the same answer from the same free GET. The cache exists because the card
+   * re-reads it on every settings render, not because the answer is expensive.
+   *
+   * Region-keyed, and a failure is NOT cached: a gateway hiccup must not make
+   * the roster read "no models" for five minutes.
+   */
+  const mediaCaches = new Map<WorkBuddyRegion, { readonly at: number; readonly models: readonly WorkBuddyMediaModel[] }>()
+  const readMediaModels = async (
+    region: WorkBuddyRegion,
+    options?: { readonly signal?: AbortSignal; readonly refresh?: boolean },
+  ): Promise<readonly WorkBuddyMediaModel[]> => {
+    const cached = mediaCaches.get(region)
+    const now = Date.now()
+    if (options?.refresh !== true && cached !== undefined && now - cached.at < MEDIA_MODEL_TTL_MS) {
+      return cached.models
+    }
+    const credential = await stacks[region].store.resolve()
+    const models = await client.fetchMediaModels(credential, options?.signal)
+    mediaCaches.set(region, { at: Date.now(), models })
+    return models
+  }
 
   /**
    * Stamp each model's LIVE load level onto the runtime roster.
@@ -1594,11 +1650,15 @@ export function apply(ctx: Context, config: Config): void {
       })))
   }
 
-  // 生图工具：跟随国内区开关，而不是在 apply 期判一次。
+  // 生图工具：跟随**两个区**的开关，而不是在 apply 期判一次。
   //
-  // 为什么只挂国内区：`text-to-image` 模型只出现在国内区的产品配置里
-  // （`hunyuan-image-alpha`），国际区目录里一条都没有（实测 2026-10-21），
-  // 挂上去也只会每次调用都报「没有生图模型」——那是噪音，不是能力。
+  // 挂不挂由 `imageToolRegionOf` 决定：任一区「开着 + 用户显式打开了自主生图」
+  // 就注册。以前只挂国内区，因为 `text-to-image` 模型只出现在国内区的产品配置里
+  // （`hunyuan-image-alpha`）；2026-10-25 实测国际区也有一条
+  // （`hy-image-3.5`，同时带 `text-to-image` 与 `image-to-image`），国际区账号
+  // 因此能真画图，而不是一个每次调用都报「没有生图模型」的按钮。两区单价不同
+  // （国内区 5.71、国际区 0.03 积分/张），所以工具文案不再写死一张的价钱，
+  // 改为回报上游结算里真实的 `data.usage.credit`。
   //
   // `tools` 是宿主自己的服务（`class Tools extends Service`，服务名 `tools`），
   // 用 `ctx.inject` 等它出现再注册，而不是 apply 期间 `ctx.get()` 采样一次：
@@ -1612,26 +1672,37 @@ export function apply(ctx: Context, config: Config): void {
   let imageTools: ToolsServiceLike | undefined
   let disposeImageTool: (() => void) | undefined
   const syncImageTool = (value: Config): void => {
-    // TWO gates, both required: the CN region must be on (there is no image
-    // model anywhere else), and the user must have opted in to the model
-    // spending credits on its own. `imageToolEnabled` is opt-IN, so an upgrade
-    // never hands anyone a spending capability they did not ask for.
-    const wanted = regionEnabled(value, 'cn') && regionStateOf(value, 'cn').imageToolEnabled === true
+    // TWO gates, both required: SOME enabled region must have an image model
+    // (both do since 2026-10-25 — CN `hunyuan-image-alpha`, global
+    // `hy-image-3.5`), and the user must have opted in for THAT region to let
+    // the model spend credits on its own. `imageToolEnabled` is opt-IN, so an
+    // upgrade never hands anyone a spending capability they did not ask for.
+    const wanted = imageToolRegionOf(value) !== undefined
     if (wanted && disposeImageTool === undefined && imageTools !== undefined) {
       disposeImageTool = registerWorkBuddyImageTool(imageTools, {
-        // 生图必须用国内区凭据：国际区账号没有生图模型，且生图路由只在
-        // copilot.tencent.com 上。`resolve()` 在未登录时会抛，这里折成
-        // undefined，让工具给出「请先登录」而不是一个原始异常。
+        // 每次调用都重新挑区、重新解析凭据：用户可能在两次调用之间换账号、
+        // 关掉某个区，或把「自主生图」从国内区挪到国际区。
+        //
+        // 只挑**开着且显式打开**的区。给一个没被授权的区画图，等于绕过用户
+        // 按区做出的选择（开关是逐区的，见 `imageToolRegionOf`）。`resolve()`
+        // 在未登录时会抛，这里折成「试下一个被授权的区」，最后落成 undefined，
+        // 让工具给出「没有可用账号」而不是一个原始异常。
         resolveCredential: async () => {
-          if (!regionEnabled(current(), 'cn')) return undefined
-          try {
-            return await stacks.cn.store.resolve()
-          } catch {
-            return undefined
+          const live = current()
+          for (const region of REGION_KEYS) {
+            if (!regionEnabled(live, region)) continue
+            if (regionStateOf(live, region).imageToolEnabled !== true) continue
+            try {
+              return await stacks[region].store.resolve()
+            } catch {
+              continue
+            }
           }
+          return undefined
         },
         listMediaModels: (credential, signal) => client.fetchMediaModels(credential, signal),
         generateImage: (credential, request, signal) => client.generateImage(credential, request, signal),
+        editImage: (credential, request, signal) => client.editImage(credential, request, signal),
         logger: ctx.logger,
       })
       return
@@ -1879,6 +1950,7 @@ export function apply(ctx: Context, config: Config): void {
      * counts as new — the one property that keeps the marker honest.
      */
     rosterSeen: region => stacks[region].rosterSeen.readout(),
+    mediaModels: readMediaModels,
     regionEnabled: region => regionEnabled(current(), region),
     /**
      * The region's committed sidebar-credit flag, read from the same config the

@@ -442,8 +442,11 @@ export const en = {
   'row.poolRowRemoving': 'Removing the account…',
   'row.poolRowRemoveDesktopOnly': '{accountName}: hidden from the list — this account comes from the desktop app\'s own sign-in, which is left untouched. 「Detect accounts again」 re-adds it.',
   // The image tool is the ONE capability where the model spends on its own
-  // (about 5.71 credits a picture, no per-call approval in the host). Opt-in
-  // for that reason, so the copy says what it costs instead of only naming it.
+  // (no per-call approval in the host). Opt-in for that reason, so the copy says
+  // what it costs instead of only naming it — and it names BOTH gateways, since
+  // a picture costs ~5.71 credits on CN and ~0.03 internationally (measured
+  // 2026-10-25; the media catalog carries no price, the settled usage.credit
+  // does). The tool reports the actual charge either way.
   'row.upstreamHint': 'These change what the gateway sees, not which provider serves the call. All of them are sampled when the plugin mounts, so reload the plugin (or restart DSH) after changing one.',
   'row.usageIdentityLabel': 'Make the usage page record these calls like the official client',
   'row.usageIdentityHint': 'Adds the X-IDE-* headers (which fill the 使用端 column, otherwise blank) and sends conversation ids as 32-hex UUIDv7. Display alignment only: the User-Agent and the request body never change. Off by default because the evidence comes from a reporter, not from this plugin.',
@@ -477,7 +480,22 @@ export const en = {
   'row.cliBridgeRegionOrderGlobalOnly': 'Global only',
   'row.cliBridgePickersHint': 'All three pickers write the global cliBridge block; "CLI default" on model and effort is an explicit empty value, not "unset" — the CLI then uses its own defaults; the region picker writes cliBridge.regionOrder.',
   'row.imageToolLabel': 'Let the model draw images',
-  'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image, with no per-call confirmation. Off means the tool is not registered at all.',
+  'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image on the CN gateway and about 0.03 on the international one, with no per-call confirmation. Ticking it here only authorizes THIS tab\'s region. Off everywhere means the tool is not registered at all.',
+  // The read-only media roster. It answers "what can this region actually
+  // draw" from the region's own product configuration, which is the ONLY
+  // source of truth for it: the catalog carries no price and no capability
+  // flag, and the roster is not a setting (there is nothing to choose — each
+  // tag group holds one model today), so it renders as a list, not a picker.
+  'row.mediaModelsLabel': 'Image models in this region',
+  'row.mediaModelsHint': 'Read from this account\'s product configuration. The draw tool picks its model from here: a prompt without an image uses a text-to-image model, one WITH an image uses an image-to-image model. Read-only — to use a different model, pass it to the tool.',
+  'row.mediaModelsEmpty': 'This region publishes no image or video model.',
+  'row.mediaModelsError': 'Could not read the media model list: {message}',
+  'row.mediaModelsRefresh': 'Re-read',
+  'row.mediaModelsRefreshing': 'Reading…',
+  'row.mediaTagTextToImage': 'text → image',
+  'row.mediaTagImageToImage': 'image → image',
+  'row.mediaTagTextToVideo': 'text → video',
+  'row.mediaTagImageToVideo': 'image → video',
   'row.showCreditsCn': 'Show credits in the composer toolbar',
   'row.showCreditsGlobal': 'Show credits in the composer toolbar',
   'row.showCreditsCnHint': 'Show the domestic (WB CN) credit balance in the composer toolbar, but only while this session uses a WB CN model. Click it for per-account balances and a one-click test of the checked accounts (the test spends real credits). The readout refreshes by itself every 5 minutes; the per-account table every 60 seconds while it is open.',
@@ -959,9 +977,10 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.poolRowRemoved': '{accountName}：已从列表中隐藏。点「重新检测账号」会重新加入，桌面 App 的登录不受影响。',
   'row.poolRowRemoving': '正在删除账号…',
   'row.poolRowRemoveDesktopOnly': '{accountName}：已从列表中隐藏——这个账号来自桌面 App 自己的登录，该登录未被改动。点「重新检测账号」会重新加入。',
-  // 生图工具是本插件里唯一「由模型自己决定花钱」的能力（约 5.71 积分/张，
-  // 宿主没有逐次确认的机制），所以默认关闭，文案也必须把单价说出来，
-  // 而不是只给它一个名字。
+  // 生图工具是本插件里唯一「由模型自己决定花钱」的能力（宿主没有逐次确认的
+  // 机制），所以默认关闭，文案也必须把单价说出来，而不是只给它一个名字。
+  // 单价按区分：国内区约 5.71、国际区约 0.03 积分/张（2026-10-25 实测；目录
+  // 里没有价格，只有结算时的 usage.credit），工具本身回报的是实扣值。
   'row.upstreamHint': '这一组改的是网关看到什么，不是由哪个 provider 提供服务。四项都在插件挂载时采样，改完需重载插件或重启 DSH。',
   'row.usageIdentityLabel': '让用量页把调用记成官方客户端的样子',
   'row.usageIdentityHint': '补上 X-IDE-* 头（「使用端」那一列就不会空白），并把会话 id 改成 32 位十六进制 UUIDv7。只影响显示：User-Agent 与请求正文永不变。默认关闭——证据来自报告者，本插件未在真机复现。',
@@ -993,7 +1012,21 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.cliBridgeRegionOrderGlobalOnly': '仅国际',
   'row.cliBridgePickersHint': '三个选择都写入全局 cliBridge 块；模型/档位的"CLI 默认"是显式的空值而非未设置，届时 CLI 使用自己的默认；区域选择写入 cliBridge.regionOrder。',
   'row.imageToolLabel': '允许模型自主生图',
-  'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——约 5.71 积分/张，没有逐次确认。关闭时该工具根本不会注册。',
+  'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——国内区约 5.71、国际区约 0.03 积分/张，没有逐次确认。在这里勾选只授权当前这一区的账号。两区都关着时该工具根本不会注册。',
+  // 只读的媒体模型清单。它回答的是「这一区到底能画什么」，唯一可信来源是
+  // 该区账号自己的产品配置：目录里既没有价格也没有能力标志，而这份清单也
+  // 不是一个设置项（每个 tag 组今天只有一个模型，做下拉是假选择），所以它
+  // 渲染成列表而不是选择器。
+  'row.mediaModelsLabel': '本区可用的图像模型',
+  'row.mediaModelsHint': '读自当前账号的产品配置。生图工具就按这里挑模型：不填图片走「文生图」那一组，填了图片走「图生图」那一组。这里是只读的——想换模型请在调用工具时指定。',
+  'row.mediaModelsEmpty': '这一区的产品配置里没有图像或视频模型。',
+  'row.mediaModelsError': '读取媒体模型清单失败：{message}',
+  'row.mediaModelsRefresh': '重新读取',
+  'row.mediaModelsRefreshing': '正在读取…',
+  'row.mediaTagTextToImage': '文生图',
+  'row.mediaTagImageToImage': '图生图',
+  'row.mediaTagTextToVideo': '文生视频',
+  'row.mediaTagImageToVideo': '图生视频',
   'row.showCreditsCn': '在输入框工具栏显示积分读数',
   'row.showCreditsGlobal': '在输入框工具栏显示积分读数',
   'row.showCreditsCnHint': '在对话输入框工具栏显示国内版（WB CN）剩余积分，仅当本会话使用 WB CN 模型时出现。点击可看各账号余额并一键测试勾选的账号（测试会真实消耗积分）。读数每 5 分钟自动刷新；各账号明细在面板打开时每 60 秒刷新。',
