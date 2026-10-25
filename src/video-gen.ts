@@ -72,27 +72,30 @@ export const MEDIA_TAGS: readonly string[] = [
   VIDEO_TAG_IMAGE_TO_VIDEO,
 ]
 
-/**
- * 产品配置 `data.models` 里的一个媒体模型条目，扩展出视频生成配置。
- *
- * 实测上游媒体条目只有 `{"id","name","tags"}` 三个字段（见 `image-gen.ts` 的
- * 模块注释）；`videoGeneration` 是**模型级**配置（`productManager` 的
- * `waitConfiguration().models.find(id).videoGeneration`），不是 `data.models`
- * 条目本身的字段，所以这里把它作为可选外挂、绝不臆造。
- */
-export interface WorkBuddyMediaModel {
-  readonly id: string
-  readonly name: string
-  readonly tags: readonly string[]
-}
-
-/** 一条模型的 `videoGeneration` 配置（来自产品配置 `models[].videoGeneration`）。 */
+/** 一条模型的 `videoGeneration` 配置（上游 `models[].videoGeneration`）。 */
 export interface WorkBuddyVideoModelConfig {
   readonly resolutions?: readonly string[]
   readonly defaultResolution?: string
   readonly defaultSeconds?: number
   readonly minSeconds?: number
   readonly maxSeconds?: number
+}
+
+/**
+ * 产品配置 `data.models` 里的一个媒体模型条目。
+ *
+ * 实测上游媒体条目只有 `{"id","name","tags"}` 三个字段（见 `image-gen.ts` 的
+ * 模块注释）；`videoGeneration` 是**模型级**配置，随条目下发时才有。这里只做
+ * 透传：下游校验拿它当**唯一**的时长/分辨率依据，没有就交给上游，绝不臆造默认区间。
+ *
+ * `image-gen.ts` 的同名接口带同一个可选字段——两边读的是同一份目录，
+ * `fetchMediaModels` 只会返回一种形状（见该文件的 `WorkBuddyMediaVideoGeneration`）。
+ */
+export interface WorkBuddyMediaModel {
+  readonly id: string
+  readonly name: string
+  readonly tags: readonly string[]
+  readonly videoGeneration?: WorkBuddyVideoModelConfig
 }
 
 /** 一次生视频请求的可变部分。 */
@@ -136,6 +139,8 @@ export type WorkBuddyVideoErrorCode =
   | 'RATE_LIMIT'
   | 'UPSTREAM'
   | 'EMPTY_RESULT'
+  /** 提交阶段被上游 4xx 退回：没建任务、没扣积分，改完参数可以立刻重试。 */
+  | 'REJECTED'
   | 'COOLDOWN'
 
 /** 生视频链路的错误。带一个稳定的 `code`，避免调用方去匹配文案。 */
@@ -163,6 +168,55 @@ function stringList(value: unknown): string[] {
   return out
 }
 
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * 把目录条目上的 `videoGeneration` 读成已知字段的配置对象。
+ *
+ * 只搬我们真的会用的字段（分辨率清单、默认值、时长上下限），缺哪个就是 undefined
+ * ——尤其是 `minSeconds`/`maxSeconds`：**没有就不校验**，把判断交给上游，而不是
+ * 猜一个区间去拦用户。
+ */
+export function readVideoGeneration(raw: unknown): WorkBuddyVideoModelConfig | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Record<string, unknown>
+  const resolutions = stringList(record['resolutions'])
+  const defaultResolution = asString(record['defaultResolution'])
+  const defaultSeconds = asFiniteNumber(record['defaultSeconds'])
+  const minSeconds = asFiniteNumber(record['minSeconds'])
+  const maxSeconds = asFiniteNumber(record['maxSeconds'])
+  const config: WorkBuddyVideoModelConfig = {
+    ...(resolutions.length === 0 ? {} : { resolutions }),
+    ...(defaultResolution === undefined ? {} : { defaultResolution }),
+    ...(defaultSeconds === undefined ? {} : { defaultSeconds }),
+    ...(minSeconds === undefined ? {} : { minSeconds }),
+    ...(maxSeconds === undefined ? {} : { maxSeconds }),
+  }
+  return Object.keys(config).length === 0 ? undefined : config
+}
+
+/**
+ * 从上游的拒绝文案里读出它自己报的时长区间。
+ *
+ * 目录没有 `videoGeneration` 时，本地无从校验，只能让上游先拒一次；它会以
+ * `unsupported video duration: 1 seconds, supported range: 4-15 seconds` 这种
+ * 文案把真相说出来。把这段读出来记到本次进程里，第二次同样的参数就能在本地被拦下，
+ * 不再多打一次注定失败的请求。读不出来就返回 undefined（绝不猜）。
+ */
+export function parseSupportedSecondsRange(
+  text: string,
+): { minSeconds: number; maxSeconds: number } | undefined {
+  const match = /supported range:\s*(\d+(?:\.\d+)?)\s*(?:-|–|—|~|to)\s*(\d+(?:\.\d+)?)/i.exec(text)
+  if (match === null) return undefined
+  const minSeconds = Number(match[1])
+  const maxSeconds = Number(match[2])
+  if (!Number.isFinite(minSeconds) || !Number.isFinite(maxSeconds)) return undefined
+  if (minSeconds <= 0 || maxSeconds < minSeconds) return undefined
+  return { minSeconds, maxSeconds }
+}
+
 /**
  * 从产品配置的 `data.models` 里挑出带指定 tag 的媒体模型。
  *
@@ -185,7 +239,13 @@ export function selectMediaModels(
     const tags = stringList(record['tags'])
     if (!wanted.some(one => tags.includes(one))) continue
     seen.add(id)
-    out.push({ id, name: asString(record['name']) ?? id, tags })
+    const videoGeneration = readVideoGeneration(record['videoGeneration'])
+    out.push({
+      id,
+      name: asString(record['name']) ?? id,
+      tags,
+      ...(videoGeneration === undefined ? {} : { videoGeneration }),
+    })
   }
   return out
 }
@@ -478,6 +538,19 @@ export function describeVideoFailure(
     return new WorkBuddyVideoError(
       `workbuddy video: 上游没有这条生视频路由（HTTP 404）——该区网关没有开放视频接口。${detail === '' ? '' : ` ${detail}`}`,
       'NO_ROUTE',
+    )
+  }
+  // 提交阶段的其他 4xx：上游在**创建任务之前**就把请求退回了（典型是参数不合它的
+  // 规则，例如 `unsupported video duration: 1 seconds`）。没有 task、没有扣积分，
+  // 所以归成 REJECTED 而不是 UPSTREAM——「UPSTREAM 一律进冷却」会让一次参数写错
+  // 白等一分钟，正是「上游返回这种错误，也要等半天」的来源。
+  if (phase === 'submit' && status >= 400 && status < 500) {
+    const range = parseSupportedSecondsRange(detail)
+    return new WorkBuddyVideoError(
+      `workbuddy video: 上游拒绝了这次生视频请求（HTTP ${status}），没有创建任务、没有扣积分`
+      + `${range === undefined ? '' : `；该模型支持的时长是 ${range.minSeconds}-${range.maxSeconds} 秒`}`
+      + `。按下面的提示改参数后可以立刻重试。${detail === '' ? '' : ` ${detail}`}`,
+      'REJECTED',
     )
   }
   return new WorkBuddyVideoError(

@@ -73,6 +73,25 @@ export interface WorkBuddyMediaModel {
   readonly id: string
   readonly name: string
   readonly tags: readonly string[]
+  /**
+   * 模型级视频生成配置（上游 `models[].videoGeneration`），只对视频模型出现，
+   * 图像链路从不读它。透传它是因为**同一份目录**同时喂生图与生视频两条链路：
+   * 视频工具要靠这里的 `minSeconds`/`maxSeconds` 在本地拦下越界时长，
+   * 而不是发上去等一个「unsupported video duration」的 400。
+   *
+   * 形状与 `video-gen.ts` 的 `WorkBuddyVideoModelConfig` 一致（那边是视频层的
+   * 同一份定义，两处必须同步——tests/video-gen.spec.ts 有一条对拍测试）。
+   */
+  readonly videoGeneration?: WorkBuddyMediaVideoGeneration
+}
+
+/** `WorkBuddyMediaModel.videoGeneration` 的结构。字段缺席就是上游没给，不补默认值。 */
+export interface WorkBuddyMediaVideoGeneration {
+  readonly resolutions?: readonly string[]
+  readonly defaultResolution?: string
+  readonly defaultSeconds?: number
+  readonly minSeconds?: number
+  readonly maxSeconds?: number
 }
 
 /** 一次生图请求的可变部分。 */
@@ -128,6 +147,33 @@ function stringList(value: unknown): string[] {
   return out
 }
 
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * 把目录条目上的 `videoGeneration` 读成已知字段的配置对象（图像链路只是搬运，
+ * 不解释它）。与 `video-gen.ts` 的 `readVideoGeneration` 必须同形——同一份上游
+ * 数据，两个入口不能读出两个答案。缺字段即 undefined，不补默认值。
+ */
+export function readVideoGeneration(raw: unknown): WorkBuddyMediaVideoGeneration | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Record<string, unknown>
+  const resolutions = stringList(record['resolutions'])
+  const defaultResolution = asString(record['defaultResolution'])
+  const defaultSeconds = asFiniteNumber(record['defaultSeconds'])
+  const minSeconds = asFiniteNumber(record['minSeconds'])
+  const maxSeconds = asFiniteNumber(record['maxSeconds'])
+  const config: WorkBuddyMediaVideoGeneration = {
+    ...(resolutions.length === 0 ? {} : { resolutions }),
+    ...(defaultResolution === undefined ? {} : { defaultResolution }),
+    ...(defaultSeconds === undefined ? {} : { defaultSeconds }),
+    ...(minSeconds === undefined ? {} : { minSeconds }),
+    ...(maxSeconds === undefined ? {} : { maxSeconds }),
+  }
+  return Object.keys(config).length === 0 ? undefined : config
+}
+
 /**
  * 从产品配置的 `data.models` 里挑出带指定 tag 的媒体模型。
  *
@@ -153,7 +199,13 @@ export function selectMediaModels(
     const tags = stringList(record['tags'])
     if (!wanted.some(one => tags.includes(one))) continue
     seen.add(id)
-    out.push({ id, name: asString(record['name']) ?? id, tags })
+    const videoGeneration = readVideoGeneration(record['videoGeneration'])
+    out.push({
+      id,
+      name: asString(record['name']) ?? id,
+      tags,
+      ...(videoGeneration === undefined ? {} : { videoGeneration }),
+    })
   }
   return out
 }

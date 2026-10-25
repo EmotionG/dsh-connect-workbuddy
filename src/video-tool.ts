@@ -40,6 +40,7 @@ import {
   VIDEO_TAG_IMAGE_TO_VIDEO,
   VIDEO_TAG_TEXT_TO_VIDEO,
   WorkBuddyVideoError,
+  parseSupportedSecondsRange,
   pickVideoModel,
   resolveVideoParams,
   type WorkBuddyMediaModel,
@@ -157,6 +158,9 @@ function asBoolean(value: unknown): boolean | undefined {
 /**
  * 这些失败说明请求真的打到了上游、可能已经扣了积分，才值得进冷却。
  * 参数写错 / 未登录 / 目录里没有模型都还没花钱，轮询也已先花过提交那次的钱。
+ *
+ * 注意 `REJECTED` **不在**这里：提交阶段被上游 4xx 退回时任务根本没创建、
+ * 积分没花，冷却只会让一次「参数写错了」变成白等一分钟。
  */
 const BILLABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
   'AUTH',
@@ -286,6 +290,17 @@ function encodeVideoInputImage(bytes: Uint8Array, source: string): string {
 export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
   let mediaCache: { readonly at: number; readonly models: readonly WorkBuddyMediaModel[] } | undefined
   let cooldownUntil = 0
+  /**
+   * 上游在拒绝一次提交时顺带告诉我们的「这个模型支持几秒」。
+   *
+   * 目录里没有 `videoGeneration` 的账号（实测国内区部分账号的 `/v3/config`
+   * 条目只有 `{id,name,tags}`）本地无从校验，只能让上游先拒一次。它拒的时候
+   * 会把区间写在文案里，这里记下来：同一个进程里第二次给同样的越界值，就在本地
+   * 被 `resolveVideoParams` 拦下——零请求、零冷却。键带上区域名，因为模型 id
+   * 不跨区（同名 id 在两个区可能是不同模型）。
+   */
+  const learnedSeconds = new Map<string, { readonly minSeconds: number; readonly maxSeconds: number }>()
+  const secondsKey = (domain: string, modelId: string): string => `${domain}|${modelId}`
 
   const listModels = async (
     credential: WorkBuddyCredential,
@@ -337,7 +352,8 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
           type: 'number',
           description:
             '视频时长（秒），可选。不填用模型默认（通常 5s）。'
-            + '必须落在模型 videoGeneration 的 minSeconds..maxSeconds 区间内；越界直接报错，不会静默夹取。',
+            + '该模型在目录里给了 videoGeneration.minSeconds..maxSeconds 时，越界直接报错、不会静默夹取；'
+            + '目录没给区间时交给上游判断，被拒的错误里会带上游支持的范围，改完可立刻重试（不计失败冷却）。',
         },
         resolution: {
           type: 'string',
@@ -457,6 +473,8 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
 
       // 这一次到底有没有把生视频请求发出去——冷却的唯一判据。
       let sent = false
+      // 选中的模型要活到 catch 里：上游拒绝时得知道是哪条模型的区间，好记下来。
+      let chosen: WorkBuddyMediaModel | undefined
       try {
         const models = await listModels(credential, signal)
         // 先把输入图归一成 URL / 本地路径：发生在「发请求」之前，失败不花积分。
@@ -473,6 +491,14 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
           if (requestedModel !== undefined || pinned === undefined) throw error
           model = pickVideoModel(models, undefined, tag)
         }
+        chosen = model
+
+        // 校验用的时长区间：以目录给的 `videoGeneration` 为底；上游上一次拒绝时
+        // 自报的区间（learned）存在就覆盖它——那是比目录更晚的事实。
+        const learned = learnedSeconds.get(secondsKey(credential.domain, model.id))
+        const modelConfig = learned === undefined
+          ? model.videoGeneration
+          : { ...model.videoGeneration, ...learned }
 
         const resolved = resolveVideoParams({
           model: model.id,
@@ -483,7 +509,7 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
           resolution: requestedResolution,
           aspectRatio: requestedAspectRatio,
           enableAudio: requestedEnableAudio,
-        })
+        }, modelConfig)
 
         const request = {
           model: model.id,
@@ -524,6 +550,12 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
         if (outcome.credit !== undefined) value['credit'] = outcome.credit
         return value
       } catch (error: unknown) {
+        // 上游把参数退回来时**什么都没创建**：把它自报的支持区间记进本次进程，
+        // 下一次同样的越界值在本地就被拦下，不再多打一次注定失败的请求。
+        if (error instanceof WorkBuddyVideoError && error.code === 'REJECTED' && chosen !== undefined) {
+          const range = parseSupportedSecondsRange(error.message)
+          if (range !== undefined) learnedSeconds.set(secondsKey(credential.domain, chosen.id), range)
+        }
         if (isBillableFailure(error, sent)) cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
         throw error
       }

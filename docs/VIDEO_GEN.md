@@ -30,8 +30,9 @@
 5. **视频模型带 `videoGeneration` 模型级配置**（`resolutions[]` / `defaultResolution` /
    `defaultSeconds` / `minSeconds` / `maxSeconds`），与图片模型不同。时长必须落在
    该模型的 `[minSeconds, maxSeconds]` 内，分辨率必须在 `resolutions[]` 内（否则回落
-   默认并告警）。**拿不到这份配置时不做盲拒**——原样透传用户给的时长/分辨率，让上游去判，
-   因为目录里不一定每条都带 `videoGeneration`。
+   默认并告警）。这份配置随条目下发时必须**原样保留到校验层**（早期版本在
+   `selectMediaModels` 里把它丢了，等于时长校验是死代码）。**拿不到这份配置时不做盲拒**
+   ——原样透传用户给的时长/分辨率，让上游去判，因为目录里不一定每条都带 `videoGeneration`。
 6. **模式由「有没有给 `image`」唯一决定，不新增 `mode` 参数**（与生图一致）。给图是
    图生视频（`image-to-video`，带 `image_url` / `last_image_url`，比例由输入图决定、
    不传 `aspect_ratio`）；不给图是文生视频（`text-to-video`，可传 `aspect_ratio`）。
@@ -61,7 +62,7 @@
 | `prompt` 长度 | ≤ 2500 字符，超出报 `INVALID_ARGS` |
 | `negative_prompt` 长度 | ≤ 2500 字符，超出报 `INVALID_ARGS` |
 | `aspect_ratio`（仅文生视频） | 只接受 `16:9` / `9:16` / `1:1`，非法报 `INVALID_ARGS`；图生视频不校验、且不传该字段 |
-| `seconds` | 默认 `DEFAULT_VIDEO_SECONDS = 5`；拿到模型 `minSeconds`/`maxSeconds` 时越界报 `INVALID_ARGS`，否则原样透传 |
+| `seconds` | 默认 `DEFAULT_VIDEO_SECONDS = 5`；拿到模型 `minSeconds`/`maxSeconds`（目录给的，或上游上一次拒绝时自报并被记下的）时越界报 `INVALID_ARGS`，否则原样透传 |
 | `resolution` | 不在模型 `resolutions[]` 内时回落 `defaultResolution` 并给 `warnings`，在列内则原样采纳 |
 | `enable_audio` | 默认 `DEFAULT_VIDEO_ENABLE_AUDIO = true` |
 | `watermark` | 提交时**固定 `true`**（照抄官方 CLI `submitTask`） |
@@ -153,6 +154,52 @@ URL 或本地路径（**不读成 base64**——视频上游接受的是 `image_
 即视为已花钱（受理失败按 `AUTH`/`RATE_LIMIT`/`NO_ROUTE`/`UPSTREAM` 进冷却）、
 `pollVideoTask` 失败 / 超时、`downloadVideo` 失败都视为已花钱（进冷却）。
 
+### 实测单价与产物规格（2026-10-25，国内区）
+
+积分**按次扣**，单价随区域与模型不同；同一次调用的真实扣费以返回的 `credit` 为准。
+以下是国内区实测四次（全部 `enable_audio: true` 的成功任务）：
+
+| 模式 | 模型 | 请求时长 | 实扣积分 | 折合每秒 |
+| --- | --- | --- | --- | --- |
+| 图生视频 | `minimax-video-h3` | 4s | 57.14 | 14.29 |
+| 图生视频 | `kling-video-v3` | 4s | 68.57 | 17.14 |
+| 文生视频 | `minimax-video-h3` | 5s | 71.43 | 14.29 |
+| 文生视频 | `kling-video-v3` | 5s | 128.57 | 25.71 |
+
+- `minimax-video-h3` 在两个模式下都是每秒 14.29（≈100/7），**文生 / 图生同价**；
+- `kling-video-v3` 图生视频每秒 17.14（≈120/7）、文生视频每秒 25.71（≈180/7）——
+  **图生比文生便宜**，不是同一条费率；
+- 所以「一条 5 秒视频多少积分」不能只按模型查，要连模式一起看；两区的积分池彼此独立，
+  **国内区的数字不能换算到国际区**。
+
+四个产物的实际规格（直接解析 mp4 的 `moov` 盒得到，不靠上游自报）：
+
+| 产物（本地时间） | 请求 → 实际时长 | 帧数 | 分辨率 | 视频码率 | 音轨 | 体积 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `11-12-24` | 5s → 5.086s | 121 | 1280×720 | 11.47 Mbps | AAC 0.13 Mbps | 7.0 MB |
+| `11-50-20` | 4s → 4.459s | 107 | 1344×768 | 3.66 Mbps | AAC 0.13 Mbps | 2.0 MB |
+| `11-59-51` | 4s → 4.042s | 97 | 1280×720 | 7.93 Mbps | **无** | 3.8 MB |
+| `12-03-59` | 5s → 5.167s | 124 | 1344×768 | 5.45 Mbps | AAC 0.13 Mbps | 3.4 MB |
+
+关键结论：
+
+1. **实际时长不等于请求的秒数**，而是模型按 24fps 出的整数帧：121 帧 = 5.042s、
+   107 帧 = 4.458s、97 帧 = 4.042s、124 帧 = 5.167s，容器时长再补上音轨那几十毫秒。
+   所以请求 5 秒拿回 5.09–5.17 秒、请求 4 秒拿回 4.04–4.46 秒都正常，**不要按
+   「请求几秒就正好几秒」做下游裁剪假设**。
+2. **容器是 H.264（`avc1`）+ AAC，24fps**，没有 HEVC / AV1 选项；`enable_audio: true`
+   时不保证有音轨（上表第三条就没有），所以播放入口别假设一定有声音。
+3. **分辨率不是 1080p**：实测只出现 `1280x720` 与 `1344x768` 两种，后者是 16:9 之外的
+   画布尺寸（1.75:1），来自模型自己的默认值。这正是 `resolution` 只在模型 `resolutions[]`
+   内原样采纳的原因——`resolution: "1080p"` 对 `minimax-video-h3` 不成立，插件回落默认值
+   并给出告警原文「resolution 1080p 不被模型 minimax-video-h3 支持；改用 上游默认」。
+4. **码率不是分辨率的函数**：同为 1280×720，一条 7.93 Mbps、一条 11.47 Mbps；1344×768
+   的两条是 3.66 / 5.45 Mbps。它随模型与画面运动量变化，所以「同秒数同价格」也不代表
+   「同质量」——文件体积从 2.0 MB 到 7.0 MB 差了 3.5 倍。
+
+> 上表的「产物 → 模型」对应关系没有从响应里固化下来（文件名只带时间戳），所以这里按
+> 生成时间列，不按模型归组；单价表则来自每次工具返回值里的 `credit`，是逐次确认过的。
+
 ## 失败分类与冷却
 
 | 阶段 | HTTP | code | 说法 |
@@ -160,15 +207,32 @@ URL 或本地路径（**不读成 base64**——视频上游接受的是 `image_
 | 提交 | 401 / 403 | `AUTH` | 提示重新登录 |
 | 提交 | 404 | `NO_ROUTE` | 提示该区没有视频路由 |
 | 提交 | 429 | `RATE_LIMIT` | 提示限流 |
-| 提交 | 其它 | `UPSTREAM` | 抽信封里的 `msg` |
+| 提交 | 其它 4xx | `REJECTED` | 上游在**建任务之前**退回了请求，明说「没有创建任务、没有扣积分」，把上游原文（含 `supported range: 4-15 seconds`）带出来 |
+| 提交 | 5xx / 其它 | `UPSTREAM` | 抽信封里的 `msg` |
 | 轮询 | — | `POLL_TIMEOUT` | 超出 `VIDEO_POLL_TIMEOUT_MS` 仍非终态 |
 | 轮询 | — | `TASK_FAILED` | 上游任务本身 failed |
 | 提交/轮询 | — | `EMPTY_RESULT` | 无 taskId / 终态却无视频 |
 
-冷却只对**真的发过请求**的失败生效（`AUTH` / `RATE_LIMIT` / `NO_ROUTE` /
+冷却只对**真的花过积分**的失败生效（`AUTH` / `RATE_LIMIT` / `NO_ROUTE` /
 `UPSTREAM` / `EMPTY_RESULT` / `TASK_FAILED` / `POLL_TIMEOUT`，以及非本模块的异常）。
 参数写错（`INVALID_ARGS`）、未登录（`NOT_LOGGED_IN`）、目录里没模型（`NO_VIDEO_MODEL`）、
-图片读不到这四类**不进冷却**——它们一分钱没花。
+图片读不到、以及**提交阶段被上游 4xx 退回（`REJECTED`）**这五类**不进冷却**——
+它们一分钱没花。
+
+`REJECTED` 单列出来是踩过的坑：`seconds: 1` 被上游以
+`unsupported video duration: 1 seconds, supported range: 4-15 seconds` 退回（HTTP 400，
+`code 14407`），任务根本没创建，按 `UPSTREAM` 处理却给了一次「白等 60 秒」——
+用户的原话是「上游返回这种错误，也要等半天」。现在这次失败**改完参数可以立刻重试**。
+
+### 从上游的拒绝里学区间
+
+目录里没有 `videoGeneration` 的账号（实测部分国内区账号的 `/v3/config` 条目只有
+`{id,name,tags}`）本地无从校验，只能让上游先拒一次。它拒的时候会把真相写在文案里，
+`parseSupportedSecondsRange` 把 `supported range: 4-15` 读出来，按
+**区域 + 模型 id**（模型 id 不跨区）记进本次进程的 `learnedSeconds`。同一个进程里
+第二次给同样的越界值，就在 `resolveVideoParams` 被本地拦下：**零请求、零冷却**，
+报错里直接写「时长必须在 4 到 15 秒之间」。读不出区间（比如拒绝理由是宽高比）就
+不记任何东西——不猜。
 
 ## 安全
 
@@ -188,18 +252,24 @@ URL 或本地路径（**不读成 base64**——视频上游接受的是 `image_
 
 ## 测试
 
-- `tests/video-gen.spec.ts` 35 条：模型筛选与双 video 标签、`pickVideoModel` 按标签组
+- `tests/video-gen.spec.ts` 48 条：模型筛选与双 video 标签、`pickVideoModel` 按标签组
   校验（含「拿文生视频模型去图生视频」的报错文案）、`buildVideoBody` 文/图两分支
   （`watermark` / `extra_parameters` / 仅文生视频带 `aspect_ratio`）、
   `resolveVideoParams` 的 2500 上限 / `aspect_ratio` 非法 / 时长透传与越界 /
   分辨率回落与告警 / 图生视频 `aspectRatio = undefined`、`parseVideoSubmission` /
   `parseVideoTask`（含未知 status 当未完成）、`describeVideoFailure` 401/403/404/429/
-  JSON / 非 JSON。
-- `tests/video-tool.spec.ts` 7 条：偏好的解析顺序与它的边界——都没钉、都没传时取组内
+  JSON / 非 JSON / **提交阶段 400 → `REJECTED` 且轮询阶段仍是 `UPSTREAM`**、
+  `parseSupportedSecondsRange`（`4-15` / `to` / `~` / en dash / 颠倒 / 0 都各一条）、
+  `videoGeneration` 透传（`selectMediaModels` 不丢字段、没给就不造、`readVideoGeneration`
+  只搬已知字段、与 `image-gen` 的同名函数读出同一答案、透传后真的能拦下越界时长）。
+- `tests/video-tool.spec.ts` 12 条：偏好的解析顺序与它的边界——都没钉、都没传时取组内
   第一个；只钉了偏好时用它（并断言问的标签是 `text-to-video`，不是写死一个）；偏好已不在
   目录里时回落第一个（不报错）；显式参数压过偏好；显式参数在手时**根本不读**偏好；显式参数
   不在组里时仍抛 `NO_VIDEO_MODEL`；`seconds` 的描述说的是「越界报错」而不是「夹回默认值」
-  （`resolveVideoParams` 确实是抛 `INVALID_ARGS`）。
+  （`resolveVideoParams` 确实是抛 `INVALID_ARGS`）；另有 5 条钉住时长与冷却：
+  目录 `videoGeneration` 拦下 1 秒（`submitVideo` 一次都没被调用）、区间内的时长放行、
+  提交阶段 400 之后**下一次调用仍然会真的发请求**（不进冷却）、上游自报区间被记住后第二次
+  在本地就被拦下（`submitVideo` 调用次数不增）、`UPSTREAM` 这种可能真扣过钱的失败照旧冷却。
 - `tests/video-tool-optin.spec.ts` 19 条：`regionVideoToolEnabledOf` 仅显式 true、
   `nextRegionVideoToolEnabled` 仅改单 flag、配置默认 OFF、`videoToolRegionOf` 两区优先级、
   「区关着时勾选不算授权」、卡片含 `dsm-workbuddy-video-tool-check` 视频开关与按模式

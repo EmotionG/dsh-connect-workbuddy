@@ -17,6 +17,7 @@ import {
   VIDEO_TAG_IMAGE_TO_VIDEO,
   VIDEO_TAG_TEXT_TO_VIDEO,
   WorkBuddyVideoError,
+  describeVideoFailure,
 } from '../src/video-gen.ts'
 import { createVideoTool, type VideoToolDeps } from '../src/video-tool.ts'
 
@@ -130,3 +131,112 @@ describe('video tool model resolution', () => {
     expect((failure as WorkBuddyVideoError).code).toBe('NO_VIDEO_MODEL')
   })
 })
+
+/**
+ * 时长校验与失败冷却。
+ *
+ * 用户实测撞到的是：`seconds: 1` 被上游以 HTTP 400
+ * `unsupported video duration: 1 seconds, supported range: 4-15 seconds` 退回，
+ * 然后工具还给这次「参数写错」记了 60 秒冷却——于是抱怨「上游返回这种错误，
+ * 也要等半天」。两个根因：目录里的 `videoGeneration` 从没被用来校验（`resolveVideoParams`
+ * 的第二参数一直是 undefined），以及提交阶段 4xx 被当成「已计费失败」。
+ */
+describe('video tool duration validation and cooldown', () => {
+  /** A catalog whose entry carries the model-level videoGeneration (4..15s). */
+  const CONFIGURED = [
+    {
+      id: 'kling-video-v3',
+      name: 'Kling v3',
+      tags: [...MEDIA_TAGS_FOR_VIDEO],
+      videoGeneration: { defaultSeconds: 5, minSeconds: 4, maxSeconds: 15 },
+    },
+  ]
+
+  it('uses the catalog videoGeneration to reject an out-of-range duration before spending anything', async () => {
+    let submitted = 0
+    const tool = createVideoTool(deps({
+      listMediaModels: async () => CONFIGURED,
+      submitVideo: async () => {
+        submitted += 1
+        return { taskId: 'task-1', warnings: [] }
+      },
+    }))
+    const failure = await tool.execute({ prompt: '一只猫', seconds: 1 }, {})
+      .then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(WorkBuddyVideoError)
+    expect((failure as WorkBuddyVideoError).code).toBe('INVALID_ARGS')
+    expect((failure as WorkBuddyVideoError).message).toContain('4 到 15 秒')
+    // Not a single paid request was sent.
+    expect(submitted).toBe(0)
+  })
+
+  it('accepts a duration inside the catalog range', async () => {
+    const seen: number[] = []
+    const tool = createVideoTool(deps({
+      listMediaModels: async () => CONFIGURED,
+      submitVideo: async (_credential, request) => {
+        seen.push(request.seconds)
+        return { taskId: 'task-1', warnings: [] }
+      },
+    }))
+    await tool.execute({ prompt: '一只猫', seconds: 12 }, {})
+    expect(seen).toEqual([12])
+  })
+
+  it('does not cool down after a submit-phase 400: nothing was created, nothing was billed', async () => {
+    let submitted = 0
+    const tool = createVideoTool(deps({
+      submitVideo: async () => {
+        submitted += 1
+        throw describeVideoFailure(400, JSON.stringify({
+          code: 14407,
+          msg: 'Create video failed with error: unsupported video duration: 3 seconds',
+        }), 'submit')
+      },
+    }))
+    const first = await tool.execute({ prompt: '一只猫', seconds: 3 }, {})
+      .then(() => undefined, (error: unknown) => error)
+    expect((first as WorkBuddyVideoError).code).toBe('REJECTED')
+    // The very next call must reach the upstream again instead of answering
+    // "wait 58 seconds" — that wait is the whole complaint.
+    const second = await tool.execute({ prompt: '一只猫', seconds: 3 }, {})
+      .then(() => undefined, (error: unknown) => error)
+    expect((second as WorkBuddyVideoError).code).toBe('REJECTED')
+    expect(submitted).toBe(2)
+  })
+
+  it('learns the range the upstream reported and validates it locally afterwards', async () => {
+    let submitted = 0
+    const tool = createVideoTool(deps({
+      submitVideo: async () => {
+        submitted += 1
+        throw describeVideoFailure(400, JSON.stringify({
+          code: 14407,
+          msg: 'Create video failed with error: unsupported video duration: 1 seconds, '
+            + 'supported range: 4-15 seconds',
+        }), 'submit')
+      },
+    }))
+    await tool.execute({ prompt: '一只猫', seconds: 1 }, {}).catch(() => undefined)
+    expect(submitted).toBe(1)
+    const failure = await tool.execute({ prompt: '一只猫', seconds: 1 }, {})
+      .then(() => undefined, (error: unknown) => error)
+    expect((failure as WorkBuddyVideoError).code).toBe('INVALID_ARGS')
+    expect((failure as WorkBuddyVideoError).message).toContain('4 到 15 秒')
+    // The second attempt never left the process.
+    expect(submitted).toBe(1)
+  })
+
+  it('still cools down for a failure that really may have been billed', async () => {
+    const tool = createVideoTool(deps({
+      submitVideo: async () => {
+        throw new WorkBuddyVideoError('workbuddy video: 上游 500', 'UPSTREAM')
+      },
+    }))
+    await tool.execute({ prompt: '一只猫' }, {}).catch(() => undefined)
+    const failure = await tool.execute({ prompt: '一只猫' }, {})
+      .then(() => undefined, (error: unknown) => error)
+    expect((failure as WorkBuddyVideoError).code).toBe('COOLDOWN')
+  })
+})
+

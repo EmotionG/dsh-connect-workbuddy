@@ -3,7 +3,8 @@
 ## 未发布
 
 > 生图工具的 `size` 描述补上**实测的大图档位与像素上限**（**执行层零改动**——`buildImageBody`
-> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验），同期落地视频生成工具。
+> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验），同期落地视频生成工具；
+> 视频工具上线后按实际报错修了「时长校验形同虚设 + 参数错误也白等 60 秒冷却」两处。
 
 ### Features
 
@@ -18,6 +19,15 @@
     `tests/video-gen.spec.ts` 35 条、`tests/video-tool.spec.ts` 7 条、`tests/video-tool-optin.spec.ts`
     19 条）；`tsdown` 构建通过。
 
+- **实测单价与产物规格写进文档了（`docs/VIDEO_GEN.md`「实测单价与产物规格」）**
+  - **国内区实测单价**：图生视频 4 秒 `minimax-video-h3` 57.14 / `kling-video-v3` 68.57；
+    文生视频 5 秒 `minimax-video-h3` 71.43 / `kling-video-v3` 128.57 积分。`minimax-video-h3`
+    文生图生同价（14.29/s），`kling-video-v3` 图生比文生便宜（17.14/s 对 25.71/s）——
+    「一条 5 秒多少积分」要连模式一起看。
+  - **产物实测**（解析 mp4 的 `moov` 盒，不靠上游自报）：H.264 + AAC、**24fps**、
+    `1280x720` 或 `1344x768`（**没有 1080p**，`resolution: "1080p"` 会被 minimax 拒并回落默认），
+    视频码率 3.66–11.47 Mbps、体积 2.0–7.0 MB；**实际时长按帧数走**，请求 5 秒拿回
+    5.09–5.17 秒，请求 4 秒拿回 4.04–4.46 秒。`enable_audio: true` 也不保证有音轨。
 - **卡片上按模式钉住视频模型（软约束，与显式 `model` 分工明确）**
   - **起因**：国内区每个视频标签组都有 2 个模型（`kling-video-v3` / `minimax-video-h3`），调用方多半省掉 `model`，于是永远拿到目录里的第一个；口头说一次不持久。
   - **按区、按标签存**：`regions.<区>.preferredVideoModels` 是 `{ [tag]: modelId }`——两种模式可能由不同模型提供，且模型 id 不跨区（`minimax-video-h3` 在国际区不存在）。
@@ -26,6 +36,14 @@
   - **写入走与开关同一条「写后回读校验」路径**（`writeRegionPreferredVideoModels`），不是裸 `scope.set`。
 
 ### Fixes
+
+- **视频工具：`seconds: 1` 被上游 400 退回后还要白等 60 秒（两处真 bug）**
+  - **现场**：`Error: workbuddy video: 提交生视频任务失败（HTTP 400）: code 14407: Create video failed with error: unsupported video duration: 1 seconds, supported range: 4-15 seconds`，紧接着第二次调用被挡成「请 38 秒后再试」。用户的判断是「上游返回这种错误，也要等半天」。
+  - **根因一（本地时长校验是死代码）**：`src/video-tool.ts` 调 `resolveVideoParams({...})` 时**没传第二个参数 `config`**；而 `src/video-gen.ts` 的 `minSeconds`/`maxSeconds` 校验只在 config 存在时才跑。更上游还有一处：`src/image-gen.ts` 的 `selectMediaModels` 只搬 `{id,name,tags}`，把条目上的 `videoGeneration` 丢了——所以即使传了也拿不到。
+  - **根因二（没花钱的失败也进冷却）**：`describeVideoFailure` 把提交阶段的一切非 401/403/404/429 都归成 `UPSTREAM`，而 `UPSTREAM` 在冷却集合里。可 400 是「建任务之前就被退回」，没有 task、没有扣积分。
+  - **修法**：`selectMediaModels`（video 与 image 两处）保留并透传 `videoGeneration`（`readVideoGeneration` 只搬已知字段，缺字段不补默认值），工具把它喂给 `resolveVideoParams`——越界时长现在**在本地就被拦下，一次付费请求都不发**；提交阶段其它 4xx 单独归类为 `REJECTED`（不进冷却，错误里明说「没有创建任务、没有扣积分」并保留上游原文）。
+  - **顺带学会区间**：目录不带 `videoGeneration` 的账号（实测部分国内区账号的 `/v3/config` 条目只有 `{id,name,tags}`）本地无从校验，只能让上游先拒一次；`parseSupportedSecondsRange` 从它的文案里读出 `supported range: 4-15`，按**区域 + 模型 id**记在本次进程里，第二次同样的越界值**零请求、零冷却**直接报「时长必须在 4 到 15 秒之间」。读不出区间（例如拒的是宽高比）就什么都不记——不猜。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / **2443 条**通过（`tests/video-gen.spec.ts` 35→48、`tests/video-tool.spec.ts` 7→12；新增用例钉住「提交 400 之后下一次仍会真的发请求」与「学到区间后第二次不出进程」）。
 
 - **`size` 的描述让人以为只能出 1024 级方图，而实测上限是约 419 万像素**
   - **起因**：5.10.0 把 `size` 描述从单个 `1024x1024` 例子改成方 / 竖 / 横三个例子，解决了

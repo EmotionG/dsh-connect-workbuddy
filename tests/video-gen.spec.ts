@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { WorkBuddyCredential } from '../src/auth.ts'
+import { readVideoGeneration as readImageVideoGeneration } from '../src/image-gen.ts'
 import {
   DEFAULT_VIDEO_ASPECT_RATIO,
   DEFAULT_VIDEO_SECONDS,
@@ -19,9 +20,11 @@ import {
   WorkBuddyVideoError,
   buildVideoBody,
   describeVideoFailure,
+  parseSupportedSecondsRange,
   parseVideoSubmission,
   parseVideoTask,
   pickVideoModel,
+  readVideoGeneration,
   resolveVideoParams,
   selectMediaModels,
   type WorkBuddyMediaModel,
@@ -361,3 +364,146 @@ describe('describeVideoFailure', () => {
     expect(error.message).toContain('bad gateway')
   })
 })
+
+/**
+ * 提交阶段的 4xx：上游在创建任务之前就把请求退回了（实测原文
+ * `code 14407: Create video failed with error: unsupported video duration: 1
+ * seconds, supported range: 4-15 seconds`）。这类失败没有 task、没有扣积分，
+ * 必须与「已经打到上游可能扣了钱」的 UPSTREAM 分开——否则工具会给一次参数写错
+ * 记 60 秒冷却，用户看到的就是「上游返回这种错误，也要等半天」。
+ */
+describe('describeVideoFailure: 提交阶段 4xx', () => {
+  const durationBody = JSON.stringify({
+    code: 14407,
+    msg: 'Create video failed with error: unsupported video duration: 1 seconds, supported range: 4-15 seconds',
+  })
+
+  it('400 归为 REJECTED 并明说没有建任务、没有扣积分', () => {
+    const error = describeVideoFailure(400, durationBody, 'submit')
+    expect(error.code).toBe('REJECTED')
+    expect(error.message).toContain('没有创建任务')
+    expect(error.message).toContain('没有扣积分')
+    expect(error.message).toContain('可以立刻重试')
+  })
+
+  it('把上游自报的区间写进错误里，替用户把「到底几秒」补全', () => {
+    const error = describeVideoFailure(400, durationBody, 'submit')
+    expect(error.message).toContain('4-15 秒')
+  })
+
+  it('保留上游原文（含 unsupported video duration 那句）', () => {
+    const error = describeVideoFailure(400, durationBody, 'submit')
+    expect(error.message).toContain('unsupported video duration: 1 seconds')
+  })
+
+  it('轮询阶段的 400 仍然是 UPSTREAM——那时任务已经存在、钱已经花了', () => {
+    expect(describeVideoFailure(400, durationBody, 'poll').code).toBe('UPSTREAM')
+  })
+
+  it('401/403/404/429 的既有归类不受影响', () => {
+    expect(describeVideoFailure(401, '', 'submit').code).toBe('AUTH')
+    expect(describeVideoFailure(403, '', 'submit').code).toBe('AUTH')
+    expect(describeVideoFailure(404, '', 'submit').code).toBe('NO_ROUTE')
+    expect(describeVideoFailure(429, '', 'submit').code).toBe('RATE_LIMIT')
+  })
+})
+
+describe('parseSupportedSecondsRange', () => {
+  it('读出上游文案里的区间', () => {
+    expect(parseSupportedSecondsRange('supported range: 4-15 seconds')).toEqual({
+      minSeconds: 4,
+      maxSeconds: 15,
+    })
+  })
+
+  it('兼容 to / 波浪号 / en dash 这些写法', () => {
+    for (const text of [
+      'supported range: 4 to 15 seconds',
+      'supported range: 4~15s',
+      'supported range: 4–15 seconds',
+      'Supported Range: 2.5 - 10 seconds',
+    ]) {
+      expect(parseSupportedSecondsRange(text)).toBeDefined()
+    }
+    expect(parseSupportedSecondsRange('Supported Range: 2.5 - 10 seconds')).toEqual({
+      minSeconds: 2.5,
+      maxSeconds: 10,
+    })
+  })
+
+  it('读不到 / 语序颠倒 / 非正数时返回 undefined（绝不猜）', () => {
+    expect(parseSupportedSecondsRange('unsupported video duration: 1 seconds')).toBeUndefined()
+    expect(parseSupportedSecondsRange('supported range: 15-4 seconds')).toBeUndefined()
+    expect(parseSupportedSecondsRange('supported range: 0-15 seconds')).toBeUndefined()
+    expect(parseSupportedSecondsRange('')).toBeUndefined()
+  })
+})
+
+describe('videoGeneration 透传', () => {
+  const raw = [
+    {
+      id: 'kling-video-v3',
+      name: 'Kling Video v3',
+      tags: ['text-to-video', 'image-to-video'],
+      videoGeneration: {
+        resolutions: ['720p', '1080p'],
+        defaultResolution: '720p',
+        defaultSeconds: 5,
+        minSeconds: 4,
+        maxSeconds: 15,
+      },
+    },
+    { id: 'hunyuan-image', name: 'Hunyuan', tags: ['text-to-image'] },
+  ]
+
+  it('selectMediaModels 不再把 videoGeneration 丢掉', () => {
+    const models = selectMediaModels(raw, [VIDEO_TAG_TEXT_TO_VIDEO, VIDEO_TAG_IMAGE_TO_VIDEO])
+    expect(models).toHaveLength(1)
+    expect(models[0]!.videoGeneration).toEqual({
+      resolutions: ['720p', '1080p'],
+      defaultResolution: '720p',
+      defaultSeconds: 5,
+      minSeconds: 4,
+      maxSeconds: 15,
+    })
+  })
+
+  it('条目没有 videoGeneration 时不凭空造一个', () => {
+    const models = selectMediaModels(
+      [{ id: 'kling-video-v3', name: 'K', tags: ['text-to-video'] }],
+      VIDEO_TAG_TEXT_TO_VIDEO,
+    )
+    expect(models[0]).not.toHaveProperty('videoGeneration')
+  })
+
+  it('readVideoGeneration 只搬已知字段，非有限数与非字符串一律丢弃', () => {
+    expect(readVideoGeneration({
+      resolutions: ['720p', '', 7],
+      defaultResolution: '',
+      defaultSeconds: '5',
+      minSeconds: 4,
+      maxSeconds: Number.POSITIVE_INFINITY,
+    })).toEqual({ resolutions: ['720p'], minSeconds: 4 })
+    expect(readVideoGeneration(null)).toBeUndefined()
+    expect(readVideoGeneration({})).toBeUndefined()
+  })
+
+  it('与 image-gen 的同名搬运函数读出同一个答案（同一份上游数据）', () => {
+    const sample = {
+      resolutions: ['720p', '1080p'],
+      defaultResolution: '1080p',
+      defaultSeconds: 5,
+      minSeconds: 4,
+      maxSeconds: 15,
+    }
+    expect(readImageVideoGeneration(sample)).toEqual(readVideoGeneration(sample))
+  })
+
+  it('传来的 videoGeneration 真的会用来在本地拦下越界时长', () => {
+    const models = selectMediaModels(raw, VIDEO_TAG_TEXT_TO_VIDEO)
+    const config = models[0]!.videoGeneration
+    expect(() => resolveVideoParams({ model: 'kling-video-v3', prompt: '猫', seconds: 1 }, config))
+      .toThrowError(/4 到 15 秒/)
+  })
+})
+
