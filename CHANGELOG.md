@@ -1,10 +1,14 @@
 # Changelog
 
-## 未发布
+## 5.11.0 (2026-10-26)
 
-> 生图工具的 `size` 描述补上**实测的大图档位与像素上限**（**执行层零改动**——`buildImageBody`
-> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验），同期落地视频生成工具；
-> 视频工具上线后按实际报错修了「时长校验形同虚设 + 参数错误也白等 60 秒冷却」两处。
+> 特性版本：新增 `workbuddy_draw_video`（文生视频 / 图生视频，异步任务「提交 → 轮询 → 下载」，
+> 逐区 opt-in、默认关闭），卡片「能力」栏新增视频开关与**按模式钉模型**；同期把生图 `size`
+> 的描述补上实测的大图档位与 419 万像素上限（**执行层零改动**，改的是模型对「能画多大」的先验）。
+> 视频工具落地后按现场报错修了三处：**时长校验形同虚设**、**参数错误也白等 60 秒冷却**、
+> 以及**显式 `resolution` 在拿不到目录清单时被静默丢弃**。请求路径、provider 路由与凭据处理
+> 一律未变：视频打的是官方 CLI `VideoService` 早已在用的两条 `/v2/videos/*` 路由，选模型仍只看
+> 该区 `/v3/config` 的媒体标签。
 
 ### Features
 
@@ -15,9 +19,9 @@
   - **产物落本地临时目录**：视频是二进制，不进对话体，工具只回 `file://` 路径 + 渲染成链接（`os.tmpdir()/workbuddy-video-gen/<model>-<时间戳>.mp4`）。
   - **顺手改对一处描述**：`seconds` 原写「越界会被夹回默认值并提示」，而 `resolveVideoParams` 实际抛
     `INVALID_ARGS`（不会夹取）——描述会教调用方传 30 秒再等一个 5 秒的结果，然后把报错当成 bug。
-  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / 2425 条通过（新增
-    `tests/video-gen.spec.ts` 35 条、`tests/video-tool.spec.ts` 7 条、`tests/video-tool-optin.spec.ts`
-    19 条）；`tsdown` 构建通过。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 个文件 / **2445 条**通过（含新增
+    `tests/video-gen.spec.ts`、`tests/video-tool.spec.ts`、`tests/video-tool-optin.spec.ts`）；
+    `tsdown` 构建通过。
 
 - **实测单价与产物规格写进文档了（`docs/VIDEO_GEN.md`「实测单价与产物规格」）**
   - **国内区实测单价**：图生视频 4 秒 `minimax-video-h3` 57.14 / `kling-video-v3` 68.57；
@@ -25,7 +29,8 @@
     文生图生同价（14.29/s），`kling-video-v3` 图生比文生便宜（17.14/s 对 25.71/s）——
     「一条 5 秒多少积分」要连模式一起看。
   - **产物实测**（解析 mp4 的 `moov` 盒，不靠上游自报）：H.264 + AAC、**24fps**、
-    `1280x720` 或 `1344x768`（**没有 1080p**，`resolution: "1080p"` 会被 minimax 拒并回落默认），
+    `1280x720` 或 `1344x768`（这两个尺寸是**默认档位**下的产物；见下方 Fixes 第三条——
+    「没有 1080p」此前被记成上游行为，实则其中一部分是本插件把 `resolution` 丢掉了），
     视频码率 3.66–11.47 Mbps、体积 2.0–7.0 MB；**实际时长按帧数走**，请求 5 秒拿回
     5.09–5.17 秒，请求 4 秒拿回 4.04–4.46 秒。`enable_audio: true` 也不保证有音轨。
 - **卡片上按模式钉住视频模型（软约束，与显式 `model` 分工明确）**
@@ -52,7 +57,7 @@
     并据此写了「`resolution: "1080p"` 对 `minimax-video-h3` 不成立」——那条结论在拿不到清单的
     账号上从未真正验证过）。
   - **验证**：`tests/video-gen.spec.ts` 新增 2 条（无清单/空清单透传、大小写命中），全量
-    `vitest run` 140 文件 / **2445 条**通过。
+    `vitest run` 141 个文件 / **2445 条**通过。
 
 - **视频工具：`seconds: 1` 被上游 400 退回后还要白等 60 秒（两处真 bug）**
   - **现场**：`Error: workbuddy video: 提交生视频任务失败（HTTP 400）: code 14407: Create video failed with error: unsupported video duration: 1 seconds, supported range: 4-15 seconds`，紧接着第二次调用被挡成「请 38 秒后再试」。用户的判断是「上游返回这种错误，也要等半天」。
@@ -60,7 +65,9 @@
   - **根因二（没花钱的失败也进冷却）**：`describeVideoFailure` 把提交阶段的一切非 401/403/404/429 都归成 `UPSTREAM`，而 `UPSTREAM` 在冷却集合里。可 400 是「建任务之前就被退回」，没有 task、没有扣积分。
   - **修法**：`selectMediaModels`（video 与 image 两处）保留并透传 `videoGeneration`（`readVideoGeneration` 只搬已知字段，缺字段不补默认值），工具把它喂给 `resolveVideoParams`——越界时长现在**在本地就被拦下，一次付费请求都不发**；提交阶段其它 4xx 单独归类为 `REJECTED`（不进冷却，错误里明说「没有创建任务、没有扣积分」并保留上游原文）。
   - **顺带学会区间**：目录不带 `videoGeneration` 的账号（实测部分国内区账号的 `/v3/config` 条目只有 `{id,name,tags}`）本地无从校验，只能让上游先拒一次；`parseSupportedSecondsRange` 从它的文案里读出 `supported range: 4-15`，按**区域 + 模型 id**记在本次进程里，第二次同样的越界值**零请求、零冷却**直接报「时长必须在 4 到 15 秒之间」。读不出区间（例如拒的是宽高比）就什么都不记——不猜。
-  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / **2443 条**通过（`tests/video-gen.spec.ts` 35→48、`tests/video-tool.spec.ts` 7→12；新增用例钉住「提交 400 之后下一次仍会真的发请求」与「学到区间后第二次不出进程」）。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 个文件 / **2445 条**通过（`tests/video-gen.spec.ts`
+    35→48、`tests/video-tool.spec.ts` 7→12；新增用例钉住「提交 400 之后下一次仍会真的发请求」
+    与「学到区间后第二次不出进程」）。
 
 - **`size` 的描述让人以为只能出 1024 级方图，而实测上限是约 419 万像素**
   - **起因**：5.10.0 把 `size` 描述从单个 `1024x1024` 例子改成方 / 竖 / 横三个例子，解决了
@@ -84,7 +91,7 @@
   - **验证**：`tests/image-gen.spec.ts` 新增 1 条（描述同时含 `2048x2048` / `2560x1440` /
     `419` / `4096x4096`，防止以后有人把上限改回「只给三个 1024 例子」）；
     `docs/IMAGE_GEN.md` 的「尺寸与比例」换成 11 行实测对照表 + 按用途选尺寸表；
-    README 中英各补一句。全量 `vitest run` 138 文件 / 2364 条通过。
+    README 中英各补一句。
 
 ---
 
