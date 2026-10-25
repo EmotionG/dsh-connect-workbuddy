@@ -1,5 +1,76 @@
 # Changelog
 
+## 未发布
+
+> 生图工具的 `size` 描述补上**实测的大图档位与像素上限**（**执行层零改动**——`buildImageBody`
+> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验），同期落地视频生成工具；
+> 视频工具上线后按实际报错修了「时长校验形同虚设 + 参数错误也白等 60 秒冷却」两处。
+
+### Features
+
+- **新增 `workbuddy_draw_video`：文生视频 / 图生视频，国内区与国际区都能注册，逐区 opt-in**
+  - **它不是「接一次 `submitVideo()`」**：视频是异步任务——`POST /v2/videos/generations` 只回一个 `taskId`，还要轮询 `POST /v2/videos/tasks` 到 `completed`（5 秒一次，上限 600 秒），再 `GET` 每条 `data[].url` 把 mp4 拉到本地。旧文档「加视频只是接一次 `submitVideo()`」少说了后两段，已在 `docs/VIDEO_GEN.md` 对账。
+  - **参数层与选模型层是复用的**：`MEDIA_TAGS`、`VIDEO_TAG_*`、`fetchMediaModels`、卡片媒体清单原本就认得两个视频标签，所以参数校验与选模型只补了一层 `src/video-gen.ts`；**执行层是全新异步代码**（`src/upstream.ts` 的 `submitVideo` / `pollVideoTask` / `downloadVideo`）。
+  - **花钱的三条红线照搬生图**：独占执行（不声明 `isConcurrencySafe`）、失败后 60 秒冷却、冷却**只看请求是否真的发出**（参数错、未登录、读不到输入图一律不进冷却）；工具**逐区 opt-in**，不勾时根本不注册，模型看不到它。
+  - **产物落本地临时目录**：视频是二进制，不进对话体，工具只回 `file://` 路径 + 渲染成链接（`os.tmpdir()/workbuddy-video-gen/<model>-<时间戳>.mp4`）。
+  - **顺手改对一处描述**：`seconds` 原写「越界会被夹回默认值并提示」，而 `resolveVideoParams` 实际抛
+    `INVALID_ARGS`（不会夹取）——描述会教调用方传 30 秒再等一个 5 秒的结果，然后把报错当成 bug。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / 2425 条通过（新增
+    `tests/video-gen.spec.ts` 35 条、`tests/video-tool.spec.ts` 7 条、`tests/video-tool-optin.spec.ts`
+    19 条）；`tsdown` 构建通过。
+
+- **实测单价与产物规格写进文档了（`docs/VIDEO_GEN.md`「实测单价与产物规格」）**
+  - **国内区实测单价**：图生视频 4 秒 `minimax-video-h3` 57.14 / `kling-video-v3` 68.57；
+    文生视频 5 秒 `minimax-video-h3` 71.43 / `kling-video-v3` 128.57 积分。`minimax-video-h3`
+    文生图生同价（14.29/s），`kling-video-v3` 图生比文生便宜（17.14/s 对 25.71/s）——
+    「一条 5 秒多少积分」要连模式一起看。
+  - **产物实测**（解析 mp4 的 `moov` 盒，不靠上游自报）：H.264 + AAC、**24fps**、
+    `1280x720` 或 `1344x768`（**没有 1080p**，`resolution: "1080p"` 会被 minimax 拒并回落默认），
+    视频码率 3.66–11.47 Mbps、体积 2.0–7.0 MB；**实际时长按帧数走**，请求 5 秒拿回
+    5.09–5.17 秒，请求 4 秒拿回 4.04–4.46 秒。`enable_audio: true` 也不保证有音轨。
+- **卡片上按模式钉住视频模型（软约束，与显式 `model` 分工明确）**
+  - **起因**：国内区每个视频标签组都有 2 个模型（`kling-video-v3` / `minimax-video-h3`），调用方多半省掉 `model`，于是永远拿到目录里的第一个；口头说一次不持久。
+  - **按区、按标签存**：`regions.<区>.preferredVideoModels` 是 `{ [tag]: modelId }`——两种模式可能由不同模型提供，且模型 id 不跨区（`minimax-video-h3` 在国际区不存在）。
+  - **软约束**：显式 `model` 是调用方为这一次写的，写错就报 `NO_VIDEO_MODEL`；卡片偏好是用户以前写的，钉住的模型已从目录里消失时**静默回落组内第一个**。两条方向相反的规则各有测试钉住。
+  - **清空 = 删 key**，不是写空串；卡片读值先问 Host（`statusByRegion`），浏览器配置快照只作回落。
+  - **写入走与开关同一条「写后回读校验」路径**（`writeRegionPreferredVideoModels`），不是裸 `scope.set`。
+
+### Fixes
+
+- **视频工具：`seconds: 1` 被上游 400 退回后还要白等 60 秒（两处真 bug）**
+  - **现场**：`Error: workbuddy video: 提交生视频任务失败（HTTP 400）: code 14407: Create video failed with error: unsupported video duration: 1 seconds, supported range: 4-15 seconds`，紧接着第二次调用被挡成「请 38 秒后再试」。用户的判断是「上游返回这种错误，也要等半天」。
+  - **根因一（本地时长校验是死代码）**：`src/video-tool.ts` 调 `resolveVideoParams({...})` 时**没传第二个参数 `config`**；而 `src/video-gen.ts` 的 `minSeconds`/`maxSeconds` 校验只在 config 存在时才跑。更上游还有一处：`src/image-gen.ts` 的 `selectMediaModels` 只搬 `{id,name,tags}`，把条目上的 `videoGeneration` 丢了——所以即使传了也拿不到。
+  - **根因二（没花钱的失败也进冷却）**：`describeVideoFailure` 把提交阶段的一切非 401/403/404/429 都归成 `UPSTREAM`，而 `UPSTREAM` 在冷却集合里。可 400 是「建任务之前就被退回」，没有 task、没有扣积分。
+  - **修法**：`selectMediaModels`（video 与 image 两处）保留并透传 `videoGeneration`（`readVideoGeneration` 只搬已知字段，缺字段不补默认值），工具把它喂给 `resolveVideoParams`——越界时长现在**在本地就被拦下，一次付费请求都不发**；提交阶段其它 4xx 单独归类为 `REJECTED`（不进冷却，错误里明说「没有创建任务、没有扣积分」并保留上游原文）。
+  - **顺带学会区间**：目录不带 `videoGeneration` 的账号（实测部分国内区账号的 `/v3/config` 条目只有 `{id,name,tags}`）本地无从校验，只能让上游先拒一次；`parseSupportedSecondsRange` 从它的文案里读出 `supported range: 4-15`，按**区域 + 模型 id**记在本次进程里，第二次同样的越界值**零请求、零冷却**直接报「时长必须在 4 到 15 秒之间」。读不出区间（例如拒的是宽高比）就什么都不记——不猜。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / **2443 条**通过（`tests/video-gen.spec.ts` 35→48、`tests/video-tool.spec.ts` 7→12；新增用例钉住「提交 400 之后下一次仍会真的发请求」与「学到区间后第二次不出进程」）。
+
+- **`size` 的描述让人以为只能出 1024 级方图，而实测上限是约 419 万像素**
+  - **起因**：5.10.0 把 `size` 描述从单个 `1024x1024` 例子改成方 / 竖 / 横三个例子，解决了
+    「只能出方图」那个错误先验；但三个例子全是 1024 级，模型据此认为「大图也就是这个量级」，
+    用户要桌面壁纸、竖屏壁纸时只会得到一张 1024 宽的照片。
+  - **2026-10-25 逐档实测（国内区 `hunyuan-image-alpha`）**：`2048x2048`（4.19 MP）、
+    `2048x1536`（3.15 MP）、`2048x1152`（2.36 MP）、`2560x1440`（3.69 MP）、
+    `2560x1600`（4.10 MP）**全部成功，输出宽高与请求完全一致**——不是把大图静默压回原生
+    尺寸再放大，画面里的刻度文字与纹理是独立线条。`2560x2560`（6.55 MP）、`3072x3072`
+    （9.44 MP）、`4096x4096`（16.8 MP）**全部被直接拒绝**，不会退回一个较小尺寸。
+  - **据此定上限**：约 **419 万总像素**，任意长宽比。这**推翻**了流传的判断「原生上限约
+    1536 长边」——那个数字来自官方 CLI `.describe()` 的三个例子与 bundled OpenAI SDK 类型
+    定义的取值范围，从来没有实测过；实测表明 2560 长边是真实可用的。
+  - **修法**：`src/image-tool.ts` 的 `size` 描述加入 `2048x2048` / `2048x1536` /
+    `2560x1440` / `2560x1600` 四个**实测通过**的档位、写明「约 419 万像素」上限、并点名
+    `2560x2560` / `3072x3072` / `4096x4096` 会被拒（防止模型往 4K 上撞）。
+  - **只写实测过的尺寸**：`1440x2560`（手机竖屏壁纸的常见答案）**没有单独跑过**，它与已通过
+    的 `2560x1440` 像素数相同、只转 90°，按像素阈值推断可用，但描述里不写它——描述只给实测
+    通过的宽高；`docs/IMAGE_GEN.md` 的「尺寸与比例」小节把 `1440x2560` 单列一行并标注
+    「未单独实测」。
+  - **验证**：`tests/image-gen.spec.ts` 新增 1 条（描述同时含 `2048x2048` / `2560x1440` /
+    `419` / `4096x4096`，防止以后有人把上限改回「只给三个 1024 例子」）；
+    `docs/IMAGE_GEN.md` 的「尺寸与比例」换成 11 行实测对照表 + 按用途选尺寸表；
+    README 中英各补一句。全量 `vitest run` 138 文件 / 2364 条通过。
+
+---
+
 ## 5.10.0 (2026-10-25)
 
 > 特性版本：`workbuddy_draw_image` 从「只在国内区注册、只能文生图」扩成「国内区与国际区都能用、文生图 + 改图（图生图）」，卡片「能力」栏新增该区媒体模型的只读清单。**请求路径、provider 路由、计费口径与凭据处理一律未变**：改图打的是官方 CLI `ImageService.editImage` 早就用的 `POST /v2/images/edits`，选模型仍然只看该区 `/v3/config` 的媒体标签。

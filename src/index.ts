@@ -57,6 +57,7 @@ import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context
 import type { WorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { MEDIA_MODEL_TTL_MS, registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
+import { registerWorkBuddyVideoTool } from './video-tool.ts'
 import type { WorkBuddyMediaModel } from './image-gen.ts'
 import {
   createCliBridgeRuntime,
@@ -359,6 +360,25 @@ export interface WorkBuddyRegionState {
    * upgrade — or a config whose value could not be read — must leave it off.
    */
   imageToolEnabled?: boolean
+  /**
+   * Same opt-IN shape as `imageToolEnabled`, but for the video-generation tool
+   * (`workbuddy_draw_video`). Absent means OFF, for the same reason: the model
+   * decides to spend, so an upgrade must never hand out a spending capability.
+   */
+  videoToolEnabled?: boolean
+  /**
+   * The video model the user pinned in the card, keyed by video tag
+   * (`text-to-video` / `image-to-video`), value is a model id from this
+   * region's own catalog.
+   *
+   * Per-REGION and per-TAG on purpose: the two modes can be served by different
+   * models (a catalog may carry a text-to-video-only row), and model ids do not
+   * cross regions (CN publishes `kling-video-v3` and `minimax-video-h3`,
+   * international only `kling-video-v3`). Absent or stale is NOT an error: the
+   * tool falls back to the first model of the group, because a preference the
+   * catalog no longer carries must not fail a generation the user asked for.
+   */
+  preferredVideoModels?: Record<string, string>
   /**
    * WHERE this region's credit readout sits (issue #62).
    *
@@ -668,6 +688,24 @@ const regionStateConfig = z.object({
    */
   imageToolEnabled: z.boolean().default(false).description('Let the model call workbuddy_draw_image on its own (opt-in; an image costs ~5.71 credits on the CN gateway and ~0.03 on the international one, and there is no per-call approval). Off by default, and off means no region registers the tool at all.'),
   /**
+   * Whether the model may call the video-generation tool (opt-IN, default off).
+   * Per-REGION like `imageToolEnabled`, gated the same way: the region must be
+   * switched on AND the user must opt in. CN wins when both qualify. A video
+   * costs real credits per generation and the task runs tens of seconds to
+   * minutes, so no per-call approval exists in the host — hence opt-in.
+   */
+  videoToolEnabled: z.boolean().default(false).description('Let the model call workbuddy_draw_video on its own (opt-in; a video is an async task that costs WorkBuddy credits and runs tens of seconds to minutes). Off by default, and off means no region registers the tool at all.'),
+  /**
+   * The video model pinned for one tag (`text-to-video` / `image-to-video`),
+   * as a model id from THIS region's catalog.
+   *
+   * Written by the card's per-mode picker. The tool reads it only when the call
+   * itself did not name a model, and falls back to the group's first model when
+   * the pinned id is no longer in this region's directory — see
+   * `preferredVideoModel` in `src/video-tool.ts`.
+   */
+  preferredVideoModels: z.dict(z.string()).default({}).description('Video model pinned per tag ("text-to-video"/"image-to-video"), as a model id from this region catalog. Used only when a tool call names no model.'),
+  /**
    * Per-model override of whether thinking `off` is offered, keyed by model id
    * (issue #34). An ABSENT key means "use the built-in rule" — the upstream's
    * `canDisableThinking` declaration minus the ids known to refuse `off` (see
@@ -941,6 +979,21 @@ export function imageToolRegionOf(config: Config): WorkBuddyRegion | undefined {
   for (const region of REGION_KEYS) {
     if (!regionEnabled(config, region)) continue
     if (regionStateOf(config, region).imageToolEnabled === true) return region
+  }
+  return undefined
+}
+
+/**
+ * Region that owns the video tool right now, or `undefined` when no region has
+ * it switched on. Mirrors `imageToolRegionOf` but reads `videoToolEnabled`
+ * (the video-generation opt-in). Both gates required, read live: region provider
+ * switch ON (`regionEnabled`, opt-OUT) and the user opted IN (`videoToolEnabled`,
+ * opt-IN). CN wins when both qualify (see `REGION_KEYS`).
+ */
+export function videoToolRegionOf(config: Config): WorkBuddyRegion | undefined {
+  for (const region of REGION_KEYS) {
+    if (!regionEnabled(config, region)) continue
+    if (regionStateOf(config, region).videoToolEnabled === true) return region
   }
   return undefined
 }
@@ -1571,6 +1624,9 @@ export function apply(ctx: Context, config: Config): void {
     // the tool is registered/unregistered HERE, on the same call that moves the
     // routes, or it would follow a stale answer.
     syncImageTool(value)
+    // The video tool is gated on the same region switch, for the same reason
+    // as the image tool: the switch is volatile, so it must follow HERE.
+    syncVideoTool(value)
     // The CLI route reads its settings the same way: `cliBridge` is volatile, so
     // turning it on arrives through this same call and the surfaces have to
     // follow here (they cannot re-apply).
@@ -1720,6 +1776,59 @@ export function apply(ctx: Context, config: Config): void {
       disposeImageTool?.()
       disposeImageTool = undefined
       imageTools = undefined
+    })
+  })
+
+  // 视频生成工具：架构同生图工具（跟随两个区开关、ctx.inject 等 tools 服务出现、
+  // 注册/卸载读活值），只是执行层是 submitVideo→pollVideoTask→downloadVideo 的
+  // 异步流程（见 video-tool.ts / docs/VIDEO_GEN.md）。选模型复用同一个媒体目录缓存
+  // 与 video 标签（text-to-video / image-to-video）。
+  let videoTools: ToolsServiceLike | undefined
+  let disposeVideoTool: (() => void) | undefined
+  const syncVideoTool = (value: Config): void => {
+    const wanted = videoToolRegionOf(value) !== undefined
+    if (wanted && disposeVideoTool === undefined && videoTools !== undefined) {
+      disposeVideoTool = registerWorkBuddyVideoTool(videoTools, {
+        resolveCredential: async () => {
+          const live = current()
+          for (const region of REGION_KEYS) {
+            if (!regionEnabled(live, region)) continue
+            if (regionStateOf(live, region).videoToolEnabled !== true) continue
+            try {
+              return await stacks[region].store.resolve()
+            } catch {
+              continue
+            }
+          }
+          return undefined
+        },
+        listMediaModels: (credential, signal) => client.fetchMediaModels(credential, signal),
+        submitVideo: (credential, request, signal) => client.submitVideo(credential, request, signal),
+        pollVideoTask: (credential, taskId, signal) => client.pollVideoTask(credential, taskId, signal),
+        // 卡片上按模式钉住的模型。读 CURRENT 配置而不是注册时的快照，和上面
+        // resolveCredential 读活值同一个理由：用户可能在两次调用之间改偏好。
+        // 区域由凭据自己的登录域决定，所以「国内区钉了 kling、国际区没钉」
+        // 这种组合能各按各的来。
+        preferredVideoModel: (credential, tag) =>
+          regionStateOf(current(), regionOf(credential.domain)).preferredVideoModels?.[tag],
+        downloadVideo: (credential, url, signal) => client.downloadVideo(credential, url, signal),
+        logger: ctx.logger,
+      })
+      return
+    }
+    if (!wanted && disposeVideoTool !== undefined) {
+      disposeVideoTool()
+      disposeVideoTool = undefined
+    }
+  }
+  ctx.inject(['tools'], (toolsCtx) => {
+    videoTools = (toolsCtx as unknown as { tools?: ToolsServiceLike }).tools
+    if (videoTools === undefined) return
+    syncVideoTool(current())
+    toolsCtx.effect(() => () => {
+      disposeVideoTool?.()
+      disposeVideoTool = undefined
+      videoTools = undefined
     })
   })
 
@@ -1965,6 +2074,15 @@ export function apply(ctx: Context, config: Config): void {
      * is NOT consent to let the model spend.
      */
     imageToolEnabled: region => regionStateOf(current(), region).imageToolEnabled === true,
+    /** Whether the model may call the video tool here. Same opt-IN read as above. */
+    videoToolEnabled: region => regionStateOf(current(), region).videoToolEnabled === true,
+    /**
+     * The video model pinned per tag in this region, for the card's per-mode
+     * picker. Read from the committed value like the switches above: the picker
+     * must render what the TOOL will actually use, not what the browser mirror
+     * happens to hold.
+     */
+    preferredVideoModels: region => regionStateOf(current(), region).preferredVideoModels ?? {},
     /**
      * Whether the optional CodeBuddy CLI route is mounted (`codebuddy_ask` tool
      * + `/codebuddy` command).

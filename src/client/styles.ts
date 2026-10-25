@@ -151,7 +151,7 @@ export const WORKBUDDY_CARD_CSS = `
    CONTRAST colour, so a ticked box painted itself as a heavy black pill — the
    loudest object in a section made of plain 13px text. */
 .dsm-workbuddy-pref input{flex:none;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#5686fe)}
-.dsm-workbuddy-pref-check,.dsm-workbuddy-image-tool-check,.dsm-workbuddy-cli-bridge-check,.dsm-workbuddy-upstream-check{inline-size:15px;block-size:15px;margin:3px 0 0}
+.dsm-workbuddy-pref-check,.dsm-workbuddy-image-tool-check,.dsm-workbuddy-video-tool-check,.dsm-workbuddy-cli-bridge-check,.dsm-workbuddy-upstream-check{inline-size:15px;block-size:15px;margin:3px 0 0}
 /* The upstream-identity switches are their own group, so they get a divider
    above them instead of relying on spacing alone: they change the request the
    whole plugin sends, not a per-region display choice, and reading them as the
@@ -192,6 +192,10 @@ export const WORKBUDDY_CARD_CSS = `
 .dsm-workbuddy-media-id{color:var(--dsw-alias-label-tertiary,#8b8f98);font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 .dsm-workbuddy-media-tags{display:inline-flex;flex-wrap:wrap;gap:4px}
 .dsm-workbuddy-media-tag{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:0 6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8b8f98)}
+/* The per-mode video-model picker. It reuses .dsm-workbuddy-media-row so the
+   tag chip and the select sit on one baseline, like a roster row does. */
+.dsm-workbuddy-video-model-select{font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,#b8bcc4);background:var(--dsw-alias-bg-l1,transparent);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:1px 6px;max-width:100%;min-width:0}
+.dsm-workbuddy-video-model-select:disabled{opacity:.6}
 .dsm-workbuddy-media-empty,.dsm-workbuddy-media-error{font-size:12px;line-height:17px}
 .dsm-workbuddy-media-empty{color:var(--dsw-alias-label-tertiary,#8b8f98)}
 .dsm-workbuddy-media-error{color:var(--dsw-alias-label-error,#e5675f)}

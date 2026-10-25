@@ -28,6 +28,9 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
 import { parseQueueAnswer } from './queue.ts'
@@ -44,6 +47,17 @@ import {
   type WorkBuddyImageOutcome,
   type WorkBuddyMediaModel,
 } from './image-gen.ts'
+import {
+  VIDEO_GENERATIONS_PATH,
+  VIDEO_TASKS_PATH,
+  WorkBuddyVideoError,
+  buildVideoBody,
+  parseVideoSubmission,
+  parseVideoTask,
+  describeVideoFailure,
+  type WorkBuddyVideoOutcome,
+  type WorkBuddyVideoSubmission,
+} from './video-gen.ts'
 import { offRefused } from './off-thinking.ts'
 import { attachPromos, parseWorkBuddyPromos } from './promo.ts'
 import type { WorkBuddyPromo } from './promo.ts'
@@ -536,6 +550,15 @@ const PROBE_TIMEOUT_MS = 10_000
  * 又不至于让一个卡死的连接占住工具槽位太久。
  */
 const IMAGE_TIMEOUT_MS = 180_000
+/** 视频提交/轮询的总超时：视频要生成几十秒到几分钟，远大于生图。 */
+const VIDEO_TIMEOUT_MS = 600_000
+/** 轮询之间的间隔（官方 CLI pollTask 用 5s）。 */
+const VIDEO_POLL_INTERVAL_MS = 5_000
+/** 单个轮询轮次的上限（与 VIDEO_TIMEOUT_MS 对应，防死循环）。 */
+const VIDEO_POLL_TIMEOUT_MS = 600_000
+/** 单条视频下载超时（官方 CLI 用 120s）。 */
+const VIDEO_DOWNLOAD_TIMEOUT_MS = 120_000
+
 
 /**
  * Insufficient-credit markers.
@@ -3722,6 +3745,185 @@ export class WorkBuddyUpstreamClient {
       )
     }
     return parseImageResponse(payload)
+  }
+
+  /**
+   * 发一次生视频请求（提交任务，拿 task id）。
+   *
+   * 端点与请求体照抄官方 CLI 的 `VideoService.submitTask`：`POST /v2/videos/generations`，
+   * 请求体由 `buildVideoBody` 拼（prompt / model / seconds / negative_prompt /
+   * watermark:true / 图生视频时的 image_url / extra_parameters）。响应取
+   * `data.id` 作为 task id 返回，真正的视频要再轮询 `/v2/videos/tasks` 才拿得到。
+   *
+   * 这是一次**花钱**的请求（与生图一样），所以失败分类交给 {@link describeVideoFailure}：
+   * 401/403 提示重新登录、404 提示该区没有视频路由、429 提示限流、其它透传 msg。
+   * HTTP 200 但信封 `code !== 0` 由 {@link parseVideoSubmission} 处理。
+   */
+  async submitVideo(
+    credential: WorkBuddyCredential,
+    request: {
+      readonly model: string
+      readonly prompt: string
+      readonly seconds: number
+      readonly negativePrompt?: string | undefined
+      readonly image?: string | undefined
+      readonly lastImage?: string | undefined
+      readonly resolution?: string | undefined
+      readonly aspectRatio?: string | undefined
+      readonly enableAudio?: boolean | undefined
+    },
+    signal?: AbortSignal,
+  ): Promise<WorkBuddyVideoSubmission> {
+    const isImageToVideo = request.image !== undefined || request.lastImage !== undefined
+    const body = buildVideoBody(
+      {
+        model: request.model,
+        prompt: request.prompt,
+        seconds: request.seconds,
+        negativePrompt: request.negativePrompt,
+        image: request.image,
+        lastImage: request.lastImage,
+        resolution: request.resolution,
+        aspectRatio: request.aspectRatio,
+        enableAudio: request.enableAudio,
+      },
+      isImageToVideo,
+    )
+    const response = await fetch(`${chatBase(credential)}${VIDEO_GENERATIONS_PATH}`, {
+      method: 'POST',
+      headers: imageHeaders(credential, this.identity),
+      body: JSON.stringify(body),
+      signal: signal ?? AbortSignal.timeout(VIDEO_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    if (!response.ok) throw describeVideoFailure(response.status, text, 'submit')
+    let payload: unknown
+    try {
+      payload = JSON.parse(text) as unknown
+    } catch {
+      throw new WorkBuddyVideoError(
+        `workbuddy video: 上游返回的不是 JSON（HTTP ${response.status}）: ${text.slice(0, 200)}`,
+        'UPSTREAM',
+      )
+    }
+    return parseVideoSubmission(payload)
+  }
+
+  /**
+   * 轮询一个生视频任务直到完成或失败。
+   *
+   * `POST /v2/videos/tasks`（请求体 `{ task_id }`），官方 CLI 的 `VideoService.pollTask`
+   * 就是每 5 秒查一次、直到 `status === 'completed' | 'failed'`。这里照搬同样的
+   * 轮询节奏与整体超时（默认 ~600s，远大于生图的 180s，因为视频要生成几十秒到几分钟）。
+   *
+   * 注意：轮询**已经花过钱**（提交那次就扣了），所以轮询期间的网络抖动、超时要
+   * 当成真实失败——调用方据此进冷却。只有"提交那一次"因为参数写错 / 没登录而没
+   * 发出去，才不进冷却（同生图工具的设计）。
+   */
+  async pollVideoTask(
+    credential: WorkBuddyCredential,
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkBuddyVideoOutcome> {
+    const startedAt = Date.now()
+    const ownSignal = signal ?? AbortSignal.timeout(VIDEO_TIMEOUT_MS)
+    // 用 AbortSignal.any 让调用方的 signal 也能中断轮询。
+    const combined = signal === undefined
+      ? ownSignal
+      : AbortSignal.any([signal, AbortSignal.timeout(VIDEO_TIMEOUT_MS)])
+    for (;;) {
+      if (combined.aborted) {
+        throw new WorkBuddyVideoError('workbuddy video: 轮询被取消或超时。', 'POLL_TIMEOUT')
+      }
+      if (Date.now() - startedAt > VIDEO_POLL_TIMEOUT_MS) {
+        throw new WorkBuddyVideoError(
+          `workbuddy video: 轮询超过 ${VIDEO_POLL_TIMEOUT_MS / 1000} 秒仍未完成（task ${taskId}）。`,
+          'POLL_TIMEOUT',
+        )
+      }
+      let payload: unknown
+      try {
+        const response = await fetch(`${chatBase(credential)}${VIDEO_TASKS_PATH}`, {
+          method: 'POST',
+          headers: imageHeaders(credential, this.identity),
+          body: JSON.stringify({ task_id: taskId }),
+          signal: combined,
+        })
+        const text = await response.text()
+        if (!response.ok) throw describeVideoFailure(response.status, text, 'poll')
+        try {
+          payload = JSON.parse(text) as unknown
+        } catch {
+          throw new WorkBuddyVideoError(
+            `workbuddy video: 轮询响应不是 JSON（HTTP ${response.status}）: ${text.slice(0, 200)}`,
+            'UPSTREAM',
+          )
+        }
+      } catch (error: unknown) {
+        // 轮询中的瞬时错误也算"已经花钱"的真实失败（任务已经提交）。
+        if (error instanceof WorkBuddyVideoError) throw error
+        throw new WorkBuddyVideoError(
+          `workbuddy video: 轮询请求失败：${error instanceof Error ? error.message : String(error)}`,
+          'UPSTREAM',
+        )
+      }
+      const result = parseVideoTask(payload)
+      if (result.status === 'completed') {
+        if (result.videos.length === 0) {
+          throw new WorkBuddyVideoError(
+            'workbuddy video: 任务完成但没有返回任何视频 URL。',
+            'EMPTY_RESULT',
+          )
+        }
+        return {
+          videos: result.videos,
+          ...(result.credit !== undefined ? { credit: result.credit } : {}),
+        }
+      }
+      if (result.status === 'failed') {
+        throw new WorkBuddyVideoError(
+          `workbuddy video: 生视频任务失败（task ${taskId}）。`,
+          'TASK_FAILED',
+        )
+      }
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, VIDEO_POLL_INTERVAL_MS)
+        const onAbort = (): void => { clearTimeout(timer); reject(new WorkBuddyVideoError('workbuddy video: 轮询被取消。', 'POLL_TIMEOUT')) }
+        combined.addEventListener('abort', onAbort, { once: true })
+      })
+    }
+  }
+
+  /**
+   * 下载一个视频 URL 到本地临时目录，返回绝对路径。
+   *
+   * 官方 CLI 的 `VideoService.downloadVideos` 把每条 `data[].url` 写成本地 `.mp4`
+   * （产物是 COS 签名 URL，和生图同源，但不是图片 MIME）。这里每次一条，工具层
+   * 负责把多条结果各自落盘并回 `file://` 给模型与用户。
+   */
+  async downloadVideo(
+    credential: WorkBuddyCredential,
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    void credential
+    const response = await fetch(url, {
+      signal: signal ?? AbortSignal.timeout(VIDEO_DOWNLOAD_TIMEOUT_MS),
+    })
+    if (!response.ok) {
+      throw new WorkBuddyVideoError(
+        `workbuddy video: 下载视频失败（HTTP ${response.status}）: ${url}`,
+        'UPSTREAM',
+      )
+    }
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const dir = join(tmpdir(), 'workbuddy-video-gen')
+    await mkdir(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const safeUrl = url.replace(/[^A-Za-z0-9._-]+/g, '_').slice(-32)
+    const path = join(dir, `video-${stamp}-${safeUrl}.mp4`)
+    await writeFile(path, buffer)
+    return path
   }
 
   /** Query today's check-in status without changing account state. */

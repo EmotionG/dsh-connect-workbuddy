@@ -420,6 +420,31 @@ describe('createImageTool', () => {
     expect(tool.description).toContain('credit')
   })
 
+  it('size 的描述给出多种比例的例子，模型才不会以为只能出方图', () => {
+    const tool = createImageTool(deps())
+    const size = (tool.parameters['properties'] as Record<string, Record<string, unknown>>)['size']!
+    const description = size['description'] as string
+    // 只给一个方图例子时，模型读到「形如 1024x1024」就会把比例固定成 1:1；
+    // 官方 CLI 的 ImageGen 同样用三个例子覆盖方 / 竖 / 横三种比例。
+    expect(description).toContain('1024x1024')
+    expect(description).toContain('1024x1536')
+    expect(description).toContain('1536x1024')
+    expect(description).toContain(DEFAULT_IMAGE_SIZE)
+    expect(description).toContain('比例')
+  })
+
+  it('size 的描述写出实测的大图档位与 419 万像素上限', () => {
+    const tool = createImageTool(deps())
+    const size = (tool.parameters['properties'] as Record<string, Record<string, unknown>>)['size']!
+    const description = size['description'] as string
+    // 2026-10-25 逐档实测：2048/2560 档都能出真实像素，2560x2560 起被直接拒绝。
+    // 不写这两件事会各错一半——低估能力（只敢出 1024）或高估（往 4K 撞）。
+    expect(description).toContain('2048x2048')
+    expect(description).toContain('2560x1440')
+    expect(description).toContain('419')
+    expect(description).toContain('4096x4096')
+  })
+
   it('形状满足宿主 Tools.register 的硬性要求', () => {
     const tool = createImageTool(deps())
     expect(tool.name).toBe(WORKBUDDY_IMAGE_TOOL_NAME)
