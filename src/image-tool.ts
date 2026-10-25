@@ -168,6 +168,23 @@ function inputImageError(message: string): WorkBuddyImageError {
 }
 
 const INLINE_BASE64_LABEL = '（内联 base64）'
+const INLINE_DATA_URL_LABEL = '（内联 data URL）'
+
+/**
+ * 体积与空文件闸门——四种输入形态都从这里过，所以「空文件」和「超过 8 MB」的
+ * 文案只有一份。
+ *
+ * `byteLength` 必须是**解码后**的字节数：base64 比原始字节长约 4/3，拿字符串长度
+ * 比上限度会把一个 6 MB 的图误判成超限（并在错误信息里报出一个虚高的 MB 数）。
+ */
+function assertInputImageBytes(byteLength: number, source: string): void {
+  if (byteLength === 0) throw inputImageError(`workbuddy image: 输入图是空文件：${source}`)
+  if (byteLength > MAX_INPUT_IMAGE_BYTES) {
+    const limit = MAX_INPUT_IMAGE_BYTES / 1024 / 1024
+    const actual = (byteLength / 1024 / 1024).toFixed(1)
+    throw inputImageError(`workbuddy image: 输入图 ${actual} MB，超过 ${limit} MB 上限：${source}`)
+  }
+}
 
 /**
  * 把任意形态的输入图规整成上游唯一接受的形态：`data:<mime>;base64,<b64>`。
@@ -179,11 +196,17 @@ const INLINE_BASE64_LABEL = '（内联 base64）'
 async function resolveImageInput(value: string, signal?: AbortSignal): Promise<string> {
   const text = value.trim()
   if (text.startsWith('data:')) {
-    if (parseImageDataUrl(text) === undefined) {
+    const parsed = parseImageDataUrl(text)
+    if (parsed === undefined) {
       throw inputImageError(
         'workbuddy image: image 看起来是 data URL，但格式不对（需要 data:image/*;base64,...）。',
       )
     }
+    // 这一支以前直接 return，于是绕过了 encodeInputImage 里的空文件与 8 MB 闸门：
+    // 一个超限的 data URL 会原样发给上游，失败后还会按「请求已发出」进 30 秒冷却
+    // ——正是「输入图的毛病都该在请求发出前报 INVALID_ARGS」要避免的那种情形。
+    // 体积要按**解码后**的字节数算（base64 比原始字节长约 4/3），不能拿字符串长度比。
+    assertInputImageBytes(Buffer.from(parsed.base64, 'base64').byteLength, INLINE_DATA_URL_LABEL)
     return text
   }
   if (/^https?:\/\//i.test(text)) {
@@ -227,12 +250,7 @@ async function resolveImageInput(value: string, signal?: AbortSignal): Promise<s
 
 /** 校验体积、定出 mime，再把字节编成 data URL。 */
 function encodeInputImage(bytes: Uint8Array, contentType: string | undefined, source: string): string {
-  if (bytes.byteLength === 0) throw inputImageError(`workbuddy image: 输入图是空文件：${source}`)
-  if (bytes.byteLength > MAX_INPUT_IMAGE_BYTES) {
-    const limit = MAX_INPUT_IMAGE_BYTES / 1024 / 1024
-    const actual = (bytes.byteLength / 1024 / 1024).toFixed(1)
-    throw inputImageError(`workbuddy image: 输入图 ${actual} MB，超过 ${limit} MB 上限：${source}`)
-  }
+  assertInputImageBytes(bytes.byteLength, source)
   const declared = contentType?.split(';')[0]?.trim().toLowerCase()
   const mime = declared !== undefined && declared.startsWith('image/')
     ? declared

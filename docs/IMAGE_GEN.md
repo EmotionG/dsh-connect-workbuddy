@@ -73,6 +73,10 @@
 | 裸 base64 | `iVBORw0KGgo…` | 长度 ≥ 100、无路径分隔符、字符集合法才认，否则当成路径 |
 
 **上限 8 MB**（`MAX_INPUT_IMAGE_BYTES`），超了报 `INVALID_ARGS` 并在消息里给出实际大小。
+体积按**解码后的字节数**算，不按 base64 字符串长度——base64 比原始字节长约 4/3，
+拿字符串长度比会把合法的 6 MB 图误判成超限。四条输入路径（`http(s)` / 裸 base64 /
+本地路径 / data URL）都过同一个 `assertInputImageBytes()` 闸门，所以「空文件」与
+「超限」的文案只有一份、不可能各自漂移。
 **不做缩放、裁剪、格式转换**：用户给什么就传什么，免得悄悄改了输入图。mime 的判定顺序
 是「HTTP `Content-Type` 的 `image/*`」→「按扩展名」→「按魔数嗅探」（PNG / JPEG /
 GIF / WEBP / BMP，兜底 `image/png`）。
@@ -82,6 +86,11 @@ GIF / WEBP / BMP，兜底 `image/png`）。
 读不到文件、下载失败、格式不对、体积超限——这些**请求一次都没发出去**，一分钱没花，
 所以统一走 `INVALID_ARGS`，不触发 30 秒冷却（冷却只看「请求是否真的发出去了」）。
 紧接着再调一次仍然能立刻执行。
+
+> 这条闸门曾经漏掉 data URL 一条路径：`resolveImageInput` 的 `data:` 分支校验完格式就
+> `return`，超限的 data URL 会被原样发到上游，再按「已计费失败」吃一次冷却。四条的
+> 检查合并到同一个 `assertInputImageBytes()` 之后不再可能各自漂移，回归用例见
+> `tests/image-gen.spec.ts` 的「超限的 data URL → INVALID_ARGS」。
 
 ### 每组只有一个模型，所以卡片只做只读清单
 

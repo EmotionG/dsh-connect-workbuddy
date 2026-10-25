@@ -558,6 +558,52 @@ describe('createImageTool', () => {
       expect(editImage).not.toHaveBeenCalled()
     })
 
+    it('超限的 data URL → INVALID_ARGS，且不发请求、不进冷却', async () => {
+      // The `data:` branch used to return before the size gate, so an oversized
+      // data URL went upstream verbatim — and then cooled the tool for 30s as a
+      // BILLED failure. Every other input form was already checked, which is
+      // exactly why the gap survived review.
+      const editImage = vi.fn()
+      const tool = createImageTool(deps({ editImage }))
+      // 12 MB of base64 chars decodes to 9 MB, over MAX_INPUT_IMAGE_BYTES (8 MB).
+      const oversized = `data:image/png;base64,${'A'.repeat(12 * 1024 * 1024)}`
+      await expect(tool.execute({ prompt: '改', image: oversized }, {}))
+        .rejects.toMatchObject({ code: 'INVALID_ARGS' })
+      expect(editImage).not.toHaveBeenCalled()
+      // Second call must run (not COOLDOWN): nothing was ever sent, so there is
+      // nothing to cool down for.
+      const value = await tool.execute({ prompt: '猫' }, {})
+      expect(value['url']).toBe('https://cos.example/a.png')
+    })
+
+    it('data URL 的上限按解码后的字节数算，不按 base64 字符串长度', async () => {
+      // base64 is ~4/3 the size of the original bytes. Comparing the STRING
+      // length against the byte cap would reject a legitimate 6 MB image (8 MB
+      // of base64 chars) and report a fictional MB figure in the message.
+      const editImage = vi.fn(async () => ({ url: 'https://cos.example/edited.png', credit: 0.03 }))
+      const tool = createImageTool(deps({
+        listMediaModels: async () => [
+          { id: 'hunyuan-image-alpha', name: 'A', tags: [IMAGE_TAG_TEXT_TO_IMAGE] },
+          { id: 'hunyuan-image-alpha-edit', name: 'B', tags: [IMAGE_TAG_IMAGE_TO_IMAGE] },
+        ],
+        editImage,
+      }))
+      const sixMb = `data:image/png;base64,${'A'.repeat(8 * 1024 * 1024)}`
+      await expect(tool.execute({ prompt: '改', image: sixMb }, {}))
+        .resolves.toMatchObject({ mode: 'edit' })
+      expect(editImage).toHaveBeenCalledTimes(1)
+    })
+
+    it('解出来是空内容的 data URL → INVALID_ARGS，且不发请求', async () => {
+      // `====` matches the data-URL shape but decodes to zero bytes: the empty
+      // file check has to run on the DATA branch too, not only on readFile.
+      const editImage = vi.fn()
+      const tool = createImageTool(deps({ editImage }))
+      await expect(tool.execute({ prompt: '改', image: 'data:image/png;base64,====' }, {}))
+        .rejects.toMatchObject({ code: 'INVALID_ARGS' })
+      expect(editImage).not.toHaveBeenCalled()
+    })
+
     it('render 里把改图标出来，不只画一张图', () => {
       const tool = createImageTool(deps())
       const blocks = tool.output.render({}, {
