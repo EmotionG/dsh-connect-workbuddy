@@ -35,6 +35,7 @@ import { resolveCredentialRecovery } from './credential-recovery.ts'
 // bodies, never at module top level, so the index<->web-status cycle is safe.
 import { Config, unwrapVolatileDeep } from './index.ts'
 import type { WorkBuddyRecoveryCandidate } from './credential-recovery.ts'
+import type { WorkBuddyMediaModel } from './image-gen.ts'
 import type { WorkBuddyCredits, WorkBuddyUpstreamClient } from './upstream.ts'
 import type { WorkBuddyBenefitView } from './benefits.ts'
 import { WORKBUDDY_BENEFIT_TITLES } from './benefits.ts'
@@ -55,6 +56,7 @@ import {
   poolActionOf,
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
+  WORKBUDDY_MEDIA_MODELS_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_OAUTH_PATH,
   WORKBUDDY_BENEFIT_CLAIM_PATH,
@@ -88,6 +90,7 @@ import type {
 export {
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
+  WORKBUDDY_MEDIA_MODELS_PATH,
   WORKBUDDY_MODELS_REFRESH_PATH,
   WORKBUDDY_OAUTH_PATH,
   WORKBUDDY_POOL_PATH,
@@ -134,6 +137,19 @@ export interface WorkBuddyStatusRouteOptions {
    * renders no segment at all rather than a made-up "0 新模型".
    */
   rosterSeen?(region: WorkBuddyRegion): Promise<RosterSeenReadout>
+  /**
+   * Read the region's MEDIA models (image + video) for the card's read-only
+   * roster block.
+   *
+   * Optional: a Host that mounts these routes without the upstream client
+   * simply answers 503, and the card hides the block. Returns the same rows the
+   * image tool consumes, so the card's list and the tool's model validation
+   * cannot disagree about what exists in a region.
+   */
+  mediaModels?(
+    region: WorkBuddyRegion,
+    options?: { readonly signal?: AbortSignal; readonly refresh?: boolean },
+  ): Promise<readonly WorkBuddyMediaModel[]>
   /**
    * Whether the requested region's provider is currently offered to DSH. The
    * card renders this as the tab's on/off checkbox, so the switch reflects the
@@ -1568,6 +1584,34 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
         }
       },
     })
+    const disposeMediaModels = ctx.webServer.register({
+      kind: 'exact',
+      path: WORKBUDDY_MEDIA_MODELS_PATH,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!requireLoopback(req, res)) return
+        if (deps.mediaModels === undefined) return json(res, 503, { error: 'media model list unavailable' })
+        const region = requestRegion(req, res)
+        if (region === undefined) return
+        try {
+          // Read-only and free, but still behind POST + loopback like every
+          // other route: it takes a region and answers with what that account's
+          // product configuration publishes, which is account-scoped data.
+          // An empty list is a legitimate answer (a gateway that publishes no
+          // media model), not an error — the card renders it as such.
+          // `refresh=1` bypasses the Host's 5-minute cache. The card's list is
+          // read-only, but a user who just enabled an image model upstream must
+          // not have to wait out a TTL to see it.
+          const refresh = new URL(req.url ?? '/', 'http://localhost').searchParams.get('refresh') === '1'
+          const models = await deps.mediaModels(region, { refresh })
+          json(res, 200, {
+            models: models.map(model => ({ id: model.id, name: model.name, tags: [...model.tags] })),
+          })
+        } catch (error: unknown) {
+          json(res, 500, { error: safeMessage(error) })
+        }
+      },
+    })
     const disposeProbe = ctx.webServer.register({
       kind: 'exact',
       path: WORKBUDDY_PROBE_PATH,
@@ -2134,6 +2178,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
       // meaning "no such route".
       disposeBenefitClaim()
       disposeRefresh()
+      disposeMediaModels()
       disposeCheckin()
       disposeAccounts()
       disposeUsage()

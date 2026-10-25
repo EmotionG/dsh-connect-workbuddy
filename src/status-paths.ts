@@ -57,6 +57,18 @@ export const WORKBUDDY_PLAN_URL = 'https://www.workbuddy.cn/profile/plans-usage'
 export const WORKBUDDY_BENEFIT_CLAIM_PATH = '/plugins/dsh-connect-workbuddy/benefit/claim'
 /** Plugin-owned live model refresh endpoint. */
 export const WORKBUDDY_MODELS_REFRESH_PATH = '/plugins/dsh-connect-workbuddy/models/refresh'
+/**
+ * Plugin-owned MEDIA model list endpoint (image + video, read from the region's
+ * `/v3/config`).
+ *
+ * Separate from {@link WORKBUDDY_MODELS_REFRESH_PATH} because it answers a
+ * different question from a different document projection: the refresh route
+ * returns the CHAT roster, from which `selectCliModels` drops every media
+ * entry, while this one keeps the `text-to-image`/`image-to-image`/
+ * `text-to-video`/`image-to-video` rows the card lists. Read-only and free —
+ * it is the same GET the image tool already performs.
+ */
+export const WORKBUDDY_MEDIA_MODELS_PATH = '/plugins/dsh-connect-workbuddy/media-models'
 /** Plugin-owned local account rescan endpoint. */
 export const WORKBUDDY_ACCOUNTS_REFRESH_PATH = '/plugins/dsh-connect-workbuddy/accounts/refresh'
 /** Plugin-owned daily check-in action endpoint. */
@@ -822,6 +834,21 @@ export interface WorkBuddyWebRecovery {
    * "nothing could be verified".
    */
   reloginRequired: boolean
+}
+
+/**
+ * One MEDIA model row (image / video) as the card's read-only roster shows it.
+ *
+ * Deliberately its own shape, not a subset of {@link WorkBuddyWebModel}: a
+ * media entry carries `id`/`name`/`tags` and NOTHING else upstream (no price,
+ * no context window), and it is never editable — the card has no media
+ * checkbox, because each tag group holds exactly one model today and a
+ * one-option picker is a fake choice.
+ */
+export interface WorkBuddyWebMediaModel {
+  id: string
+  name: string
+  tags: readonly string[]
 }
 
 /** Editable WorkBuddy model row rendered by the plugin-owned settings card. */

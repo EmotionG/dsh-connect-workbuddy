@@ -32,9 +32,11 @@ import type { WorkBuddyCredential } from './auth.ts'
 import { isRouterModelId } from './native-modality.ts'
 import { parseQueueAnswer } from './queue.ts'
 import {
+  IMAGE_EDITS_PATH,
   IMAGE_GENERATIONS_PATH,
-  IMAGE_TAG_TEXT_TO_IMAGE,
+  MEDIA_TAGS,
   WorkBuddyImageError,
+  buildEditBody,
   buildImageBody,
   describeImageFailure,
   parseImageResponse,
@@ -3571,12 +3573,22 @@ export class WorkBuddyUpstreamClient {
   }
 
   /**
-   * 读该账号所属区的产品配置，挑出带 `text-to-image` 标签的媒体模型。
+   * 读该账号所属区的产品配置，返回**全部**媒体模型（图 + 视频，按 tag 区分）。
    *
    * 走的是和 {@link fetchModels} 同一条 `/v3/config`（国内区与国际区都答），
    * 区别只在这里保留 `data.models` 的媒体条目、而不是投影成 CLI 聊天目录。
-   * 国内区实测 62 条模型里只有 `hunyuan-image-alpha` 带 `text-to-image`；
-   * 国际区一条都没有 —— 所以本方法对国际区返回空数组，而不是编一个模型出来。
+   * 两区实测（2026-10-25，同日各跑一次只读探针）：
+   *   - 国内区 61 条模型 / 17 条带 tag：`hunyuan-image-alpha`（`text-to-image`）、
+   *     `hunyuan-image-alpha-edit`（`image-to-image`）、`kling-video-v3` 与
+   *     `minimax-video-h3`（`text-to-video` + `image-to-video`）。
+   *   - 国际区 29 条 / 7 条带 tag：`hy-image-3.5`（`text-to-image` +
+   *     `image-to-image`）、`kling-video-v3`（两种视频 tag）。
+   * 两边目录完全不重叠，所以「国际区一条都没有」是 2026-10-21 的旧观测，
+   * 已经过期 —— 目录真的没标时才返回空数组（而不是编一个模型出来）。
+   *
+   * 返回的是**未分组**的全集：谁要 `text-to-image` 就自己按 tag 过滤
+   * （{@link selectMediaModels} / `pickMediaModel`）。生图工具、改图路径、卡片清单
+   * 因此共用这一次读取，而不是各读一遍目录。
    *
    * 这是一次 EXTRA 读取，不是「复用目录那一次」：`fetchModels` 的结果被投影成
    * 聊天目录就丢掉了媒体标签，所以这里必须再读一遍同一份文档。它是只读 GET、
@@ -3604,7 +3616,7 @@ export class WorkBuddyUpstreamClient {
       const data = typeof envelope.data === 'object' && envelope.data !== null
         ? envelope.data as Record<string, unknown>
         : {}
-      return selectMediaModels(data['models'], IMAGE_TAG_TEXT_TO_IMAGE)
+      return selectMediaModels(data['models'], MEDIA_TAGS)
     }
     try {
       return await readMedia(GLOBAL_CONFIG_PATH)
@@ -3613,7 +3625,9 @@ export class WorkBuddyUpstreamClient {
       // so it usually answers an EMPTY list — which is the honest answer ("this
       // gateway publishes no image model") rather than an exception the tool
       // would report as a broken feature. A transport failure on both paths still
-      // propagates.
+      // propagates. The global gateway DOES publish one (measured 2026-10-25,
+      // `hy-image-3.5`), so this fallback is a CN-only compatibility path, not a
+      // statement about what media models exist where.
       if (regionOf(credential.domain) === 'global') throw error
       this.onFallback?.(
         `CN media catalog ${GLOBAL_CONFIG_PATH} failed; falling back to ${MODELS_CATALOG_PATH}: `
@@ -3627,7 +3641,9 @@ export class WorkBuddyUpstreamClient {
    * 发一次文生图请求。
    *
    * 端点、请求体、响应解析全部照抄官方 CLI 的 ImageService（见 `image-gen.ts`
-   * 的模块注释）。实测单张 5.71 credits，产物是 24 小时有效的 COS 签名 URL。
+   * 的模块注释）。产物是 24 小时有效的 COS 签名 URL；实扣积分随区与模型不同
+   * （国内区 `hunyuan-image-alpha` 5.71、国际区 `hy-image-3.5` 0.03），
+   * 只在响应的 `data.usage.credit` 里给出，调用方按实际值回报。
    *
    * 失败分两层：HTTP 非 2xx 交给 {@link describeImageFailure} 翻成带 code 的
    * 错误（401/403 提示重新登录、404 提示该区没有生图路由、429 提示限流）；
@@ -3642,6 +3658,56 @@ export class WorkBuddyUpstreamClient {
       method: 'POST',
       headers: imageHeaders(credential, this.identity),
       body: JSON.stringify(buildImageBody(request)),
+      signal: signal ?? AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    if (!response.ok) throw describeImageFailure(response.status, text)
+    let payload: unknown
+    try {
+      payload = JSON.parse(text) as unknown
+    } catch {
+      throw new WorkBuddyImageError(
+        `workbuddy image: 上游返回的不是 JSON（HTTP ${response.status}）: ${text.slice(0, 200)}`,
+        'UPSTREAM',
+      )
+    }
+    return parseImageResponse(payload)
+  }
+
+  /**
+   * 发一次改图请求（`image-to-image`）。
+   *
+   * 端点换成官方 CLI `ImageService.editImage` 用的 `/v2/images/edits`，请求体是
+   * 生图那一套 + `image`（**必须是 data URL 字符串数组**）+ 可选 `input_fidelity`。
+   * 2026-10-25 国际区实测：`hy-image-3.5` + 一张 712×962 的截图 → 200、code 0、
+   * 一张 COS 签名 URL、`credit 0.03`。
+   *
+   * `image` 的形态由调用方（工具层）负责规整成 data URL——这一层只发请求、
+   * 不碰文件系统，和 {@link generateImage} 的分工保持一致。
+   */
+  async editImage(
+    credential: WorkBuddyCredential,
+    request: {
+      readonly model: string
+      readonly prompt: string
+      readonly size?: string
+      readonly image: readonly string[]
+      readonly inputFidelity?: string
+    },
+    signal?: AbortSignal,
+  ): Promise<WorkBuddyImageOutcome> {
+    // 空的 image 数组在上游是 400，但让它在本地就失败更好：这一定是调用方的
+    // 拼接错误，不是一个可以重试的上游问题。
+    if (request.image.length === 0) {
+      throw new WorkBuddyImageError(
+        'workbuddy image: 改图请求缺少输入图（image 数组为空）。',
+        'INVALID_ARGS',
+      )
+    }
+    const response = await fetch(`${chatBase(credential)}${IMAGE_EDITS_PATH}`, {
+      method: 'POST',
+      headers: imageHeaders(credential),
+      body: JSON.stringify(buildEditBody(request)),
       signal: signal ?? AbortSignal.timeout(IMAGE_TIMEOUT_MS),
     })
     const text = await response.text()

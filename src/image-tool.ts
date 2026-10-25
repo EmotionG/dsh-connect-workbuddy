@@ -1,5 +1,6 @@
 /**
- * `workbuddy_draw_image`：把 WorkBuddy 国内区的文生图能力暴露成一个 DSH agent 工具。
+ * `workbuddy_draw_image`：把 WorkBuddy 的文生图能力（国内区与国际区各自的
+ * `text-to-image` 模型）暴露成一个 DSH agent 工具。
  *
  * 为什么手写 ToolDefinition 而不 import `@deepseek-ai/dsh-tools` 的 `defineTool`：
  * 宿主 `Tools.register` 只校验两件事——`output.render` 是函数、`output.schema` 是
@@ -14,15 +15,23 @@
  * @module dsh-connect-workbuddy/image-tool
  */
 
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { WorkBuddyCredential } from './auth.ts'
 import {
   DEFAULT_IMAGE_SIZE,
+  IMAGE_TAG_IMAGE_TO_IMAGE,
+  IMAGE_TAG_TEXT_TO_IMAGE,
+  MAX_INPUT_IMAGE_BYTES,
   WorkBuddyImageError,
-  pickImageModel,
+  imageDataUrl,
+  imageMimeForPath,
+  isBareBase64Image,
+  parseImageDataUrl,
+  pickMediaModel,
+  sniffImageMime,
   type WorkBuddyImageOutcome,
   type WorkBuddyMediaModel,
 } from './image-gen.ts'
@@ -33,7 +42,9 @@ export const WORKBUDDY_IMAGE_TOOL_NAME = 'workbuddy_draw_image'
 /** 工具单次执行的上限。实测一张图 17–39 秒，留足余量。 */
 const IMAGE_TOOL_TIMEOUT_MS = 180_000
 /** 媒体模型目录的缓存时长：目录变化很慢，不必每张图都重新读一遍。 */
-const MEDIA_MODEL_TTL_MS = 5 * 60_000
+export const MEDIA_MODEL_TTL_MS = 5 * 60_000
+/** 下载远程输入图的上限（只覆盖 http(s) 那一次 GET，不含生图本身）。 */
+const IMAGE_INPUT_TIMEOUT_MS = 30_000
 /** 失败后的冷却：生图按张扣积分，连续重试会在几秒内烧掉几十积分。 */
 const FAILURE_COOLDOWN_MS = 30_000
 
@@ -68,22 +79,31 @@ export interface ImageToolExec {
 
 /** 工具运行所需的外部能力，全部由 `src/index.ts` 注入，便于单测替换。 */
 export interface ImageToolDeps {
-  /** 解析国内区凭据；未登录返回 undefined（不要抛异常）。 */
+  /** 解析生图所用区的凭据；该区未登录/未授权则返回 undefined（不要抛异常）。 */
   readonly resolveCredential: () => Promise<WorkBuddyCredential | undefined>
-  /** 读该凭据所属区的产品配置，返回带 text-to-image 标签的媒体模型。 */
+  /** 读该凭据所属区的产品配置，返回该区**全部**媒体模型（调用方按 tag 分组）。 */
   readonly listMediaModels: (
     credential: WorkBuddyCredential,
     signal?: AbortSignal,
   ) => Promise<readonly WorkBuddyMediaModel[]>
-  /** 真正发一次生图请求。 */
+  /** 真正发一次文生图请求。 */
   readonly generateImage: (
     credential: WorkBuddyCredential,
     request: { readonly model: string; readonly prompt: string; readonly size: string },
     signal?: AbortSignal,
   ) => Promise<WorkBuddyImageOutcome>
+  /** 真正发一次改图请求（输入图已是 data URL）。 */
+  readonly editImage: (
+    credential: WorkBuddyCredential,
+    request: {
+      readonly model: string
+      readonly prompt: string
+      readonly size: string
+      readonly image: readonly string[]
+    },
+    signal?: AbortSignal,
+  ) => Promise<WorkBuddyImageOutcome>
   readonly logger: { warn(message: string): void }
-  /** 区域名，只用于报错文案（默认「国内区」）。 */
-  readonly regionLabel?: string
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -140,13 +160,92 @@ async function writeTempImage(b64: string, model: string): Promise<string> {
 }
 
 /**
+ * 输入图的一切毛病都发生在「请求还没发出去」之前，所以统一用 INVALID_ARGS：
+ * 不进冷却、不花积分，错误信息直接说清是哪个环节。
+ */
+function inputImageError(message: string): WorkBuddyImageError {
+  return new WorkBuddyImageError(message, 'INVALID_ARGS')
+}
+
+const INLINE_BASE64_LABEL = '（内联 base64）'
+
+/**
+ * 把任意形态的输入图规整成上游唯一接受的形态：`data:<mime>;base64,<b64>`。
+ *
+ * 官方 CLI 的 `processImageInput` 收 data URL、http(s)、裸 base64、本地路径四
+ * 种；这里只是把前三种归一，**不做**缩放、裁剪、格式转换——用户给什么就传什么，
+ * 免得悄悄改了输入图。
+ */
+async function resolveImageInput(value: string, signal?: AbortSignal): Promise<string> {
+  const text = value.trim()
+  if (text.startsWith('data:')) {
+    if (parseImageDataUrl(text) === undefined) {
+      throw inputImageError(
+        'workbuddy image: image 看起来是 data URL，但格式不对（需要 data:image/*;base64,...）。',
+      )
+    }
+    return text
+  }
+  if (/^https?:\/\//i.test(text)) {
+    let response: Response
+    try {
+      response = await fetch(text, { signal: signal ?? AbortSignal.timeout(IMAGE_INPUT_TIMEOUT_MS) })
+    } catch (error: unknown) {
+      throw inputImageError(
+        `workbuddy image: 下载输入图失败（${text}）：`
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+    if (!response.ok) {
+      throw inputImageError(`workbuddy image: 下载输入图失败（HTTP ${response.status}）：${text}`)
+    }
+    return encodeInputImage(
+      new Uint8Array(await response.arrayBuffer()),
+      response.headers.get('content-type') ?? undefined,
+      text,
+    )
+  }
+  if (isBareBase64Image(text)) {
+    return encodeInputImage(
+      new Uint8Array(Buffer.from(text, 'base64')),
+      undefined,
+      INLINE_BASE64_LABEL,
+    )
+  }
+  const path = text.startsWith('file:') ? fileURLToPath(text) : text
+  let bytes: Buffer
+  try {
+    bytes = await readFile(path)
+  } catch (error: unknown) {
+    throw inputImageError(
+      `workbuddy image: 读不到输入图「${path}」：`
+      + (error instanceof Error ? error.message : String(error)),
+    )
+  }
+  return encodeInputImage(new Uint8Array(bytes), undefined, path)
+}
+
+/** 校验体积、定出 mime，再把字节编成 data URL。 */
+function encodeInputImage(bytes: Uint8Array, contentType: string | undefined, source: string): string {
+  if (bytes.byteLength === 0) throw inputImageError(`workbuddy image: 输入图是空文件：${source}`)
+  if (bytes.byteLength > MAX_INPUT_IMAGE_BYTES) {
+    const limit = MAX_INPUT_IMAGE_BYTES / 1024 / 1024
+    const actual = (bytes.byteLength / 1024 / 1024).toFixed(1)
+    throw inputImageError(`workbuddy image: 输入图 ${actual} MB，超过 ${limit} MB 上限：${source}`)
+  }
+  const declared = contentType?.split(';')[0]?.trim().toLowerCase()
+  const mime = declared !== undefined && declared.startsWith('image/')
+    ? declared
+    : imageMimeForPath(source) ?? sniffImageMime(bytes)
+  return imageDataUrl(mime, Buffer.from(bytes).toString('base64'))
+}
+/**
  * 造出工具定义。
  *
  * 每次 `apply()` 只造一个实例，所以冷却状态与目录缓存都挂在闭包里，
  * 生命周期跟着插件走。
  */
 export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
-  const regionLabel = deps.regionLabel ?? '国内区'
   let mediaCache: { readonly at: number; readonly models: readonly WorkBuddyMediaModel[] } | undefined
   let cooldownUntil = 0
 
@@ -164,11 +263,15 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
   return {
     name: WORKBUDDY_IMAGE_TOOL_NAME,
     description:
-      '用当前账号的 WorkBuddy 生图能力画一张图（文生图）。'
-      + '只在国内区账号下可用；国际区没有生图模型。'
-      + '每张图会真实消耗 WorkBuddy 积分（实测约 5.71 积分/张），不要在没必要时调用，'
-      + '也不要为了试错连续调用。返回的是 COS 签名 URL，约 24 小时后失效；'
-      + '需要展示给用户时，用 markdown 图片语法引用该 URL。',
+      '用当前账号的 WorkBuddy 生图能力画一张图。'
+      + '不填 image 是文生图（用该区带 text-to-image 标签的模型）；'
+      + '填了 image 是改图（用带 image-to-image 标签的模型）。'
+      + '国内区与国际区都可用，模型取自该区产品配置'
+      + '（国内区文生图 hunyuan-image-alpha、改图 hunyuan-image-alpha-edit；'
+      + '国际区 hy-image-3.5 同时带这两个标签，以该区目录为准）。'
+      + '每张图会真实消耗 WorkBuddy 积分，单价随区域与模型不同，以返回结果里的 credit 为准；'
+      + '不要在没必要时调用，也不要为了试错连续调用。返回的是 COS 签名 URL，'
+      + '约 24 小时后失效；需要展示给用户时，用 markdown 图片语法引用该 URL。',
     parameters: {
       type: 'object',
       properties: {
@@ -180,11 +283,19 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
           type: 'string',
           description: `图片尺寸，形如 1024x1024。默认 ${DEFAULT_IMAGE_SIZE}。`,
         },
+        image: {
+          type: 'string',
+          description:
+            '输入图，可选。填了就是改图（image-to-image）；不填就是文生图。'
+            + '接受本地绝对路径、file:// URL、http(s) URL、data URL 或裸 base64。'
+            + '上限 8 MB，不做缩放或格式转换。',
+        },
         model: {
           type: 'string',
           description:
-            '生图模型 id，可选。不填就用产品配置里第一个带 text-to-image 标签的模型'
-            + '（国内区即 hunyuan-image-alpha）。填了但目录里没有会直接报错，不会盲发。',
+            '模型 id，可选。不填就用该区目录里第一个带当前模式标签的模型'
+            + '（文生图看 text-to-image，改图看 image-to-image）。'
+            + '填了但该 tag 组里没有会直接报错，不会盲发。',
         },
       },
       required: ['prompt'],
@@ -195,26 +306,28 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
         type: 'object',
         properties: {
           url: { type: 'string', description: '图片地址（COS 签名 URL，或本地 file:// 地址）。' },
-          model: { type: 'string', description: '实际使用的生图模型 id。' },
+          mode: { type: 'string', description: "'generate'（文生图）或 'edit'（改图）。" },
+          model: { type: 'string', description: '实际使用的模型 id。' },
           prompt: { type: 'string', description: '实际提交的画面描述。' },
           hint: { type: 'string', description: '给模型的后续提示（如何展示、链接时效）。' },
           credit: { type: 'number', description: '本次实际消耗的 WorkBuddy 积分。' },
           path: { type: 'string', description: '上游返回 base64 时，落盘的本地绝对路径。' },
         },
-        required: ['url', 'model', 'prompt', 'hint'],
+        required: ['url', 'mode', 'model', 'prompt', 'hint'],
         additionalProperties: false,
       },
       render(_args: unknown, value: unknown): ImageToolContentBlock[] {
         const record = asRecord(value)
         const url = asNonEmptyString(record['url']) ?? ''
         const model = asNonEmptyString(record['model']) ?? 'unknown'
+        const mode = record['mode'] === 'edit' ? '改图' : '文生图'
         const credit = typeof record['credit'] === 'number' ? record['credit'] as number : undefined
         const path = asNonEmptyString(record['path'])
         const hint = asNonEmptyString(record['hint']) ?? ''
         const lines = [
-          `![WorkBuddy 生图](${url})`,
+          `![WorkBuddy ${mode}](${url})`,
           '',
-          `模型：\`${model}\`${credit === undefined ? '' : ` · 消耗 ${credit} 积分`}`,
+          `${mode} · 模型：\`${model}\`${credit === undefined ? '' : ` · 消耗 ${credit} 积分`}`,
         ]
         if (path !== undefined) lines.push(`本地文件：${path}`)
         if (hint !== '') lines.push('', hint)
@@ -233,6 +346,9 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
       }
       const size = asNonEmptyString(record['size']) ?? DEFAULT_IMAGE_SIZE
       const requestedModel = asNonEmptyString(record['model'])
+      // 模式由「有没有给输入图」唯一决定：不新增 mode 参数，免得出现
+      // 「mode=edit 但没图」这种自相矛盾的请求。
+      const image = asNonEmptyString(record['image'])
 
       const now = Date.now()
       if (now < cooldownUntil) {
@@ -247,8 +363,9 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
       const credential = await deps.resolveCredential()
       if (credential === undefined) {
         throw new WorkBuddyImageError(
-          `workbuddy image: ${regionLabel}未登录 WorkBuddy。`
-          + '请先在插件设置里登录国内区账号，再调用生图工具。',
+          'workbuddy image: 没有可用的 WorkBuddy 账号——要么两个区都没登录，'
+          + '要么已登录的那个区没有打开「允许模型自主生图」。'
+          + '请先在插件设置里登录该区账号，并打开那个开关。',
           'NOT_LOGGED_IN',
         )
       }
@@ -262,20 +379,31 @@ export function createImageTool(deps: ImageToolDeps): ImageToolDefinition {
       let sent = false
       try {
         const models = await listModels(credential, signal)
-        const model = pickImageModel(models, requestedModel)
+        // 先把输入图归一成 data URL：读文件 / 下载都在「发请求」之前，
+        // 失败了不花积分、也不该触发冷却。
+        const input = image === undefined ? undefined : await resolveImageInput(image, signal)
+        const tag = input === undefined ? IMAGE_TAG_TEXT_TO_IMAGE : IMAGE_TAG_IMAGE_TO_IMAGE
+        const model = pickMediaModel(models, requestedModel, tag)
         sent = true
-        const outcome = await deps.generateImage(
-          credential,
-          { model: model.id, prompt, size },
-          signal,
-        )
+        const outcome = input === undefined
+          ? await deps.generateImage(credential, { model: model.id, prompt, size }, signal)
+          : await deps.editImage(
+            credential,
+            { model: model.id, prompt, size, image: [input] },
+            signal,
+          )
+        const mode = input === undefined ? 'generate' : 'edit'
         const value: Record<string, unknown> = {
+          mode,
           model: model.id,
           prompt,
           hint:
-            `这张图来自 WorkBuddy（模型 ${model.id}），每张约消耗 5.71 积分。`
-            + 'COS 签名 URL 约 24 小时失效；要长期保留请及时下载。'
-            + (outcome.credit === undefined ? '' : `本次实际扣费 ${outcome.credit} 积分。`),
+            `这张图来自 WorkBuddy（模型 ${model.id}，${mode === 'edit' ? '改图' : '文生图'}）。`
+            + '按张扣积分，单价随区域与模型不同'
+            + (outcome.credit === undefined
+              ? '（本次响应没带扣费字段，以额度面板为准）。'
+              : `；本次实际扣费 ${outcome.credit} 积分。`)
+            + 'COS 签名 URL 约 24 小时失效；要长期保留请及时下载。',
         }
         if (outcome.url !== undefined) {
           value['url'] = outcome.url
