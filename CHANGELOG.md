@@ -37,6 +37,23 @@
 
 ### Fixes
 
+- **视频工具：显式 `resolution` 在拿不到目录清单时被静默丢弃（视频同步找到的第三处）**
+  - **症状与上面那条同源**：`resolveVideoParams` 用 `new Set(config?.resolutions ?? [])` + `has()`
+    判断，于是「模型不支持这个值」与「我们根本没有这份清单」两条路径合流——**任何**显式
+    `resolution` 在目录没下发 `videoGeneration.resolutions[]` 的账号上都被丢掉，`buildVideoBody`
+    收到的已是 `undefined`，请求体里连 `resolution` 字段都没有，却还打印一句
+    「resolution 1080P 不被模型 · 支持；改用 上游默认」，看起来像上游拒绝。
+  - **同一条判据修正**：只有真的拿到 `resolutions[]` 才做回落，拿不到就**原样透传**交给上游判
+    ——与 `seconds` 的「拿不到区间就不盲拒」完全一致。
+  - **顺带修掉大小写**：清单匹配改为大小写不敏感，命中后发**目录的拼写**。官方 CLI 的兜底档位是
+    `["720P","1080P"]`，而工具描述一直举 `720p`/`1080p` 的例子，精确匹配会把一个其实可用的值
+    判成不支持。
+  - **工具描述与 `docs/VIDEO_GEN.md` 同步改正**（文档此前把这个 bug 的现象记成了上游的行为，
+    并据此写了「`resolution: "1080p"` 对 `minimax-video-h3` 不成立」——那条结论在拿不到清单的
+    账号上从未真正验证过）。
+  - **验证**：`tests/video-gen.spec.ts` 新增 2 条（无清单/空清单透传、大小写命中），全量
+    `vitest run` 140 文件 / **2445 条**通过。
+
 - **视频工具：`seconds: 1` 被上游 400 退回后还要白等 60 秒（两处真 bug）**
   - **现场**：`Error: workbuddy video: 提交生视频任务失败（HTTP 400）: code 14407: Create video failed with error: unsupported video duration: 1 seconds, supported range: 4-15 seconds`，紧接着第二次调用被挡成「请 38 秒后再试」。用户的判断是「上游返回这种错误，也要等半天」。
   - **根因一（本地时长校验是死代码）**：`src/video-tool.ts` 调 `resolveVideoParams({...})` 时**没传第二个参数 `config`**；而 `src/video-gen.ts` 的 `minSeconds`/`maxSeconds` 校验只在 config 存在时才跑。更上游还有一处：`src/image-gen.ts` 的 `selectMediaModels` 只搬 `{id,name,tags}`，把条目上的 `videoGeneration` 丢了——所以即使传了也拿不到。

@@ -265,6 +265,34 @@ describe('resolveVideoParams', () => {
     expect(result.warnings).toEqual([])
   })
 
+  it('目录没给 resolutions 时透传用户分辨率，不静默回落（与 seconds 同一条判据）', () => {
+    // 回归：原实现把「不在 resolutions 集合里」和「根本没有 resolutions」当成一回事，
+    // 于是一条 `resolution: "1080P"` 在拿不到 videoGeneration 的账号上被无声丢掉，
+    // 只留一句「改用 上游默认」的告警。用户显式给的值不能因为目录读不到就消失。
+    const noConfig = resolveVideoParams({ model: 'm', prompt: 'p', resolution: '1080P' })
+    expect(noConfig.resolution).toBe('1080P')
+    expect(noConfig.warnings).toEqual([])
+
+    // 有 videoGeneration、但里面没有 resolutions 清单：同样不知道上游认不认。
+    const emptyList = resolveVideoParams(
+      { model: 'm', prompt: 'p', resolution: '1080P' },
+      { minSeconds: 4, maxSeconds: 15 },
+    )
+    expect(emptyList.resolution).toBe('1080P')
+    expect(emptyList.warnings).toEqual([])
+  })
+
+  it('大小写不同但语义相同 → 采纳目录的拼写（上游认的是它自己那份）', () => {
+    // 官方 CLI 的兜底档位是 ["720P","1080P"]，而工具描述举的例子是 720p/1080p；
+    // 精确匹配会把一个其实可用的值判成不支持。
+    const result = resolveVideoParams(
+      { model: 'm', prompt: 'p', resolution: '1080p' },
+      { resolutions: ['720P', '1080P'], defaultResolution: '1080P' },
+    )
+    expect(result.resolution).toBe('1080P')
+    expect(result.warnings).toEqual([])
+  })
+
   it('图生视频时 aspectRatio 一定是 undefined（比例由输入图决定）', () => {
     const result = resolveVideoParams({ model: 'm', prompt: 'p', image: 'x', aspectRatio: '9:16' })
     expect(result.aspectRatio).toBeUndefined()

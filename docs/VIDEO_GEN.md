@@ -28,10 +28,11 @@
    `GET /v3/config`，工具侧做 5 分钟缓存（`VIDEO_MODEL_TTL_MS = 5 * 60_000`）。
    它只读、不花积分，但每次冷缓存多一次请求——如实记在这里。
 5. **视频模型带 `videoGeneration` 模型级配置**（`resolutions[]` / `defaultResolution` /
-   `defaultSeconds` / `minSeconds` / `maxSeconds`），与图片模型不同。时长必须落在
-   该模型的 `[minSeconds, maxSeconds]` 内，分辨率必须在 `resolutions[]` 内（否则回落
-   默认并告警）。这份配置随条目下发时必须**原样保留到校验层**（早期版本在
-   `selectMediaModels` 里把它丢了，等于时长校验是死代码）。**拿不到这份配置时不做盲拒**
+   `defaultSeconds` / `minSeconds` / `maxSeconds`），与图片模型不同。拿到这份配置时，
+   时长必须落在该模型的 `[minSeconds, maxSeconds]` 内，分辨率必须在 `resolutions[]` 内
+   （否则回落默认并告警；匹配大小写不敏感）。这份配置随条目下发时必须**原样保留到校验层**
+   （早期版本在 `selectMediaModels` 里把它丢了，等于时长校验是死代码）。**拿不到这份配置时
+   不做盲拒**
    ——原样透传用户给的时长/分辨率，让上游去判，因为目录里不一定每条都带 `videoGeneration`。
 6. **模式由「有没有给 `image`」唯一决定，不新增 `mode` 参数**（与生图一致）。给图是
    图生视频（`image-to-video`，带 `image_url` / `last_image_url`，比例由输入图决定、
@@ -63,7 +64,7 @@
 | `negative_prompt` 长度 | ≤ 2500 字符，超出报 `INVALID_ARGS` |
 | `aspect_ratio`（仅文生视频） | 只接受 `16:9` / `9:16` / `1:1`，非法报 `INVALID_ARGS`；图生视频不校验、且不传该字段 |
 | `seconds` | 默认 `DEFAULT_VIDEO_SECONDS = 5`；拿到模型 `minSeconds`/`maxSeconds`（目录给的，或上游上一次拒绝时自报并被记下的）时越界报 `INVALID_ARGS`，否则原样透传 |
-| `resolution` | 不在模型 `resolutions[]` 内时回落 `defaultResolution` 并给 `warnings`，在列内则原样采纳 |
+| `resolution` | 拿到模型 `resolutions[]` 时：在列内（**大小写不敏感**，命中后发目录的拼写）原样采纳，不在列内回落 `defaultResolution` 并给 `warnings`；**没拿到这份清单时原样透传**，交给上游判（与 `seconds` 同一条判据） |
 | `enable_audio` | 默认 `DEFAULT_VIDEO_ENABLE_AUDIO = true` |
 | `watermark` | 提交时**固定 `true`**（照抄官方 CLI `submitTask`） |
 
@@ -193,6 +194,16 @@ URL 或本地路径（**不读成 base64**——视频上游接受的是 `image_
    画布尺寸（1.75:1），来自模型自己的默认值。这正是 `resolution` 只在模型 `resolutions[]`
    内原样采纳的原因——`resolution: "1080p"` 对 `minimax-video-h3` 不成立，插件回落默认值
    并给出告警原文「resolution 1080p 不被模型 minimax-video-h3 支持；改用 上游默认」。
+   > **上面那条告警曾经是个假象（2026-10-25 修）**：拿不到 `videoGeneration` 的账号上，
+   > `resolutions[]` 为空，旧实现把「不在清单里」与「根本没有清单」当成一回事，于是**任何**
+   > 显式 `resolution` 都被静默丢掉、再回落默认，同时打印上面那句「不被支持」——看起来像
+   > 上游拒绝，其实是本插件自己没把值发出去（`buildVideoBody` 收到的 `resolution` 已是
+   > `undefined`，请求体里连字段都没有）。现在与 `seconds` 用同一条判据：**只有真的拿到
+   > `resolutions[]` 才回落**，拿不到就原样透传交给上游判；另外清单匹配改为大小写不敏感
+   > （官方 CLI 的兜底档位写的是 `["720P","1080P"]`，而调用方常写 `1080p`），命中后发
+   > **目录的拼写**。
+   > 因此「实测只有 720p 出图」这个结论要重新读：`resolution` 只有在**该账号的目录确实
+   > 下发了 `resolutions[]`** 时才被本地校验过，其余情况从未真正到达上游。
 4. **码率不是分辨率的函数**：同为 1280×720，一条 7.93 Mbps、一条 11.47 Mbps；1344×768
    的两条是 3.66 / 5.45 Mbps。它随模型与画面运动量变化，所以「同秒数同价格」也不代表
    「同质量」——文件体积从 2.0 MB 到 7.0 MB 差了 3.5 倍。

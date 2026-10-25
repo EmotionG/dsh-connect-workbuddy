@@ -386,18 +386,33 @@ export function resolveVideoParams(
     }
   }
 
-  // 分辨率
-  const resolutions = new Set(config?.resolutions ?? [])
+  // 分辨率。与上面的时长同一条判据：**只有真的知道该模型支持哪些值时才回落**。
+  const resolutions = config?.resolutions ?? []
   const defaultResolution = config?.defaultResolution
   let resolution: string | undefined = defaultResolution
   if (request.resolution !== undefined) {
-    if (resolutions.has(request.resolution)) {
-      resolution = request.resolution
+    const requested = request.resolution
+    if (resolutions.length === 0) {
+      // 目录没给 resolutions（或这条条目压根没有 videoGeneration）：我们并不知道
+      // 上游认不认这个值，盲回落会把调用方显式给的分辨率**静默丢掉**——于是
+      // 「resolution: 1080P」从来没到达过上游，日志里却只留一条「改用 上游默认」的
+      // 告警。这里原样透传，认不认交给上游判，与秒数的「拿不到区间就不拦」一致。
+      resolution = requested
     } else {
-      warnings.push(
-        `resolution ${request.resolution} 不被模型 ${request.model} 支持；改用 ${defaultResolution ?? '上游默认'}`,
-      )
-      resolution = defaultResolution
+      // 目录里的拼写可能与调用方给的只差大小写（官方 CLI 的兜底档位是
+      // `["720P","1080P"]`，而工具描述举的例子是 `720p`/`1080p`）。命中的话采纳
+      // **目录的拼写**——上游认的是它自己那一份，不是调用方写的那份。
+      const matched = resolutions.includes(requested)
+        ? requested
+        : resolutions.find(one => one.toLowerCase() === requested.toLowerCase())
+      if (matched === undefined) {
+        warnings.push(
+          `resolution ${requested} 不被模型 ${request.model} 支持；改用 ${defaultResolution ?? '上游默认'}`,
+        )
+        resolution = defaultResolution
+      } else {
+        resolution = matched
+      }
     }
   }
 

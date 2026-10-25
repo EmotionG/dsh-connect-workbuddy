@@ -358,8 +358,9 @@ export function createVideoTool(deps: VideoToolDeps): VideoToolDefinition {
         resolution: {
           type: 'string',
           description:
-            '分辨率，可选，如 720p / 1080p。不填用模型默认。'
-            + '不在模型 videoGeneration.resolutions 里时回落到默认分辨率。',
+            '分辨率，可选，如 720P / 1080P（大小写不敏感，按模型目录里的拼写发）。不填用模型默认。'
+            + '该模型在目录里给了 videoGeneration.resolutions 时，不在列内会回落到默认分辨率并给出告警；'
+            + '目录没给这份清单时原样透传，交给上游判断（与 seconds 同一条判据）。',
         },
         aspect_ratio: {
           type: 'string',
