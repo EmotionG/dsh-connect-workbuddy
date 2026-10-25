@@ -1,0 +1,487 @@
+/**
+ * WorkBuddy 生视频的纯逻辑层：媒体模型筛选、请求体构造、任务轮询解析、失败描述。
+ *
+ * 这一层刻意不做任何网络 I/O、不引用宿主的任何包（同 `src/image-gen.ts` 的约定，
+ * 见其模块注释里的可达图说明）。`src/upstream.ts` 会静态引用本模块，所以这里
+ * 必须保持零外部依赖。
+ *
+ * 上游契约照抄官方 CLI `codebuddy-lite-wb.mjs` 的 `VideoService`（实测 2026-10-25，
+ * 二进制位于 `WorkBuddy/resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs`）：
+ *
+ *   submitTask:  POST {endpoint}/v2/videos/generations
+ *               body = { prompt, model, seconds, negative_prompt, watermark:true,
+ *                        image_url/last_image_url(图生视频时),
+ *                        extra_parameters:{ resolution, enable_audio,
+ *                                          aspect_ratio(仅文生视频) } }
+ *               resp = { code, msg, request_id, data:{ id } }   ← 只是 task id
+ *   pollTask:    POST {endpoint}/v2/videos/tasks  { task_id }
+ *               轮询直到 data.status === 'completed' | 'failed'
+ *               resp = { code, msg, data:{ status, usage?:{credit}, ... } }
+ *   download:   GET 每条 data[].url → 写本地 .mp4
+ *
+ * 与 `ImageService` 的根本区别：视频是**异步任务**，不是一次同步请求。生图
+ * `ImageService` 调一次 `generations` 直接拿 URL；视频 `VideoService` 要先
+ * `generations` 拿 task id，再 `tasks` 轮询，最后下载。所以本模块把"提交 / 轮询 /
+ * 下载"三段拆开，工具层负责把它们串成一条异步流程（`src/video-tool.ts`）。
+ *
+ * 模型配置来自产品配置里每条媒体模型的 `videoGeneration` 字段：
+ *   { resolutions:[...], defaultResolution, defaultSeconds,
+ *     minSeconds, maxSeconds }。时长/分辨率要在该模型允许的集合内，否则上游
+ *   会拒。这里把"该模型支持哪些值"的读取与校验收进来，工具层只把用户给的值
+ *   递进来、拿校验结果。
+ *
+ * 两个区的视频目录（2026-10-25 实测，`src/upstream.ts` 的 `fetchMediaModels`
+ * 注释）：
+ *   - 国内区（61 条模型）：`kling-video-v3` 与 `minimax-video-h3` 各带
+ *     `text-to-video` + `image-to-video`。
+ *   - 国际区（29 条）：`kling-video-v3` 带两种 video tag。
+ * 两边目录完全不重叠，所以"以哪个区为准"由工具的 `videoToolRegionOf` 决定
+ * （默认国内区优先，与 image 工具一致）。
+ *
+ * @module dsh-connect-workbuddy/video-gen
+ */
+
+/** 产品配置里「文生视频」模型的标签。 */
+export const VIDEO_TAG_TEXT_TO_VIDEO = 'text-to-video'
+/** 产品配置里「图生视频」模型的标签。 */
+export const VIDEO_TAG_IMAGE_TO_VIDEO = 'image-to-video'
+
+/** 生视频路由（提交任务，拿 task id）。 */
+export const VIDEO_GENERATIONS_PATH = '/v2/videos/generations'
+/** 任务轮询路由。 */
+export const VIDEO_TASKS_PATH = '/v2/videos/tasks'
+
+/** 官方 CLI 的默认时长（秒）。模型没声明 `defaultSeconds` 时落这个值。 */
+export const DEFAULT_VIDEO_SECONDS = 5
+/** 官方 CLI 的默认宽高比（仅文生视频时使用）。 */
+export const DEFAULT_VIDEO_ASPECT_RATIO = '16:9'
+/** 支持的非图像决定宽高比集合。 */
+export const VIDEO_ASPECT_RATIOS: readonly string[] = ['16:9', '9:16', '1:1']
+/** 默认开启音频。 */
+export const DEFAULT_VIDEO_ENABLE_AUDIO = true
+
+/**
+ * 本插件认作「媒体模型」的全部标签（与 `src/image-gen.ts` 的 `MEDIA_TAGS` 同源，
+ * 这里重新声明一份，避免视频层反向依赖 image 层导致循环引用问题；两者必须保持
+ * 一致——`fetchMediaModels` 只读一次就返回全部媒体条目）。
+ */
+export const MEDIA_TAGS: readonly string[] = [
+  'text-to-image',
+  'image-to-image',
+  VIDEO_TAG_TEXT_TO_VIDEO,
+  VIDEO_TAG_IMAGE_TO_VIDEO,
+]
+
+/**
+ * 产品配置 `data.models` 里的一个媒体模型条目，扩展出视频生成配置。
+ *
+ * 实测上游媒体条目只有 `{"id","name","tags"}` 三个字段（见 `image-gen.ts` 的
+ * 模块注释）；`videoGeneration` 是**模型级**配置（`productManager` 的
+ * `waitConfiguration().models.find(id).videoGeneration`），不是 `data.models`
+ * 条目本身的字段，所以这里把它作为可选外挂、绝不臆造。
+ */
+export interface WorkBuddyMediaModel {
+  readonly id: string
+  readonly name: string
+  readonly tags: readonly string[]
+}
+
+/** 一条模型的 `videoGeneration` 配置（来自产品配置 `models[].videoGeneration`）。 */
+export interface WorkBuddyVideoModelConfig {
+  readonly resolutions?: readonly string[]
+  readonly defaultResolution?: string
+  readonly defaultSeconds?: number
+  readonly minSeconds?: number
+  readonly maxSeconds?: number
+}
+
+/** 一次生视频请求的可变部分。 */
+export interface WorkBuddyVideoRequest {
+  readonly model: string
+  readonly prompt: string
+  readonly image?: string | undefined
+  readonly lastImage?: string | undefined
+  readonly negativePrompt?: string | undefined
+  readonly resolution?: string | undefined
+  readonly aspectRatio?: string | undefined
+  readonly seconds?: number | undefined
+  readonly enableAudio?: boolean | undefined
+}
+
+/** 提交任务后上游返回的任务元数据（task id）。 */
+export interface WorkBuddyVideoSubmission {
+  readonly taskId: string
+  readonly warnings: readonly string[]
+}
+
+/** 轮询完成后解析出的任务结果。 */
+export interface WorkBuddyVideoOutcome {
+  /** 每个成品视频的下载 URL（`.mp4`）。 */
+  readonly videos: readonly string[]
+  /** 本次实际消耗的积分；上游没给就是 undefined。 */
+  readonly credit?: number | undefined
+  /** 提交阶段就攒下的非致命告警。 */
+  readonly warnings?: readonly string[] | undefined
+}
+
+/** 生视频链路的错误码。调用方据此决定是提示登录、提示换模型还是原样透传。 */
+export type WorkBuddyVideoErrorCode =
+  | 'INVALID_ARGS'
+  | 'NOT_LOGGED_IN'
+  | 'NO_VIDEO_MODEL'
+  | 'NO_ROUTE'
+  | 'POLL_TIMEOUT'
+  | 'TASK_FAILED'
+  | 'AUTH'
+  | 'RATE_LIMIT'
+  | 'UPSTREAM'
+  | 'EMPTY_RESULT'
+  | 'COOLDOWN'
+
+/** 生视频链路的错误。带一个稳定的 `code`，避免调用方去匹配文案。 */
+export class WorkBuddyVideoError extends Error {
+  readonly code: WorkBuddyVideoErrorCode
+
+  constructor(message: string, code: WorkBuddyVideoErrorCode) {
+    super(message)
+    this.name = 'WorkBuddyVideoError'
+    this.code = code
+  }
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  for (const item of value) {
+    const text = asString(item)
+    if (text !== undefined) out.push(text)
+  }
+  return out
+}
+
+/**
+ * 从产品配置的 `data.models` 里挑出带指定 tag 的媒体模型。
+ *
+ * 与 `image-gen.ts` 的 `selectMediaModels` 同形：tag 可以是一组，命中任一即算；
+ * 去重按 `id`。视频模型也走这条（传 `VIDEO_TAG_TEXT_TO_VIDEO` 等）。
+ */
+export function selectMediaModels(
+  rawModels: unknown,
+  tag: string | readonly string[] = VIDEO_TAG_TEXT_TO_VIDEO,
+): WorkBuddyMediaModel[] {
+  const wanted = typeof tag === 'string' ? [tag] : tag
+  if (!Array.isArray(rawModels)) return []
+  const out: WorkBuddyMediaModel[] = []
+  const seen = new Set<string>()
+  for (const entry of rawModels) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const id = asString(record['id'])
+    if (id === undefined || seen.has(id)) continue
+    const tags = stringList(record['tags'])
+    if (!wanted.some(one => tags.includes(one))) continue
+    seen.add(id)
+    out.push({ id, name: asString(record['name']) ?? id, tags })
+  }
+  return out
+}
+
+/** tag 的人话名字，只用在错误信息里。 */
+function tagLabel(tag: string): string {
+  if (tag === VIDEO_TAG_IMAGE_TO_VIDEO) return '图生视频'
+  if (tag === VIDEO_TAG_TEXT_TO_VIDEO) return '文生视频'
+  return tag
+}
+
+/**
+ * 按能力标签选一个视频模型：先在该标签组内找调用方点名的那个，否则取组内第一个。
+ *
+ * 与 `image-gen.ts` 的 `pickMediaModel` 完全一致的设计——点名的模型必须在**这一组**
+ * 里，写错名字或拿文生视频模型去图生视频都直接报错，而不是把它发上去换一个上游 404。
+ */
+export function pickVideoModel(
+  models: readonly WorkBuddyMediaModel[],
+  requested: string | undefined,
+  tag: string = VIDEO_TAG_TEXT_TO_VIDEO,
+): WorkBuddyMediaModel {
+  const group = models.filter(model => model.tags.includes(tag))
+  if (requested !== undefined && requested !== '') {
+    const found = group.find(model => model.id === requested)
+    if (found === undefined) {
+      const known = group.map(model => model.id).join(', ')
+      throw new WorkBuddyVideoError(
+        `workbuddy video: 目录里没有${tagLabel(tag)}模型「${requested}」。可用：${known === '' ? '（空）' : known}`,
+        'NO_VIDEO_MODEL',
+      )
+    }
+    return found
+  }
+  const first = group[0]
+  if (first === undefined) {
+    throw new WorkBuddyVideoError(
+      `workbuddy video: 该区账号的产品配置里没有任何带 ${tag} 标签的模型（${tagLabel(tag)}）。`
+      + '国内区文生视频/图生视频是 kling-video-v3、minimax-video-h3；'
+      + '国际区 kling-video-v3 同时带这两个标签；一个都没有说明该区目录暂时没有这类模型。',
+      'NO_VIDEO_MODEL',
+    )
+  }
+  return first
+}
+
+/**
+ * 把一次生视频请求组装成上游 `POST /v2/videos/generations` 的请求体。
+ *
+ * 完全照抄官方 CLI 的 `submitTask`：`prompt` / `model` / `seconds` /
+ * `negative_prompt` / `watermark:true`，图生视频时带 `image_url` 或
+ * `last_image_url`，`extra_parameters` 里放 `resolution` / `enable_audio` /
+ * 以及仅文生视频的 `aspect_ratio`。
+ *
+ * `config` 来自该模型的 `videoGeneration` 字段，用于回落默认值与约束校验
+ * （见 {@link resolveVideoParams}）。`isImageToVideo` 由调用方（工具层）按
+ * "有没有给 image" 唯一决定，与 image 工具"不给 image 就是文生图"的约定一致。
+ */
+export function buildVideoBody(
+  request: WorkBuddyVideoRequest,
+  isImageToVideo: boolean,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    prompt: request.prompt,
+    model: request.model,
+    seconds: request.seconds,
+    negative_prompt: request.negativePrompt ?? '',
+    watermark: true,
+  }
+  if (request.image !== undefined) body['image_url'] = request.image
+  if (request.lastImage !== undefined) body['last_image_url'] = request.lastImage
+
+  // 分辨率已经由 resolveVideoParams 校验/回落过，这里直接信任；不再二次推导，
+  // 否则在拿不到 videoGeneration 配置时会把自定义分辨率静默丢掉。
+  const extra: Record<string, unknown> = {
+    resolution: request.resolution,
+    enable_audio: request.enableAudio ?? DEFAULT_VIDEO_ENABLE_AUDIO,
+  }
+  // 图生视频时输入图已经决定了宽高比，上游不接受 aspect_ratio；只有文生视频才带。
+  if (!isImageToVideo) {
+    const aspectRatio = request.aspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO
+    extra['aspect_ratio'] = aspectRatio
+  }
+  body['extra_parameters'] = extra
+  return body
+}
+
+/**
+ * 校验并回落一次生视频请求的可选参数（时长 / 分辨率 / 宽高比）。
+ *
+ * 集中处理"该模型支持哪些值"的判断，让工具层只需把用户给的值递进来。
+ * 返回：最终要用的 `seconds` / `resolution` / `aspectRatio`（图生视频时
+ * `aspectRatio` 为 undefined，因为由输入图决定），以及一条非致命告警列表
+ * （例如用户给的分辨率模型不支持、被回落成默认值）。
+ *
+ * 抛 `WorkBuddyVideoError`('INVALID_ARGS') 的情况：prompt 超长、宽高比非法、
+ * 模型不支持自定义时长却给了时长、时长越界。
+ */
+export function resolveVideoParams(
+  request: WorkBuddyVideoRequest,
+  config?: WorkBuddyVideoModelConfig | undefined,
+): {
+  seconds: number
+  resolution: string | undefined
+  aspectRatio: string | undefined
+  warnings: string[]
+} {
+  const warnings: string[] = []
+  const prompt = request.prompt ?? ''
+  if (prompt.length > 2500) {
+    throw new WorkBuddyVideoError(
+      'workbuddy video: prompt 不能超过 2500 字符。',
+      'INVALID_ARGS',
+    )
+  }
+  if ((request.negativePrompt?.length ?? 0) > 2500) {
+    throw new WorkBuddyVideoError(
+      'workbuddy video: negative_prompt 不能超过 2500 字符。',
+      'INVALID_ARGS',
+    )
+  }
+  const isImageToVideo = request.image !== undefined || request.lastImage !== undefined
+
+  // 时长
+  const minSeconds = config?.minSeconds
+  const maxSeconds = config?.maxSeconds
+  let seconds = request.seconds ?? config?.defaultSeconds ?? DEFAULT_VIDEO_SECONDS
+  if (request.seconds !== undefined) {
+    // 只有拿到该模型的 videoGeneration 配置才做"不支持自定义时长"的断言——
+    // 否则我们根本不知道它支不支持，盲拒会让所有自定义时长都失败。拿不到配置时
+    // 直接透传，交给上游校验。
+    if (minSeconds !== undefined && maxSeconds !== undefined
+      && (seconds < minSeconds || seconds > maxSeconds)) {
+      throw new WorkBuddyVideoError(
+        `workbuddy video: 时长必须在 ${minSeconds} 到 ${maxSeconds} 秒之间（给定 ${seconds}）。`,
+        'INVALID_ARGS',
+      )
+    }
+  }
+
+  // 分辨率
+  const resolutions = new Set(config?.resolutions ?? [])
+  const defaultResolution = config?.defaultResolution
+  let resolution: string | undefined = defaultResolution
+  if (request.resolution !== undefined) {
+    if (resolutions.has(request.resolution)) {
+      resolution = request.resolution
+    } else {
+      warnings.push(
+        `resolution ${request.resolution} 不被模型 ${request.model} 支持；改用 ${defaultResolution ?? '上游默认'}`,
+      )
+      resolution = defaultResolution
+    }
+  }
+
+  // 宽高比（仅文生视频）
+  let aspectRatio: string | undefined
+  if (!isImageToVideo) {
+    const ar = request.aspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO
+    if (!VIDEO_ASPECT_RATIOS.includes(ar)) {
+      throw new WorkBuddyVideoError(
+        `workbuddy video: aspect_ratio 只能是 ${VIDEO_ASPECT_RATIOS.join('、')} 之一（给定 ${ar}）。`,
+        'INVALID_ARGS',
+      )
+    }
+    aspectRatio = ar
+  }
+
+  return { seconds, resolution, aspectRatio, warnings }
+}
+
+/**
+ * 解析 `POST /v2/videos/generations` 的响应，取出 task id。
+ *
+ * 信封是 `{code, msg, request_id, data}`，`code !== 0` 是业务失败（与 HTTP
+ * 状态无关）。成功时 `data.id` 是 task id。没有 id 就说不通（上游一定返回 id）。
+ */
+export function parseVideoSubmission(payload: unknown): WorkBuddyVideoSubmission {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new WorkBuddyVideoError('workbuddy video: 上游返回的不是 JSON 对象', 'UPSTREAM')
+  }
+  const envelope = payload as Record<string, unknown>
+  const code = typeof envelope['code'] === 'number' ? envelope['code'] : undefined
+  if (code !== undefined && code !== 0) {
+    const message = asString(envelope['msg']) ?? 'unknown error'
+    const requestId = asString(envelope['request_id'])
+    throw new WorkBuddyVideoError(
+      `workbuddy video: 提交失败（code ${code}）: ${message}`
+      + (requestId === undefined ? '' : `（request_id ${requestId}）`),
+      'UPSTREAM',
+    )
+  }
+  const data = typeof envelope['data'] === 'object' && envelope['data'] !== null
+    ? envelope['data'] as Record<string, unknown>
+    : {}
+  const taskId = asString(data['id'])
+  if (taskId === undefined) {
+    throw new WorkBuddyVideoError(
+      'workbuddy video: 上游没返回 task id，无法进入轮询。',
+      'EMPTY_RESULT',
+    )
+  }
+  return { taskId, warnings: [] }
+}
+
+/**
+ * 解析 `POST /v2/videos/tasks` 的轮询响应。
+ *
+ * 返回当前 `status`，以及（完成态时）成品视频 URL 列表与实扣积分。
+ * `status` 不在 `pending/processing/completed/failed` 内的未知字符串，一律
+ * 当成"还没好"继续轮询，避免把新状态误判成失败而浪费一次已花钱的任务。
+ */
+export function parseVideoTask(payload: unknown): {
+  status: string
+  videos: readonly string[]
+  credit?: number | undefined
+} {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new WorkBuddyVideoError('workbuddy video: 轮询响应不是 JSON 对象', 'UPSTREAM')
+  }
+  const envelope = payload as Record<string, unknown>
+  const code = typeof envelope['code'] === 'number' ? envelope['code'] : undefined
+  if (code !== undefined && code !== 0) {
+    const message = asString(envelope['msg']) ?? 'unknown error'
+    const requestId = asString(envelope['request_id'])
+    throw new WorkBuddyVideoError(
+      `workbuddy video: 轮询失败（code ${code}）: ${message}`
+      + (requestId === undefined ? '' : `（request_id ${requestId}）`),
+      'UPSTREAM',
+    )
+  }
+  const data = typeof envelope['data'] === 'object' && envelope['data'] !== null
+    ? envelope['data'] as Record<string, unknown>
+    : {}
+  const status = asString(data['status']) ?? 'unknown'
+  if (status === 'completed') {
+    const items = Array.isArray(data['data']) ? data['data'] : []
+    const videos: string[] = []
+    for (const item of items) {
+      if (typeof item !== 'object' || item === null) continue
+      const url = asString((item as Record<string, unknown>)['url'])
+      if (url !== undefined) videos.push(url)
+    }
+    const usage = typeof data['usage'] === 'object' && data['usage'] !== null
+      ? data['usage'] as Record<string, unknown>
+      : {}
+    const credit = typeof usage['credit'] === 'number' && Number.isFinite(usage['credit'])
+      ? usage['credit'] as number
+      : undefined
+    return { status, videos, credit }
+  }
+  return { status, videos: [] }
+}
+
+/** 把一次非 2xx 的提交/轮询响应翻成带 `code` 的错误，好让上层决定怎么提示。 */
+export function describeVideoFailure(
+  status: number,
+  bodyText: string,
+  phase: 'submit' | 'poll' = 'submit',
+): WorkBuddyVideoError {
+  const text = bodyText.trim()
+  let detail = text.slice(0, 240)
+  if (text.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (typeof parsed === 'object' && parsed !== null) {
+        const record = parsed as Record<string, unknown>
+        const message = asString(record['msg'])
+        const code = typeof record['code'] === 'number' ? record['code'] : undefined
+        if (message !== undefined) detail = code === undefined ? message : `code ${code}: ${message}`
+      }
+    } catch {
+      // 保留截断后的原文
+    }
+  }
+  const where = phase === 'submit' ? '提交生视频任务' : '轮询生视频任务'
+  if (status === 401 || status === 403) {
+    return new WorkBuddyVideoError(
+      `workbuddy video: 凭据被上游拒绝（HTTP ${status}），请在插件设置里重新登录 WorkBuddy。${detail === '' ? '' : ` ${detail}`}`,
+      'AUTH',
+    )
+  }
+  if (status === 429) {
+    return new WorkBuddyVideoError(
+      `workbuddy video: 触发上游限流（HTTP 429），稍后再试。${detail === '' ? '' : ` ${detail}`}`,
+      'RATE_LIMIT',
+    )
+  }
+  if (status === 404) {
+    return new WorkBuddyVideoError(
+      `workbuddy video: 上游没有这条生视频路由（HTTP 404）——该区网关没有开放视频接口。${detail === '' ? '' : ` ${detail}`}`,
+      'NO_ROUTE',
+    )
+  }
+  return new WorkBuddyVideoError(
+    `workbuddy video: ${where}失败（HTTP ${status}）${detail === '' ? '' : `: ${detail}`}`,
+    'UPSTREAM',
+  )
+}

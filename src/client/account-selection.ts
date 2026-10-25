@@ -709,6 +709,50 @@ export async function writeRegionImageToolEnabled(
   })
 }
 
+export async function writeRegionVideoToolEnabled(
+  scope: WorkBuddyAccountScope,
+  region: WorkBuddyWebRegion,
+  enabled: boolean,
+  slot: Record<string, unknown>,
+): Promise<void> {
+  await writeField(scope, 'regions', region, slot, readBack => {
+    const stored = readBack as Record<string, unknown> | null | undefined
+    return stored !== null && stored !== undefined && stored['videoToolEnabled'] === enabled
+  })
+}
+
+/**
+ * Pin (or clear) one region's video model for ONE mode tag, verifying it landed.
+ *
+ * `modelId` of `undefined`/`''` clears the pin, so the landed check accepts an
+ * ABSENT key as success for that case — writing an empty string instead would
+ * leave a value the tool has to keep special-casing forever.
+ *
+ * Routed through `writeField` like every other settings write (Host endpoint
+ * first, then the landed read-back): on the affected 0.1.7 deployments a direct
+ * `scope.set()` settles without storing anything, and a picker that silently
+ * reverted would be worse than no picker at all.
+ */
+export async function writeRegionPreferredVideoModels(
+  scope: WorkBuddyAccountScope,
+  region: WorkBuddyWebRegion,
+  tag: string,
+  modelId: string | undefined,
+  slot: Record<string, unknown>,
+): Promise<void> {
+  await writeField(scope, 'regions', region, slot, readBack => {
+    const stored = readBack as Record<string, unknown> | null | undefined
+    if (stored === null || stored === undefined) return false
+    const pinned = stored['preferredVideoModels']
+    const current = typeof pinned === 'object' && pinned !== null
+      ? (pinned as Record<string, unknown>)[tag]
+      : undefined
+    return modelId === undefined || modelId === ''
+      ? current === undefined || current === ''
+      : current === modelId
+  })
+}
+
 export async function writeRegionCreditsShown(
   scope: WorkBuddyAccountScope,
   region: WorkBuddyWebRegion,

@@ -152,6 +152,8 @@ GIF / WEBP / BMP，兜底 `image/png`）。
 两个区今天每个标签组都只有 1 个模型（国内区 `hunyuan-image-alpha` /
 `hunyuan-image-alpha-edit`，国际区 `hy-image-3.5` 同时带两个标签）。给长度 1 的列表
 配下拉框是假选择，所以卡片只显示「这区有哪些媒体模型、各带什么标签」的只读清单
+（视频那两个标签组各有 2 个模型，那边是可钉的——见 [VIDEO_GEN.md](./VIDEO_GEN.md) 的「卡片上按模式
+钉住模型」）
 （`POST /plugins/dsh-connect-workbuddy/media-models`，只读免费，宿主侧缓存 5 分钟，
 卡片上的「重新读取」带 `refresh=1` 跳过缓存）。切换能力的方式就是工具的 `model` 参数。
 
@@ -245,10 +247,13 @@ base64 直接灌进对话。
 
 ## 没做的事（如实登记）
 
-- **视频（`/v2/videos/generations`）没有暴露成工具。** 端点的存在与模型名
-  （`minimax-video-h3`、`kling-video-v3`）已由探针确认，但**没有跑通一次真实调用**，
-  所以不给用户一个「看起来能用」的按钮。要做就单独做一轮联调再开。工具已把四类媒体
-  标签（`MEDIA_TAGS`）都读进目录，加视频只是接一次 `submitVideo()`。
+- **视频（`/v2/videos/generations`）现已独立成工具 `workbuddy_draw_video`**，
+  详见 [VIDEO_GEN.md](./VIDEO_GEN.md)。它的要点是：**视频是异步任务**，不是同步生图——
+  `submitVideo()` 只拿到 `taskId`，还要 `pollVideoTask()` 轮询到 `completed`、
+  再 `downloadVideo()` 把视频拉到本地才算完成。旧版本文档里写的「加视频只是接一次
+  `submitVideo()`」少了轮询 + 下载两段，已在 VIDEO_GEN.md 的「与『只接一次 submitVideo()』
+  的旧说法对账」一节纠正。参数层与选模型层（`MEDIA_TAGS`、`VIDEO_TAG_*`、卡片清单、`fetchMediaModels`）
+  确实可复用，但执行层是全新异步代码；卡片的视频行也与图像行不同，可按模式钉模型。
 - **国际区已支持**（2026-10-25 起）：国际区目录里的 `hy-image-3.5` 带 `text-to-image`，实测可用；
   此前「国际区一条都没有」的观测已过期，不要再据此禁用它。
 - **不做批量**：一次调用一张图、一份积分。没有「一次画四张」的参数——那是一次不可控支出。

@@ -481,13 +481,18 @@ export const en = {
   'row.cliBridgePickersHint': 'All three pickers write the global cliBridge block; "CLI default" on model and effort is an explicit empty value, not "unset" — the CLI then uses its own defaults; the region picker writes cliBridge.regionOrder.',
   'row.imageToolLabel': 'Let the model draw images',
   'row.imageToolHint': 'Adds the workbuddy_draw_image tool, which the MODEL may call on its own — about 5.71 credits per image on the CN gateway and about 0.03 on the international one, with no per-call confirmation. Ticking it here only authorizes THIS tab\'s region. Off everywhere means the tool is not registered at all.',
-  // The read-only media roster. It answers "what can this region actually
-  // draw" from the region's own product configuration, which is the ONLY
-  // source of truth for it: the catalog carries no price and no capability
-  // flag, and the roster is not a setting (there is nothing to choose — each
-  // tag group holds one model today), so it renders as a list, not a picker.
+  'row.videoToolLabel': 'Let the model generate videos',
+  'row.videoToolHint': 'Adds the workbuddy_draw_video tool, which the MODEL may call on its own — a video is an async task (submit, poll, then download) that costs WorkBuddy credits and runs tens of seconds to minutes, with no per-call confirmation. Ticking it here only authorizes THIS tab\'s region. Off everywhere means the tool is not registered at all.',
+  'row.videoModelLabel': 'Video model per mode',
+  'row.videoModelHint': 'Pinned separately for text-to-video and image-to-video, from THIS region\'s own catalog — a model id does not carry across regions. A call that names no model uses the pin; with nothing pinned the tool takes the first model of that group. A pin the catalog no longer carries quietly falls back to the first model instead of failing.',
+  'row.videoModelDefault': 'Default (first in the group)',
+  // The media roster. It answers "what can this region actually draw" from the
+  // region's own product configuration, which is the ONLY source of truth for
+  // it: the catalog carries no price and no capability flag. Its IMAGE rows stay
+  // a list (one model per image tag today); the VIDEO rows are pinnable in the
+  // picker above, because CN now publishes two models per video tag.
   'row.mediaModelsLabel': 'Image models in this region',
-  'row.mediaModelsHint': 'Read from this account\'s product configuration. The draw tool picks its model from here: a prompt without an image uses a text-to-image model, one WITH an image uses an image-to-image model. Read-only — to use a different model, pass it to the tool.',
+  'row.mediaModelsHint': 'Read from this account\'s product configuration. The draw tools pick their models from here: a prompt without an image uses a text-to-image model, one WITH an image uses an image-to-image model. Image rows are read-only (pass a model to the tool to change it); the VIDEO model is pinnable in the picker above.',
   'row.mediaModelsEmpty': 'This region publishes no image or video model.',
   'row.mediaModelsError': 'Could not read the media model list: {message}',
   'row.mediaModelsRefresh': 'Re-read',
@@ -1013,12 +1018,17 @@ export const zh: Record<WorkBuddySettingsKey, string> = {
   'row.cliBridgePickersHint': '三个选择都写入全局 cliBridge 块；模型/档位的"CLI 默认"是显式的空值而非未设置，届时 CLI 使用自己的默认；区域选择写入 cliBridge.regionOrder。',
   'row.imageToolLabel': '允许模型自主生图',
   'row.imageToolHint': '开启后模型可以自己调用 workbuddy_draw_image 画图——国内区约 5.71、国际区约 0.03 积分/张，没有逐次确认。在这里勾选只授权当前这一区的账号。两区都关着时该工具根本不会注册。',
-  // 只读的媒体模型清单。它回答的是「这一区到底能画什么」，唯一可信来源是
-  // 该区账号自己的产品配置：目录里既没有价格也没有能力标志，而这份清单也
-  // 不是一个设置项（每个 tag 组今天只有一个模型，做下拉是假选择），所以它
-  // 渲染成列表而不是选择器。
+  'row.videoToolLabel': '允许模型自主生视频',
+  'row.videoToolHint': '开启后模型可以自己调用 workbuddy_draw_video 生成短视频——视频是异步任务（提交、轮询到完成、再下载到本地），要几十秒到几分钟，没有逐次确认。在这里勾选只授权当前这一区的账号。两区都关着时该工具根本不会注册。',
+  'row.videoModelLabel': '按模式指定视频模型',
+  'row.videoModelHint': '文生视频与图生视频各钉一个，选项只来自当前这一区自己的目录——模型 id 不跨区。调用时不填 model 就用这里钉的；什么都没钉就用该组第一个模型。钉住的模型如果目录里已经没有了，会安静地回落到第一个，而不是让这次生成失败。',
+  'row.videoModelDefault': '默认（组内第一个）',
+  // 媒体模型清单。它回答的是「这一区到底能画什么」，唯一可信来源是该区账号
+  // 自己的产品配置：目录里既没有价格也没有能力标志。其中「图像」那一半仍是
+  // 列表（每个图像 tag 组今天只有一个模型）；「视频」那一半可以在上面的选择器
+  // 里钉住，因为国内区现在每个视频 tag 组有两个模型。
   'row.mediaModelsLabel': '本区可用的图像模型',
-  'row.mediaModelsHint': '读自当前账号的产品配置。生图工具就按这里挑模型：不填图片走「文生图」那一组，填了图片走「图生图」那一组。这里是只读的——想换模型请在调用工具时指定。',
+  'row.mediaModelsHint': '读自当前账号的产品配置。生图工具就按这里挑模型：不填图片走「文生图」那一组，填了图片走「图生图」那一组。「图像」那几行是只读的（想换就在调用工具时指定模型）；「视频」模型可以在上面的选择器里钉住。',
   'row.mediaModelsEmpty': '这一区的产品配置里没有图像或视频模型。',
   'row.mediaModelsError': '读取媒体模型清单失败：{message}',
   'row.mediaModelsRefresh': '重新读取',

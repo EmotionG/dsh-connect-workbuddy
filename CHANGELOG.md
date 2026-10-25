@@ -3,7 +3,27 @@
 ## 未发布
 
 > 生图工具的 `size` 描述补上**实测的大图档位与像素上限**（**执行层零改动**——`buildImageBody`
-> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验）。
+> 一直原样透传 `size`，改的是「模型以为能画多大」这个先验），同期落地视频生成工具。
+
+### Features
+
+- **新增 `workbuddy_draw_video`：文生视频 / 图生视频，国内区与国际区都能注册，逐区 opt-in**
+  - **它不是「接一次 `submitVideo()`」**：视频是异步任务——`POST /v2/videos/generations` 只回一个 `taskId`，还要轮询 `POST /v2/videos/tasks` 到 `completed`（5 秒一次，上限 600 秒），再 `GET` 每条 `data[].url` 把 mp4 拉到本地。旧文档「加视频只是接一次 `submitVideo()`」少说了后两段，已在 `docs/VIDEO_GEN.md` 对账。
+  - **参数层与选模型层是复用的**：`MEDIA_TAGS`、`VIDEO_TAG_*`、`fetchMediaModels`、卡片媒体清单原本就认得两个视频标签，所以参数校验与选模型只补了一层 `src/video-gen.ts`；**执行层是全新异步代码**（`src/upstream.ts` 的 `submitVideo` / `pollVideoTask` / `downloadVideo`）。
+  - **花钱的三条红线照搬生图**：独占执行（不声明 `isConcurrencySafe`）、失败后 60 秒冷却、冷却**只看请求是否真的发出**（参数错、未登录、读不到输入图一律不进冷却）；工具**逐区 opt-in**，不勾时根本不注册，模型看不到它。
+  - **产物落本地临时目录**：视频是二进制，不进对话体，工具只回 `file://` 路径 + 渲染成链接（`os.tmpdir()/workbuddy-video-gen/<model>-<时间戳>.mp4`）。
+  - **顺手改对一处描述**：`seconds` 原写「越界会被夹回默认值并提示」，而 `resolveVideoParams` 实际抛
+    `INVALID_ARGS`（不会夹取）——描述会教调用方传 30 秒再等一个 5 秒的结果，然后把报错当成 bug。
+  - **验证**：`tsc` 两套配置 0 error；`vitest run` 141 文件 / 2425 条通过（新增
+    `tests/video-gen.spec.ts` 35 条、`tests/video-tool.spec.ts` 7 条、`tests/video-tool-optin.spec.ts`
+    19 条）；`tsdown` 构建通过。
+
+- **卡片上按模式钉住视频模型（软约束，与显式 `model` 分工明确）**
+  - **起因**：国内区每个视频标签组都有 2 个模型（`kling-video-v3` / `minimax-video-h3`），调用方多半省掉 `model`，于是永远拿到目录里的第一个；口头说一次不持久。
+  - **按区、按标签存**：`regions.<区>.preferredVideoModels` 是 `{ [tag]: modelId }`——两种模式可能由不同模型提供，且模型 id 不跨区（`minimax-video-h3` 在国际区不存在）。
+  - **软约束**：显式 `model` 是调用方为这一次写的，写错就报 `NO_VIDEO_MODEL`；卡片偏好是用户以前写的，钉住的模型已从目录里消失时**静默回落组内第一个**。两条方向相反的规则各有测试钉住。
+  - **清空 = 删 key**，不是写空串；卡片读值先问 Host（`statusByRegion`），浏览器配置快照只作回落。
+  - **写入走与开关同一条「写后回读校验」路径**（`writeRegionPreferredVideoModels`），不是裸 `scope.set`。
 
 ### Fixes
 

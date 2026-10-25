@@ -707,6 +707,57 @@ export function regionImageToolEnabledOf(value: unknown, region: WorkBuddyWebReg
   return regionSlotOf(value, region)['imageToolEnabled'] === true
 }
 
+export function regionVideoToolEnabledOf(value: unknown, region: WorkBuddyWebRegion): boolean {
+  return regionSlotOf(value, region)['videoToolEnabled'] === true
+}
+
+/**
+ * The video model pinned per tag in one region, or an empty record.
+ *
+ * A PIN, not an authorisation: reading it grants nothing, and an absent entry
+ * merely means the tool takes that tag group's first model. Values are model ids
+ * from the same region's catalog. A stale id is tolerated on purpose — a catalog
+ * can drop a model the user had pinned, and that must not turn into a failed
+ * generation (the tool falls back to the group's first model).
+ */
+export function regionPreferredVideoModelsOf(
+  value: unknown,
+  region: WorkBuddyWebRegion,
+): Record<string, string> {
+  const raw = regionSlotOf(value, region)['preferredVideoModels']
+  if (typeof raw !== 'object' || raw === null) return {}
+  const out: Record<string, string> = {}
+  for (const [tag, id] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof id === 'string' && id !== '') out[tag] = id
+  }
+  return out
+}
+
+/**
+ * Build the next `regions` settings value for one pinned video model.
+ *
+ * `modelId` of `undefined` or `''` CLEARS that tag's pin, which is why this is
+ * a three-state write rather than a boolean: the card's picker has a "no pin"
+ * row, and deleting the key is what makes the absence mean "nothing pinned"
+ * again (an empty string would be a value the tool would have to special-case).
+ *
+ * Same merge rule as the switches above: only this region's field changes.
+ */
+export function nextRegionPreferredVideoModels(
+  value: unknown,
+  region: WorkBuddyWebRegion,
+  tag: string,
+  modelId: string | undefined,
+): Record<string, unknown> {
+  const pinned = { ...regionPreferredVideoModelsOf(value, region) }
+  if (modelId === undefined || modelId === '') delete pinned[tag]
+  else pinned[tag] = modelId
+  return nextRegionSlots(regionsMapOf(value), region, {
+    ...regionSlotOf(value, region),
+    preferredVideoModels: pinned,
+  })
+}
+
 /**
  * The two seats the credit readout can occupy (issue #62).
  *
@@ -773,6 +824,17 @@ export function nextRegionImageToolEnabled(
   return nextRegionSlots(regionsMapOf(value), region, {
     ...regionSlotOf(value, region),
     imageToolEnabled: enabled,
+  })
+}
+
+export function nextRegionVideoToolEnabled(
+  value: unknown,
+  region: WorkBuddyWebRegion,
+  enabled: boolean,
+): Record<string, unknown> {
+  return nextRegionSlots(regionsMapOf(value), region, {
+    ...regionSlotOf(value, region),
+    videoToolEnabled: enabled,
   })
 }
 
@@ -1081,6 +1143,22 @@ export type WorkBuddyWebUsage =
      */
     imageToolEnabled?: boolean
     /**
+     * Whether the model may call the video-generation tool here (opt-in).
+     * Same opt-IN travel semantics as `imageToolEnabled` — an absent value
+     * is NOT consent, so a stale mirror cannot leave the spending capability on.
+     */
+    videoToolEnabled?: boolean
+    /**
+     * The video model pinned per tag here (`text-to-video` /
+     * `image-to-video`), as a model id from this region's catalog.
+     *
+     * Travels on the Host's answer for the same measured reason as the switches
+     * above: the picker has to render the pin the TOOL will read, and the
+     * browser settings mirror is stale for this namespace on the affected 0.1.7
+     * deployments. Absent reads as "nothing pinned", never as a made-up id.
+     */
+    preferredVideoModels?: Readonly<Record<string, string>>
+    /**
      * Whether the OPTIONAL CodeBuddy CLI route is mounted (tool `codebuddy_ask`
      * + command `/codebuddy`).
      *
@@ -1170,6 +1248,16 @@ export type WorkBuddyWebUsage =
      * after a switch-off that never landed.
      */
     imageToolEnabled?: boolean
+    /**
+     * Whether the model may call the video-generation tool here (opt-in).
+     * Same opt-IN travel semantics as `imageToolEnabled`.
+     */
+    videoToolEnabled?: boolean
+    /**
+     * The video model pinned per tag here; see the signed-out variant for why
+     * this travels on the Host's answer instead of the browser mirror.
+     */
+    preferredVideoModels?: Readonly<Record<string, string>>
     /**
      * Whether the OPTIONAL CodeBuddy CLI route is mounted (tool `codebuddy_ask`
      * + command `/codebuddy`).

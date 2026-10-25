@@ -185,6 +185,22 @@ export interface WorkBuddyStatusRouteOptions {
    */
   imageToolEnabled?(region: WorkBuddyRegion): boolean
   /**
+   * Whether the model may call the video-generation tool in this region.
+   * Optional, absent reads as OFF — same opt-IN semantics as `imageToolEnabled`
+   * (the model decides to spend, so an older Host must not be read as consent).
+   */
+  videoToolEnabled?(region: WorkBuddyRegion): boolean
+  /**
+   * The video model pinned per tag in this region (`text-to-video` /
+   * `image-to-video`), as a model id from that region's own catalog.
+   *
+   * Optional, and absent reads as "nothing pinned" — the same direction as
+   * `videoToolEnabled`: an older Host that cannot answer must not invent a
+   * choice the user never made. The card uses it to render the per-mode picker
+   * from the committed value the tool will actually read.
+   */
+  preferredVideoModels?(region: WorkBuddyRegion): Readonly<Record<string, string>>
+  /**
    * Whether the OPTIONAL CodeBuddy CLI route is mounted (`codebuddy_ask` tool +
    * `/codebuddy` command).
    *
@@ -1010,6 +1026,10 @@ export async function workBuddyWebStatus(
   // `?? false`, unlike the two above: the image tool lets the MODEL spend,
   // so an older Host that cannot answer must not be read as consent.
   const imageToolEnabled = deps.imageToolEnabled?.(region) ?? false
+  const videoToolEnabled = deps.videoToolEnabled?.(region) ?? false
+  // Absent reads as "nothing pinned", never as a made-up id: the picker then
+  // shows its default row, which is exactly what the tool would do anyway.
+  const preferredVideoModels = deps.preferredVideoModels?.(region) ?? {}
   // GLOBAL, read once per answer and repeated on each region: the card polls one
   // region at a time, so the switch has to be present on whichever tab is open.
   // `=== true` for the same reason as `imageToolEnabled`: absent is not consent.
@@ -1034,7 +1054,7 @@ export async function workBuddyWebStatus(
     // is only reachable when a sign-in landed between the two calls. A
     // credential just appeared: there is nothing to diagnose, and a list of
     // failed probe paths would contradict what the user is looking at.
-    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, cliBridgeEnabled, cliBridgeModel, cliBridgeEffort, cliBridgeRegionOrder, busyLevels }
+    return { status: 'signed-out', accounts: [], selectionExplicit, enabled, showCreditsInMainUi, imageToolEnabled, videoToolEnabled, preferredVideoModels, cliBridgeEnabled, cliBridgeModel, cliBridgeEffort, cliBridgeRegionOrder, busyLevels }
   }
   let credential
   try {
@@ -1067,6 +1087,8 @@ export async function workBuddyWebStatus(
       showCreditsInMainUi,
       creditPosition,
       imageToolEnabled,
+      videoToolEnabled,
+      preferredVideoModels,
       cliBridgeEnabled,
       cliBridgeModel,
       cliBridgeEffort,
@@ -1097,6 +1119,8 @@ export async function workBuddyWebStatus(
     showCreditsInMainUi,
     creditPosition,
     imageToolEnabled,
+    videoToolEnabled,
+    preferredVideoModels,
     cliBridgeEnabled,
     cliBridgeModel,
     cliBridgeEffort,

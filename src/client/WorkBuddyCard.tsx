@@ -32,9 +32,13 @@ import {
   nextRegionCreditsShown,
   nextRegionEnabled,
   nextRegionImageToolEnabled,
+  nextRegionPreferredVideoModels,
+  nextRegionVideoToolEnabled,
   regionCreditsShownOf,
   regionEnabledOf,
   regionImageToolEnabledOf,
+  regionPreferredVideoModelsOf,
+  regionVideoToolEnabledOf,
   WORKBUDDY_ACCOUNTS_REFRESH_PATH,
   WORKBUDDY_CHECKIN_PATH,
   WORKBUDDY_MEDIA_MODELS_PATH,
@@ -58,7 +62,7 @@ import type {
   WorkBuddyWebSearchPath,
   WorkBuddyWebUsage,
 } from '../status-paths.ts'
-import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, extraInjectedPrefixesOf, isFileContentionWriteError, sessionTitleOf, upstreamSwitchOf, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionModels, writeUpstreamSwitch } from './account-selection.ts'
+import { cliBridgeEffortOf, cliBridgeEnabledOf, cliBridgeModelOf, cliBridgeRegionOrderOf, extraInjectedPrefixesOf, isFileContentionWriteError, sessionTitleOf, upstreamSwitchOf, writeAccountSlot, writeCliBridgeEnabled, writeCliBridgeEffort, writeCliBridgeModel, writeCliBridgeRegionOrder, writeRegionCreditPosition, writeRegionCreditsShown, writeRegionEnabled, writeRegionImageToolEnabled, writeRegionPreferredVideoModels, writeRegionVideoToolEnabled, writeRegionModels, writeUpstreamSwitch } from './account-selection.ts'
 import { AccountPool } from './AccountPool.tsx'
 import { OAuthSignIn } from './OAuthSignIn.tsx'
 import { AccountTransfer } from './AccountTransfer.tsx'
@@ -650,6 +654,15 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
    */
   const [togglingCredits, setTogglingCredits] = useState<WorkBuddyWebRegion | undefined>(undefined)
   /**
+   * Which video-model pin is being written right now: the tag string, or
+   * undefined.
+   *
+   * A SEPARATE state from {@link togglingCredits} for the same reason those two
+   * switches keep separate busy flags: the pin lives in a different field of the
+   * same region slot, so one in-flight write must not disable the other control.
+   */
+  const [pinningVideoModel, setPinningVideoModel] = useState<string | undefined>(undefined)
+  /**
    * The OPTIONAL CodeBuddy CLI route switch (global: one switch, one budget).
    *
    * `undefined` until the first Host answer arrives, so the box renders the
@@ -1084,6 +1097,38 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
   }
 
   /**
+   * Whether the model may call the video tool in this region. Mirrors
+   * imageToolOn: read off the Host answer first, so a stale mirror cannot
+   * leave the spending capability on. Absent is NOT consent.
+   */
+  const videoToolOn = (item: WorkBuddyWebRegion): boolean => {
+    const usage = statusByRegion[item] as { videoToolEnabled?: unknown } | undefined
+    if (typeof usage?.videoToolEnabled === 'boolean') return usage.videoToolEnabled
+    return regionVideoToolEnabledOf(settingsScope?.getSnapshot().value, item)
+  }
+
+  /**
+   * The video model pinned for one mode tag in this region, or `''` for "no pin".
+   *
+   * Same read order as {@link videoToolOn} and for the same measured reason: the
+   * Host's answer first, because this namespace's browser mirror is stale on the
+   * affected 0.1.7 deployments — a picker reading the mirror alone would keep
+   * showing a pin the tool no longer uses.
+   *
+   * `''` rather than `undefined` because that is what the `<select>` needs for its
+   * "default" row; the write path turns it back into "remove the key".
+   */
+  const preferredVideoModelOf = (item: WorkBuddyWebRegion, tag: string): string => {
+    const usage = statusByRegion[item] as { preferredVideoModels?: unknown } | undefined
+    const fromHost = usage?.preferredVideoModels
+    if (typeof fromHost === 'object' && fromHost !== null) {
+      const pinned = (fromHost as Record<string, unknown>)[tag]
+      if (typeof pinned === 'string') return pinned
+    }
+    return regionPreferredVideoModelsOf(settingsScope?.getSnapshot().value, item)[tag] ?? ''
+  }
+
+  /**
    * Switch one region's provider off or on. The write carries the region's
    * whole slot through untouched — only `enabled` changes — so the user's
    * directory, model picks, image opt-ins and budgets survive a round trip.
@@ -1423,6 +1468,63 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
       if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
     } finally {
       if (mounted.current) setTogglingCredits(undefined)
+    }
+  }
+
+  const toggleVideoTool = async (item: WorkBuddyWebRegion, enabled: boolean): Promise<void> => {
+    if (settingsScope === undefined) return
+    setTogglingCredits(item)
+    try {
+      const regions = nextRegionVideoToolEnabled(settingsScope.getSnapshot().value, item, enabled) as Record<string, unknown>
+      const slot = regions[item]
+      await writeRegionVideoToolEnabled(
+        settingsScope,
+        item,
+        enabled,
+        typeof slot === 'object' && slot !== null ? slot as Record<string, unknown> : {},
+      )
+      // Re-read the Host so the box renders the committed value, for the same
+      // measured reason as toggleImageTool: this namespace's browser mirror is
+      // written by the Host endpoint and does not come back through scope.set.
+      await refreshUsage(item)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setTogglingCredits(undefined)
+    }
+  }
+
+  /**
+   * Pin (or clear) one region's video model for one mode tag.
+   *
+   * `undefined` means "no pin": the picker's default row, which the tool reads as
+   * "take the first model of that group". Both directions go through the same
+   * landed-checked write as every other settings control, then re-read the Host —
+   * a pin that reverted silently would leave the user believing the tool would
+   * use a model it never picks.
+   */
+  const pinVideoModel = async (
+    item: WorkBuddyWebRegion,
+    tag: string,
+    modelId: string | undefined,
+  ): Promise<void> => {
+    if (settingsScope === undefined) return
+    setPinningVideoModel(tag)
+    try {
+      const regions = nextRegionPreferredVideoModels(settingsScope.getSnapshot().value, item, tag, modelId) as Record<string, unknown>
+      const slot = regions[item]
+      await writeRegionPreferredVideoModels(
+        settingsScope,
+        item,
+        tag,
+        modelId,
+        typeof slot === 'object' && slot !== null ? slot as Record<string, unknown> : {},
+      )
+      await refreshUsage(item)
+    } catch (error: unknown) {
+      if (mounted.current) setAccountError(error instanceof Error ? error.message : t('row.requestFailed'))
+    } finally {
+      if (mounted.current) setPinningVideoModel(undefined)
     }
   }
 
@@ -2144,14 +2246,41 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
     </label>
   )
   /**
-   * What this region can actually draw, READ-ONLY.
+   * The video-tool opt-in. Same shape and same stakes as imageToolPreference:
+   * per-region, off means the tool is NOT registered at all (not "registered
+   * but refusing"), so a tick here only ever authorizes spending on THIS tab.
+   * The tool is an async task that runs tens of seconds to minutes.
+   */
+  const videoToolPreference = (
+    <label className="dsm-workbuddy-pref" title={t('row.videoToolHint')}>
+      <input
+        type="checkbox"
+        /* Its OWN class (see imageToolPreference for why it must not be the
+           shared dsm-workbuddy-pref-check class): a second element carrying
+           that class would break the credit-switch suite selector. */
+        className="dsm-workbuddy-video-tool-check"
+        checked={activeRegionOn ? videoToolOn(activeRegion) : false}
+        disabled={!activeRegionOn || togglingCredits === activeRegion || !canWrite || saving || poolBusy}
+        onChange={(event: { target: { checked: boolean } }) => {
+          void toggleVideoTool(activeRegion, event.target.checked)
+        }}
+      />
+      <span className="dsm-workbuddy-pref-copy">
+        <span className="dsm-workbuddy-pref-label">{t('row.videoToolLabel')}</span>
+        <span className="dsm-workbuddy-pref-hint">{t('row.videoToolHint')}</span>
+      </span>
+    </label>
+  )
+  /**
+   * What this region can actually draw. The IMAGE rows stay read-only; the
+   * VIDEO rows are pinnable in `videoModelPreference` below.
    *
-   * There is deliberately no picker here. Each tag group holds exactly one
-   * model in both regions today (measured 2026-10-25), so a dropdown would be a
-   * choice of one — the card would be inviting a decision that does not exist.
-   * What the user DOES need is the answer to "can this tab draw at all, and
-   * with what" — which is also what makes the image-tool switch above
-   * meaningful on the international tab.
+   * The roster used to be read-only because every tag group held exactly one
+   * model in both regions (measured 2026-10-25), so a dropdown would have been a
+   * choice of one. That stopped being true for VIDEO: CN publishes two models
+   * per video tag (`kling-video-v3` and `minimax-video-h3`) — the very
+   * "两个模型能不能挑" question. The pin therefore lives in its own block below,
+   * and the roster keeps answering "can this tab draw at all, and with what".
    *
    * Indented like the position picker, because it is a property of the switch
    * above it rather than a fourth independent setting.
@@ -2163,6 +2292,60 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
     'image-to-video': t('row.mediaTagImageToVideo'),
   }
   const activeMedia = mediaByRegion[activeRegion]
+  /**
+   * The per-mode video-model picker.
+   *
+   * Hidden unless the video tool is actually authorized on this tab
+   * (`activeRegionOn && videoToolOn`): a pin only ever reaches the tool when that
+   * region registers it, so showing the choice elsewhere would invite a decision
+   * that changes nothing.
+   *
+   * One row per VIDEO tag, and only for tags this region's catalog still serves
+   * — the tool cannot use a pin for a group that has no models. The "default"
+   * row is not decoration: it is the only way back to "take the group's first
+   * model", and clearing the pin DELETES the key rather than storing an empty
+   * string (see `nextRegionPreferredVideoModels`).
+   *
+   * A pinned id the catalog no longer carries renders the "default" row too:
+   * that is exactly what the tool does with it (falls back rather than failing),
+   * so showing it honestly beats a select box displaying an option it does not
+   * itself offer.
+   */
+  const videoModelTags = ['text-to-video', 'image-to-video'] as const
+  const videoModelPreference = !(activeRegionOn && videoToolOn(activeRegion)) || activeMedia === undefined
+    ? null
+    : (
+      <div className="dsm-workbuddy-pref dsm-workbuddy-media">
+        <span className="dsm-workbuddy-pref-copy">
+          <span className="dsm-workbuddy-pref-label">{t('row.videoModelLabel')}</span>
+          <span className="dsm-workbuddy-pref-hint">{t('row.videoModelHint')}</span>
+          {videoModelTags.map(tag => {
+            const group = activeMedia.filter(model => model.tags.includes(tag))
+            if (group.length === 0) return null
+            const pinned = preferredVideoModelOf(activeRegion, tag)
+            return (
+              <label key={tag} className="dsm-workbuddy-media-row">
+                <span className="dsm-workbuddy-media-tag">{mediaTagLabels[tag] ?? tag}</span>
+                <select
+                  className="dsm-workbuddy-video-model-select"
+                  value={group.some(model => model.id === pinned) ? pinned : ''}
+                  disabled={!canWrite || saving || poolBusy || pinningVideoModel !== undefined}
+                  onChange={(event: { target: { value: string } }) => {
+                    const next = event.target.value
+                    void pinVideoModel(activeRegion, tag, next === '' ? undefined : next)
+                  }}
+                >
+                  <option value="">{t('row.videoModelDefault')}</option>
+                  {group.map(model => (
+                    <option key={model.id} value={model.id}>{model.name}</option>
+                  ))}
+                </select>
+              </label>
+            )
+          })}
+        </span>
+      </div>
+    )
   const mediaModelsPreference = (
     <div className="dsm-workbuddy-pref dsm-workbuddy-media">
       <span className="dsm-workbuddy-pref-copy">
@@ -2425,6 +2608,10 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
           off, where it would configure nothing. */}
       {cliBridgeSwitchedOn() ? cliBridgePickers : null}
       {imageToolPreference}
+      {videoToolPreference}
+      {/* Same rule as the CLI pickers above: the pin row is a property of the
+          video switch, so it is hidden while that switch is off. */}
+      {videoModelPreference}
       {mediaModelsPreference}
       <label
         className="dsm-workbuddy-pref"
