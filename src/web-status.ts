@@ -239,6 +239,22 @@ export interface WorkBuddyStatusRouteOptions {
    */
   cliBridgeRegionOrder?(): string
   /**
+   * Whether the request path drops foreign thinking blocks (issue #147).
+   *
+   * Optional, absent reads as OFF: the repair changes bytes the upstream counts,
+   * so a Host that cannot answer must not be read as consent.
+   */
+  dropForeignThinking?(): boolean
+  /**
+   * What the LAST request had to drop, for the card's explanation of a turn that
+   * arrived looking like working notes (issue #147).
+   *
+   * Optional, and absent means "nothing to report" — the card then renders no
+   * warning rather than a permanent one. Process-local and last-wins: it
+   * describes the turn the user is looking at, not a historical tally.
+   */
+  latestForeignThinking?(): { blocks: readonly { messageIndex: number, blockIndex: number, characters: number, variant: 'flattened' | 'dropped' }[], atMs: number } | undefined
+  /**
    * The LIVE load level per model id, for the card's icon.
    *
    * Optional, and absent means "not measured": the card draws no badge rather
@@ -619,6 +635,9 @@ const UPSTREAM_SWITCH_FIELDS: ReadonlySet<string> = new Set([
   'keepPromptLast',
   'extraInjectedPrefixes',
   'sessionTitle',
+  // Issue #147: the transcript repair switch, driven from the card's reply
+  // notice as well as its switch row.
+  'dropForeignThinking',
 ])
 
 /** A non-null, non-array object: the only shape the slot merge applies to. */
@@ -1041,6 +1060,13 @@ export async function workBuddyWebStatus(
   const cliBridgeModel = deps.cliBridgeModel?.() ?? ''
   const cliBridgeEffort = deps.cliBridgeEffort?.() ?? ''
   const cliBridgeRegionOrder = deps.cliBridgeRegionOrder?.() ?? ''
+  // ISSUE #147. `=== true` for the same reason as the spend switches: the repair
+  // changes bytes the upstream counts, so an absent answer is not consent.
+  const dropForeignThinking = deps.dropForeignThinking?.() === true
+  // The last request's repair report, or nothing. Absent reads as "no report",
+  // never as "the feature is off": the two are different facts and the card
+  // says different things about them.
+  const lastForeignThinking = deps.latestForeignThinking?.()
   // The LIVE load levels, beside the model list rather than inside it: the
   // card's list is the SAVED roster, and a saved roster has no load level.
   const busyLevels = deps.busyLevels?.(region) ?? {}
@@ -1093,6 +1119,8 @@ export async function workBuddyWebStatus(
       cliBridgeModel,
       cliBridgeEffort,
       cliBridgeRegionOrder,
+      dropForeignThinking,
+      ...lastForeignThinking === undefined ? {} : { lastForeignThinking },
       busyLevels,
       ...await store.selectionLost() ? { selectionLost: true } : {},
       // Only the genuinely empty machine gets the probe list. When local
@@ -1125,6 +1153,8 @@ export async function workBuddyWebStatus(
     cliBridgeModel,
     cliBridgeEffort,
     cliBridgeRegionOrder,
+    dropForeignThinking,
+    ...lastForeignThinking === undefined ? {} : { lastForeignThinking },
     busyLevels,
     accounts: accounts.map(toWebAccount),
     // Stamped with what the plugin OBSERVED, not just what the catalog declares:
@@ -1937,7 +1967,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // the CLI route off must not look like it reset them.
           if (field !== 'regions' && field !== 'accounts' && field !== 'cliBridge'
             && !(typeof field === 'string' && UPSTREAM_SWITCH_FIELDS.has(field))) {
-            return json(res, 400, { error: 'field must be regions, accounts, cliBridge, usageIdentity, keepPromptLast, extraInjectedPrefixes or sessionTitle' })
+            return json(res, 400, { error: 'field must be regions, accounts, cliBridge, usageIdentity, keepPromptLast, extraInjectedPrefixes, sessionTitle or dropForeignThinking' })
           }
           const rows = settings.describe()
           const row = rows.find((r: any) => String(r.ns).includes('workbuddy'))

@@ -222,6 +222,22 @@ export interface WorkBuddyAdapterOptions {
    * them. Production callers leave it unset.
    */
   piAiGeneration?: PiAiGeneration
+  /**
+   * Drop foreign thinking blocks pi-ai would publish as prose (issue #147).
+   *
+   * OFF by default, and read LIVE (a getter, not a boolean) so the switch takes
+   * effect on the next request without reloading the plugin: turning it on
+   * mid-session is the whole point — the user sees the working-notes turn,
+   * flips the switch, and the next turn is answered normally.
+   */
+  dropForeignThinking?: () => boolean
+  /**
+   * Told which foreign thinking blocks a request dropped, so the reply can name
+   * the condition instead of leaving the user to conclude the model broke
+   * (issue #147 asks for at least a visible hint). Called at most once per
+   * request; failures are swallowed.
+   */
+  onForeignThinking?: (blocks: readonly ForeignThinkingBlock[]) => void
 }
 
 /** What {@link createWorkBuddyAdapter} hands back. */
@@ -714,19 +730,212 @@ export function alignAssistantIdentities(
   return changed ? { ...context, messages: next } : context
 }
 
+/**
+ * One foreign thinking block that pi-ai would publish as PROSE, and the reason it
+ * would (issue #147).
+ *
+ * `variant` is not cosmetic: the two are handled by the same repair but they
+ * mean different things, and the card explains them differently.
+ *
+ * - `flattened`: `stopReason` is a normal completion, so `transform-messages`
+ *   turns the block into `{type:'text', text: thinking}` — the whole reasoning
+ *   body lands in the visible answer.
+ * - `dropped`: `stopReason` is `error`/`aborted`, so the entire message is
+ *   skipped; nothing reaches the wire and nothing reaches the user. It is
+ *   reported anyway, because it still costs context: the model's answer to
+ *   "why did my last turn say nothing" is this line, and a caller cannot see it
+ *   from the transcript.
+ */
+export interface ForeignThinkingBlock {
+  /** Index of the message in the context's `messages`. */
+  messageIndex: number
+  /** Index of the block within that message's `content`. */
+  blockIndex: number
+  /** How many characters of reasoning the block carried. */
+  characters: number
+  /** Whether pi-ai would flatten it into prose or drop the whole message. */
+  variant: 'flattened' | 'dropped'
+}
+
+/** Read `content` as a block array without assuming the shape. */
+function blocksOf(message: unknown): unknown[] {
+  if (typeof message !== 'object' || message === null) return []
+  const content = (message as Record<string, unknown>)['content']
+  return Array.isArray(content) ? content : []
+}
+
+/** Whether this assistant message's identity proves a DIFFERENT model produced it. */
+function isForeignAssistant(message: unknown, identity: string): boolean {
+  if (typeof message !== 'object' || message === null) return false
+  const record = message as Record<string, unknown>
+  if (record['role'] !== 'assistant') return false
+  // The host's own fallback marker beats everything: `foreignAssistant()` sets
+  // it precisely to say "this is not the wire format the current request uses".
+  if (record['api'] === HOST_FOREIGN_API) return true
+  const provider = record['provider']
+  return typeof provider === 'string' && provider !== identity
+    && provider !== WORKBUDDY_PROVIDER && provider !== WORKBUDDY_GLOBAL_PROVIDER
+}
+
+/**
+ * Every foreign thinking block pi-ai would turn into visible prose (issue #147).
+ *
+ * THE DEFECT. pi-ai keeps a historical `thinking` block only while
+ * `isSameModel` holds — provider AND api AND model id all equal to the request
+ * (`transform-messages.js:68`). For everything else it does NOT drop the block:
+ * `:87–90` rewrites it to `{type:'text', text: thinking}`, which is the answer
+ * channel. A session that moved between providers therefore arrives with its
+ * other provider's working notes already spelled as prose, and the model reads
+ * that shape and copies it.
+ *
+ * Issue #147 measured the consequence on a real 80-step turn: 56 assistant
+ * messages carried an answer while their own `reasoning` was ≤ 1 character,
+ * 20 of them held English working notes totalling 58,960 characters, and CJK
+ * fell to 1.37% of the visible text where the preceding six turns had been
+ * entirely Chinese. That is not a formatting complaint — it also pushed the
+ * session from 696,966 to 758,005 total tokens against an 800,000 compression
+ * threshold.
+ *
+ * WHY THIS IS READ-ONLY. Nothing here rewrites the transcript:
+ * {@link dropForeignThinking} does, and the split keeps the DIAGNOSIS available
+ * to surfaces that must not change bytes (the card, the reply notice).
+ *
+ * @param context - a pi-ai context, before or after `alignAssistantIdentities`.
+ * @param identity - the identity this adapter stamps on its own models.
+ * @returns one entry per affected block, in transcript order.
+ */
+export function foreignThinkingOf(
+  context: Context,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+): ForeignThinkingBlock[] {
+  const messages = (context as { messages?: unknown }).messages
+  if (!Array.isArray(messages)) return []
+  const found: ForeignThinkingBlock[] = []
+  for (const [messageIndex, message] of messages.entries()) {
+    if (!isForeignAssistant(message, identity)) continue
+    const record = message as Record<string, unknown>
+    const stopReason = record['stopReason']
+    // Mirrors `transform-messages.js`: an errored or aborted turn is skipped
+    // wholesale, so its blocks would not have surfaced either way.
+    const variant = stopReason === 'error' || stopReason === 'aborted' ? 'dropped' : 'flattened'
+    for (const [blockIndex, block] of blocksOf(message).entries()) {
+      if (typeof block !== 'object' || block === null) continue
+      const fields = block as Record<string, unknown>
+      if (fields['type'] !== 'thinking') continue
+      // A REDACTED block is never shown as prose: pi-ai returns `[]` for it
+      // (`:75–77`), so it is neither a leak nor a context cost worth naming.
+      if (fields['redacted'] === true) continue
+      const thinking = fields['thinking']
+      const characters = typeof thinking === 'string' ? thinking.length : 0
+      // Empty reasoning is dropped before any of the branches that matter
+      // (`:83–84`), so reporting it would be a false positive.
+      if (characters === 0) continue
+      found.push({ messageIndex, blockIndex, characters, variant })
+    }
+  }
+  return found
+}
+
+/**
+ * Remove the foreign thinking blocks {@link foreignThinkingOf} finds.
+ *
+ * WHY REMOVAL IS THE HONEST REPAIR. The alternatives are both worse:
+ *
+ *   - LEAVE IT: pi-ai publishes the other provider's private working notes as
+ *     this turn's answer (the #147 defect), so the user reads reasoning instead
+ *     of a reply and the model imitates that shape forever after.
+ *   - KEEP IT AS THINKING: impossible from here. `isSameModel` is pi-ai's own
+ *     predicate over fields this plugin does not control (`model.provider` /
+ *     `model.api` / `model.id` are compared against the MESSAGE's), and the
+ *     only way to satisfy it is to claim the foreign turn as this model's own
+ *     output — which is exactly the provenance lie issue #111 removed. These
+ *     blocks carry no `thinkingSignature` (the host builds them that way), so
+ *     they could not be replayed as signed reasoning even if claimed.
+ *
+ * Dropping is what the request builder already does with them in every other
+ * branch: an unsigned foreign thinking block is never sent as
+ * `reasoning_content`, so its only possible contribution to the wire was the
+ * flattened prose this function removes. Every other block — text, tool calls —
+ * is left exactly where it is, and so is every message's identity.
+ *
+ * Idempotent: a second pass finds nothing to remove. Returns the SAME context
+ * object when nothing changed, so the common case allocates nothing.
+ *
+ * @param context - a pi-ai context.
+ * @param identity - the identity this adapter stamps on its own models.
+ * @returns the repaired context, or the input when no block qualified.
+ */
+export function dropForeignThinking(
+  context: Context,
+  identity: string = WORKBUDDY_MODEL_IDENTITY,
+): Context {
+  const affected = foreignThinkingOf(context, identity)
+  if (affected.length === 0) return context
+  const messages = (context as unknown as { messages: unknown[] }).messages
+  // Group by message first: each message is copied at most once, and a message
+  // whose content becomes empty is left in place (pi-ai drops it anyway; moving
+  // it here would renumber tool-result pairing for no benefit).
+  const byMessage = new Map<number, Set<number>>()
+  for (const block of affected) {
+    const set = byMessage.get(block.messageIndex) ?? new Set<number>()
+    set.add(block.blockIndex)
+    byMessage.set(block.messageIndex, set)
+  }
+  const next = messages.map((message, index) => {
+    const remove = byMessage.get(index)
+    if (remove === undefined) return message
+    const record = message as Record<string, unknown>
+    const content = blocksOf(message).filter((_, blockIndex) => !remove.has(blockIndex))
+    return { ...record, content }
+  })
+  return { ...context, messages: next } as Context
+}
+
+/**
+ * How deeply this wrapper repairs the transcript before it reaches pi-ai.
+ *
+ * Both members are OFF by default, so a config that never mentions them sends
+ * byte-for-byte what earlier builds sent (see {@link WorkBuddyAdapterOptions}).
+ */
+export interface TranscriptRepairOptions {
+  /**
+   * Drop foreign thinking blocks pi-ai would publish as prose (issue #147).
+   * `false` keeps the previous behaviour, byte for byte.
+   */
+  dropForeignThinking?: boolean
+  /**
+   * Told how many blocks that repair removed and where, so a surface can name
+   * the condition the user is actually looking at. Called at most once per
+   * request, and only when something was removed.
+   */
+  onForeignThinking?: (blocks: readonly ForeignThinkingBlock[]) => void
+}
+
 function withLegacyContext(
   api: ProviderStreams,
   generation: PiAiGeneration,
   identity: string = WORKBUDDY_MODEL_IDENTITY,
   ownedRoutes: readonly string[] = [WORKBUDDY_PROVIDER, WORKBUDDY_GLOBAL_PROVIDER],
+  repair?: TranscriptRepairOptions,
 ): ProviderStreams {
   /** One place so both branches and both entry points agree on the order. */
-  const prepare = (context: Context): Context =>
-    alignAssistantIdentities(
-      generation === 'modern' ? foldModernContext(context) : adaptLegacyPiAiContext(context),
-      identity,
-      ownedRoutes,
-    )
+  const prepare = (context: Context): Context => {
+    const folded = generation === 'modern' ? foldModernContext(context) : adaptLegacyPiAiContext(context)
+    const aligned = alignAssistantIdentities(folded, identity, ownedRoutes)
+    // ISSUE #147, AFTER alignment on purpose. `foreignThinkingOf` reads the
+    // identity to decide what is foreign, so running it first would classify a
+    // turn this plugin OWNS (route id still unaligned) as foreign and delete its
+    // reasoning — issue #102's regression, from the other direction.
+    if (repair?.dropForeignThinking !== true) return aligned
+    const affected = foreignThinkingOf(aligned, identity)
+    if (affected.length === 0) return aligned
+    try {
+      repair.onForeignThinking?.(affected)
+    } catch {
+      // A diagnostic must never fail a chat request.
+    }
+    return dropForeignThinking(aligned, identity)
+  }
   if (generation === 'modern') {
     return {
       ...api,
@@ -973,7 +1182,12 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
       // BOTH of this bundle's routes are owned by this adapter, so a message
       // stamped with either is ours to align (issue #111). Anything else in
       // the transcript belongs to another provider and is left untouched.
-      withLegacyContext(openAICompletionsApi(), generation, modelIdentity),
+      withLegacyContext(openAICompletionsApi(), generation, modelIdentity, undefined, {
+        // Both read per request: the switch is meant to be flipped WHILE
+        // looking at the bad turn, and a captured boolean would need a reload.
+        get dropForeignThinking() { return options.dropForeignThinking?.() === true },
+        ...options.onForeignThinking === undefined ? {} : { onForeignThinking: options.onForeignThinking },
+      }),
       options.resolveContextRescue,
     ),
   })

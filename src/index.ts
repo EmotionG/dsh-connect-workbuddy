@@ -54,7 +54,7 @@ import {
 } from './adapter.ts'
 import { createContextRescue } from './context-rescue.ts'
 import type { RescueAgents, RescueCompaction, RescueTokenMeter } from './context-rescue.ts'
-import type { WorkBuddyAdapter } from './adapter.ts'
+import type { WorkBuddyAdapter, ForeignThinkingBlock } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { MEDIA_MODEL_TTL_MS, registerWorkBuddyImageTool, type ToolsServiceLike } from './image-tool.ts'
 import { registerWorkBuddyVideoTool } from './video-tool.ts'
@@ -583,6 +583,26 @@ export interface Config {
    */
   extraInjectedPrefixes?: string[]
   /**
+   * Drop foreign thinking blocks pi-ai would publish as prose (issue #147).
+   *
+   * When a session moves between providers, `dsh-llm-pi-ai` rebuilds the other
+   * provider's assistant turns with `api: 'dsh-foreign'`, and pi-ai's
+   * `isSameModel` then fails — so it does not DROP their `thinking` blocks, it
+   * rewrites each one to plain `text` (`transform-messages.js:87–90`). The
+   * other model's working notes therefore arrive as this turn's answer, and the
+   * model copies that shape on every later turn.
+   *
+   * On, those blocks are removed from the request instead: they carry no
+   * `thinkingSignature` (the host builds them without one), so they could never
+   * be replayed as reasoning anyway — their only possible contribution to the
+   * wire was the prose they turned into. Text blocks and tool calls are
+   * untouched, and so is every message's identity.
+   *
+   * OFF by default: it changes bytes the upstream counts, so it is an explicit
+   * opt-in on the same rule as {@link Config.usageIdentity}.
+   */
+  dropForeignThinking?: boolean
+  /**
    * Move the host's session-title request onto the hidden lightweight model
    * (issues #132/#133). Off by default: it is a real upstream request either
    * way, and the rewrite changes which bucket it is billed against.
@@ -880,6 +900,16 @@ export const Config: z<Config> = z.object({
       .default([])
       .description('Extra literal prefixes (issue #133) treated like the harness-injected context markers when keepPromptLast is on — for blocks a companion plugin injects that the built-in list does not recognize. Each entry matches the start of a trailing user message; read only while keepPromptLast is enabled. Sampled when the plugin mounts: reload the plugin (or restart the host) after changing it.'),
   ) as unknown as z<string[]>,
+  dropForeignThinking: asVolatile(
+    z.boolean()
+      .default(false)
+      .description('Drop foreign thinking blocks that pi-ai would publish as prose (issue #147). ' +
+        'After a provider switch the host rebuilds the other provider\'s assistant turns as dsh-foreign, ' +
+        'and pi-ai then rewrites their thinking blocks into visible text, so the model\'s working notes ' +
+        'become the answer and it copies that shape on later turns. On, those unsigned blocks are removed ' +
+        'from the request (they could never be replayed as reasoning anyway); text and tool calls are ' +
+        'untouched. Off by default because it changes bytes the upstream counts.'),
+  ) as unknown as z<boolean>,
   sessionTitle: asVolatile(
     z.object({
       enabled: z.boolean().default(false),
@@ -1356,6 +1386,22 @@ export function apply(ctx: Context, config: Config): void {
     }
     return levels
   }
+
+  /**
+   * The most recent request whose foreign thinking blocks were dropped
+   * (issue #147).
+   *
+   * Process-local and last-wins, deliberately: this is DIAGNOSTIC state that
+   * answers "why did my answer look like working notes", and it is only read by
+   * the status endpoint. Persisting it would let a stale turn from yesterday
+   * explain a session that has since been fixed — the whole point is that the
+   * reader is looking at the turn that just happened. It forgets on restart,
+   * which is the natural expiry for "what this process removed recently".
+   *
+   * Declared HERE rather than inside the adapter mount because the status route
+   * is registered outside that callback and must be able to read it.
+   */
+  let latestForeignThinking: { blocks: readonly ForeignThinkingBlock[], atMs: number } | undefined
 
   let current = () => config
   let invalidateCatalog = (): void => {}
@@ -2103,6 +2149,19 @@ export function apply(ctx: Context, config: Config): void {
     cliBridgeModel: () => unwrapVolatile(current().cliBridge)?.model ?? '',
     cliBridgeEffort: () => unwrapVolatile(current().cliBridge)?.effort ?? '',
     cliBridgeRegionOrder: () => unwrapVolatile(current().cliBridge)?.regionOrder ?? '',
+    /**
+     * Whether the request path drops foreign thinking blocks (issue #147), read
+     * live so the card's switch reflects the value the NEXT request will use
+     * rather than the one captured at mount.
+     */
+    dropForeignThinking: () => unwrapVolatile(current().dropForeignThinking) === true,
+    /**
+     * What the last request had to drop, so the card can explain a turn that
+     * arrived looking like working notes instead of leaving the user to conclude
+     * the model broke. `undefined` until a request actually removes something —
+     * an empty report would render as a permanent warning.
+     */
+    latestForeignThinking: () => latestForeignThinking,
     /**
      * WHERE the readout sits, resolved here rather than read from the browser
      * settings mirror, for the same measured reason as the flag above: on the
@@ -3238,6 +3297,14 @@ export function apply(ctx: Context, config: Config): void {
             displayName: WORKBUDDY_PROVIDER_DISPLAY_NAMES[region],
             resolveAttachments: () => ctx.get('attachments'),
             resolveContextRescue: () => contextRescue,
+            // Read through `current()` (not the captured `config`) so the
+            // switch applies to the NEXT request: the user turns it on while
+            // looking at a working-notes turn, and a stale capture would make
+            // that look like a broken toggle.
+            dropForeignThinking: () => unwrapVolatile(current().dropForeignThinking) === true,
+            onForeignThinking: blocks => {
+              latestForeignThinking = { blocks, atMs: Date.now() }
+            },
           })
         }
         invalidateCatalog = () => {

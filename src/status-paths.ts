@@ -1195,6 +1195,25 @@ export type WorkBuddyWebUsage =
      */
     cliBridgeRegionOrder?: string
     /**
+     * Whether the request path drops foreign thinking blocks (issue #147).
+     *
+     * Optional and absent reads as OFF: the repair changes bytes the upstream
+     * counts, so a Host that cannot answer must not be read as consent.
+     */
+    dropForeignThinking?: boolean
+    /**
+     * What the LAST request had to drop, for the card's explanation of a turn
+     * that arrived looking like working notes (issue #147).
+     *
+     * Absent means "no report", not "feature off" — the two are different facts
+     * and the card says different things about them. Process-local and
+     * last-wins: it describes the turn the reader is looking at.
+     */
+    lastForeignThinking?: {
+      blocks: readonly { messageIndex: number, blockIndex: number, characters: number, variant: 'flattened' | 'dropped' }[]
+      atMs: number
+    }
+    /**
      * The LIVE load level per model id, for the card's icon.
      *
      * A SEPARATE field from `models`, because the card's model list is the
@@ -1294,6 +1313,25 @@ export type WorkBuddyWebUsage =
      * GLOBAL and Host-carried for the same reasons as `cliBridgeModel`.
      */
     cliBridgeRegionOrder?: string
+    /**
+     * Whether the request path drops foreign thinking blocks (issue #147).
+     *
+     * Optional and absent reads as OFF: the repair changes bytes the upstream
+     * counts, so a Host that cannot answer must not be read as consent.
+     */
+    dropForeignThinking?: boolean
+    /**
+     * What the LAST request had to drop, for the card's explanation of a turn
+     * that arrived looking like working notes (issue #147).
+     *
+     * Absent means "no report", not "feature off" — the two are different facts
+     * and the card says different things about them. Process-local and
+     * last-wins: it describes the turn the reader is looking at.
+     */
+    lastForeignThinking?: {
+      blocks: readonly { messageIndex: number, blockIndex: number, characters: number, variant: 'flattened' | 'dropped' }[]
+      atMs: number
+    }
     /**
      * The LIVE load level per model id, for the card's icon.
      *

@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.12.0 (2026-10-26)
+
+> 特性版本：新增 `dropForeignThinking`（**默认关闭**），修 issue #147——跨 provider 切换后
+> pi-ai 把外来轮次的 thinking 改写成正文，模型随后照抄这个格式，整轮回答变成英文工作笔记。
+> 关闭时请求字节与 5.11.0 完全一致；打开后只删「本来会被压成正文、且不可能作为带签名 reasoning
+> 重放」的外来 thinking 块，正文块、工具调用与每条消息的身份都不动。请求路径、provider 路由、
+> 计费与凭据处理一律未变。
+
+### Fixes
+
+- **思考变正文：跨 provider 切换后模型把工作笔记写进回答（#147）**
+  - **病因在 pi-ai，不在本插件。** `transform-messages.js:68` 用 `isSameModel`（provider **且** api **且** model id）决定一条历史 thinking 能否按 reasoning 重放；不成立时它**不丢弃**该块，而是改写成 `{type:'text', text: thinking}`（`:87–90`）——也就是答案通道。会话一旦跨 provider 切换过，另一个模型的内部工作笔记就以「本轮回答」的身份出现，模型读到「我过去的思考全是正文」这个形状后持续照抄。
+  - **实测复现（本机 pi-ai 0.85.1 + 真实 `transformMessages`）**：`api: 'dsh-foreign'` 的外来轮次 → `[text]`（200/300 字符全部进正文）；本插件自己的轮次 → `[thinking]`；把该块丢掉 → `[]`（不产生任何正文）。报告者的一轮真实会话里，80 条 assistant 消息中 56 条带正文而 `reasoning` ≤ 1 字符，20 条英文工作笔记合计 58,960 字符，CJK 占比跌到 1.37%；会话从 696,966 涨到 758,005 total token。
+  - **为什么是「删除」而不是「保留为 thinking」**：`isSameModel` 只比对消息自身字段，唯一的满足方式是把这个外来轮次宣称为本模型的输出——那正是 #111 刚删掉的来源谎言。而这些块由宿主 `foreignAssistant()` 构造、**不带 `thinkingSignature`**，即便被宣称也无法作为带签名 reasoning 重放，它们对线上唯一的贡献就是被压成的那段正文。
+  - **修法**：新增 `src/adapter.ts` 的 `foreignThinkingOf()`（只读诊断）与 `dropForeignThinking()`（实施删除），在 `withLegacyContext` 的 `prepare` 里、**`alignAssistantIdentities` 之后**执行。顺序是承重的：国际区自己的轮次到达时同样带 `api: 'dsh-foreign'`，先诊断会把它误判成外来轮次并删掉它自己的推理（#102 的反向回归）。
+  - **开关**：`dropForeignThinking`（volatile，默认 `false`）。用 getter 读活值，拨动后**下一个请求**即生效，不需要重载插件——用户正是在看着那条工作笔记时打开它。
+  - **诊断可见**：被删的块数与位置写入 status 端点的 `lastForeignThinking`（进程内、last-wins、重启即忘），`dropForeignThinking` 开关本身也随 status 下发，供卡片渲染提示。
+
+### Tests
+
+- 新增 `tests/issue147-foreign-thinking.spec.ts`（15 条），全部经过**真实 pi-ai 的 `transformMessages`**，而不是桩：缺陷本身可复现、开启后不产生正文、关闭时原对象返回（零改动）、本插件国内外两区轮次都保留 thinking、正文与工具调用不被触碰、redacted 与空块不误报、错误轮次报 `dropped` 变体、顺序必须在 alignment 之后、幂等。
+- 变异验证：把 `dropForeignThinking` 改成空操作 → 4 条变红；把判断放宽到所有 assistant 轮次 → 7 条变红。
+- 全量：**142 文件 / 2458 通过（2 条按平台跳过）**；两个 tsconfig 均 exit 0。
+
 ## 5.11.0 (2026-10-26)
 
 > 特性版本：新增 `workbuddy_draw_video`（文生视频 / 图生视频，异步任务「提交 → 轮询 → 下载」，
