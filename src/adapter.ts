@@ -764,8 +764,28 @@ function blocksOf(message: unknown): unknown[] {
   return Array.isArray(content) ? content : []
 }
 
-/** Whether this assistant message's identity proves a DIFFERENT model produced it. */
-function isForeignAssistant(message: unknown, identity: string): boolean {
+/**
+ * Whether this assistant message's identity proves a DIFFERENT model produced it.
+ *
+ * `requestModelId` closes the THIRD leg of pi-ai's own predicate. `isSameModel`
+ * is `provider === … && api === … && model === model.id`
+ * (`transform-messages.js:68–70`); this function used to compare only the first
+ * two. The consequence was a blind spot the size of one whole route: a session
+ * that switches MODELS inside one region — `hy3` → `deepseek-v4.1-flash`, both
+ * served by this bundle, both stamped `provider: workbuddy` — keeps the provider
+ * and api legs equal, so nothing here noticed, while pi-ai flattened every
+ * historical thinking block into the answer channel exactly as in issue #147.
+ * The user-visible symptom is #147's, with none of its diagnostics.
+ *
+ * Passing `undefined` keeps the provider/api-only behaviour, which is what the
+ * read-only surfaces and the older call sites expect. Production passes the id
+ * of the model the request is actually addressed to.
+ */
+function isForeignAssistant(
+  message: unknown,
+  identity: string,
+  requestModelId?: string,
+): boolean {
   if (typeof message !== 'object' || message === null) return false
   const record = message as Record<string, unknown>
   if (record['role'] !== 'assistant') return false
@@ -773,8 +793,15 @@ function isForeignAssistant(message: unknown, identity: string): boolean {
   // it precisely to say "this is not the wire format the current request uses".
   if (record['api'] === HOST_FOREIGN_API) return true
   const provider = record['provider']
-  return typeof provider === 'string' && provider !== identity
-    && provider !== WORKBUDDY_PROVIDER && provider !== WORKBUDDY_GLOBAL_PROVIDER
+  if (typeof provider !== 'string' || provider !== identity
+    && provider !== WORKBUDDY_PROVIDER && provider !== WORKBUDDY_GLOBAL_PROVIDER) return true
+  // Model leg. A message this bundle produced still degrades when the request
+  // names a different model id, because that is what `isSameModel` compares.
+  // `undefined` on either side means "cannot compare": stay silent rather than
+  // report a block pi-ai would have kept.
+  if (requestModelId === undefined) return false
+  const model = record['model']
+  return typeof model === 'string' && model !== requestModelId
 }
 
 /**
@@ -802,17 +829,21 @@ function isForeignAssistant(message: unknown, identity: string): boolean {
  *
  * @param context - a pi-ai context, before or after `alignAssistantIdentities`.
  * @param identity - the identity this adapter stamps on its own models.
+ * @param requestModelId - model id the request is addressed to, so the model
+ *   leg of pi-ai's predicate is covered too (see {@link isForeignAssistant}).
+ *   Omitted, only the provider/api legs are judged.
  * @returns one entry per affected block, in transcript order.
  */
 export function foreignThinkingOf(
   context: Context,
   identity: string = WORKBUDDY_MODEL_IDENTITY,
+  requestModelId?: string,
 ): ForeignThinkingBlock[] {
   const messages = (context as { messages?: unknown }).messages
   if (!Array.isArray(messages)) return []
   const found: ForeignThinkingBlock[] = []
   for (const [messageIndex, message] of messages.entries()) {
-    if (!isForeignAssistant(message, identity)) continue
+    if (!isForeignAssistant(message, identity, requestModelId)) continue
     const record = message as Record<string, unknown>
     const stopReason = record['stopReason']
     // Mirrors `transform-messages.js`: an errored or aborted turn is skipped
@@ -863,13 +894,16 @@ export function foreignThinkingOf(
  *
  * @param context - a pi-ai context.
  * @param identity - the identity this adapter stamps on its own models.
+ * @param requestModelId - model id the request is addressed to (see
+ *   {@link isForeignAssistant}); omitted, only the provider/api legs are judged.
  * @returns the repaired context, or the input when no block qualified.
  */
 export function dropForeignThinking(
   context: Context,
   identity: string = WORKBUDDY_MODEL_IDENTITY,
+  requestModelId?: string,
 ): Context {
-  const affected = foreignThinkingOf(context, identity)
+  const affected = foreignThinkingOf(context, identity, requestModelId)
   if (affected.length === 0) return context
   const messages = (context as unknown as { messages: unknown[] }).messages
   // Group by message first: each message is copied at most once, and a message
@@ -919,7 +953,7 @@ function withLegacyContext(
   repair?: TranscriptRepairOptions,
 ): ProviderStreams {
   /** One place so both branches and both entry points agree on the order. */
-  const prepare = (context: Context): Context => {
+  const prepare = (context: Context, requestModelId?: string): Context => {
     const folded = generation === 'modern' ? foldModernContext(context) : adaptLegacyPiAiContext(context)
     const aligned = alignAssistantIdentities(folded, identity, ownedRoutes)
     // ISSUE #147, AFTER alignment on purpose. `foreignThinkingOf` reads the
@@ -927,24 +961,28 @@ function withLegacyContext(
     // turn this plugin OWNS (route id still unaligned) as foreign and delete its
     // reasoning — issue #102's regression, from the other direction.
     if (repair?.dropForeignThinking !== true) return aligned
-    const affected = foreignThinkingOf(aligned, identity)
+    // `requestModelId` is pi-ai's third predicate leg. Without it a switch
+    // BETWEEN MODELS inside one region (`hy3` → `deepseek-v4.1-flash`, both on
+    // this route) degraded exactly like a cross-provider switch, while this
+    // repair saw nothing to do: provider and api both still matched.
+    const affected = foreignThinkingOf(aligned, identity, requestModelId)
     if (affected.length === 0) return aligned
     try {
       repair.onForeignThinking?.(affected)
     } catch {
       // A diagnostic must never fail a chat request.
     }
-    return dropForeignThinking(aligned, identity)
+    return dropForeignThinking(aligned, identity, requestModelId)
   }
   if (generation === 'modern') {
     return {
       ...api,
       stream: (model, context, options) =>
-        api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context)), options),
+        api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context, model.id)), options),
       streamSimple: (model, context, options) =>
         api.streamSimple(
           model,
-          transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context)),
+          transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context, model.id)),
           options,
         ),
     }
@@ -952,11 +990,11 @@ function withLegacyContext(
   return {
     ...api,
     stream: (model, context, options) =>
-      api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context)), options),
+      api.stream(model, transcript<Parameters<typeof api.stream>[1]>(prepare(context, model.id)), options),
     streamSimple: (model, context, options) =>
       api.streamSimple(
         model,
-        transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context)),
+        transcript<Parameters<typeof api.streamSimple>[1]>(prepare(context, model.id)),
         options,
       ),
   }
