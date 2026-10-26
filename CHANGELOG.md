@@ -1,5 +1,32 @@
 # Changelog
 
+## 未发布
+
+> 修正 5.12.0 的 `dropForeignThinking` 漏判的一条腿：`isSameModel` 判据是 provider **且** api
+> **且** model id 三者全等，而 5.12.0 的 `isForeignAssistant` 只比了前两条。于是**在同一个区域内
+> 换模型**（`hy3` → `deepseek-v4.1-flash`，两者都由本插件提供、都盖 `provider: workbuddy`）时
+> 一个块也检不出，开关看起来无效，而 pi-ai 照样把历史 thinking 摊平成正文。修复只补判据与传参，
+> 不传时行为与 5.12.0 完全一致；开关默认仍为关闭。
+
+### Fixes
+
+- **同一区域内换模型时，`dropForeignThinking` 检不出任何块（#147 的第三条腿）**
+  - **病因是判据少了一条腿。** pi-ai 的 `isSameModel` 是 `provider === … && api === … && model === model.id`（`transform-messages.js:68–70`，0.85.1 与 1.1.0 行号一致）；5.12.0 的 `isForeignAssistant` 只比较 provider 与 api。换区场景（provider 变了）能检出，**换模型场景（只有 model 变了）检不出**——症状与 #147 一模一样，却没有诊断、开关也无效。
+  - **修法**：`isForeignAssistant` 增加可选的 `requestModelId`，补上 model 腿；`foreignThinkingOf` / `dropForeignThinking` 透传它；`withLegacyContext` 的 `prepare()` 在 `stream` / `streamSimple` 两个入口、legacy / modern 两个分支共四处传 `model.id`。**不传时行为完全不变**（只判前两条腿），所以卡片等只读 surface 与既有调用点零影响。
+  - 传 `model.id` 而**不是** `record['model']`：`dsh-llm-pi-ai` 的 `replayedAssistant` 在 `response.api === 'anthropic-messages'` 时会取 `responseModel ?? model`（`lib/index.js:218`），而 `isSameModel` 比的是 `model.id`，这里与它对齐。
+  - **顺带澄清一处不成立的顾虑**：卡片那条路径**不需要**单独传 model id。卡片读的是 status 端点的 `lastForeignThinking`，该值由 `onForeignThinking` 在**请求路径**里填充，因此天然带着 `model.id`——「换模型导致的摊平」在卡片上同样可见，无需 follow-up。
+  - **两处已失效的表述同步改正**：`alignAssistantIdentities` 的文档（`src/adapter.ts:671`）原写「换模型仍会降级……（有测试覆盖）」，但当时并无任何测试覆盖这条腿；README 中「同一区域内换模型仍会降级」一句现在补明「降级本身消除不了，但它变成正文这件事可以」。
+
+### Tests
+
+- 新增 `tests/issue147-model-leg.spec.ts`（9 条），走**真实 pi-ai 的 `transformMessages`**：缺陷本身可复现 / 旧两腿调用检不出（盲区钉成对照）/ 三腿调用检出并删除 / 外来 provider 仍检出（第三条腿是追加不是替换）/ 同 model 的消息一个不动且返回同一对象 / 无 `model` 字段不误报 / 外来轮次 model id 恰好相同也不洗白 / 一次真实切换里只删旧模型的轮次 / 幂等。
+- 新增 `tests/issue147-model-leg-wiring.spec.ts`（12 条），补上**接线**而不是判据：legacy 与 modern 两个分支 × `stream` / `streamSimple` 两个入口 × 三种状态（换模型时删、同名模型时留、开关关闭时原样），都经过真实 `createWorkBuddyAdapter`，断言 api 收到的上下文里 thinking 块的去留、以及 `onForeignThinking` 是否触发。
+  - **这条为什么必须单独存在**：把四处 `prepare(context, model.id)` 全部改回 `prepare(context)`（即修复被静默摘掉），**整套 2467 条测试依然全绿**——纯函数测试自己调判据，没有任何东西发现 wrapper 没传 id。补上后该变异使其中 4 条全红。这与 `tests/adapter.spec.ts` 当初为 issue #24 建的洞同型。
+  - 后两种状态是防止「一概删除」也能通过的对照：若判据退化成「凡 assistant 轮次都算外来」，删除会把**当前模型自己的**推理一起删掉（#102 的反向回归），所以同 model 与开关关闭两条必须看到 thinking 保留。
+- 变异验证：model 腿恒 `false` → 2 条红；恒 `true` → 3 条红（含 #147 原有 suite 1 条）；摘掉 `model.id` 传参 → 接线测试 4 条红；把修复整体短路（`if (true) return aligned`）→ 接线测试 4 条红。
+- 全量：`tsc` 双配置 0 错误，**143 文件 / 2479 通过（2 条按平台跳过）**，`tsdown` 构建通过。
+- 真实会话数据复核（`session-356f6889`，5,158 事件）：同网关换模型场景（80 条本插件自己的轮次）下，旧的两腿调用检出 **0 块**，三腿调用检出 **76 块 / 134,943 字符**，带正文消息 72 → 56，正文字符 195,867 → 60,984；单模型转录检出 0 块并返回同一对象（no-op 契约成立）。
+
 ## 5.12.0 (2026-10-26)
 
 > 特性版本：新增 `dropForeignThinking`（**默认关闭**），修 issue #147——跨 provider 切换后

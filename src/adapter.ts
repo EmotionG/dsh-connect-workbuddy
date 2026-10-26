@@ -668,8 +668,10 @@ function transcript<T>(context: Context): T {
  * The message's own `api` field is not read by the request builder at all
  * (grep: only `model.api` is), so this changes no wire shape.
  *
- * A genuinely different model still degrades: `isSameModel` continues to
- * require the model id to match (covered by a test).
+ * A genuinely different model still degrades, because `isSameModel` requires the
+ * model id to match and this function deliberately does not rewrite it: the
+ * message really was produced by another model. {@link dropForeignThinking}
+ * covers that leg separately, through its `requestModelId` argument.
  *
  * Returns the same object when nothing changed, so the common case (an
  * already-normalized transcript) allocates nothing.
