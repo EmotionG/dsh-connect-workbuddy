@@ -1,6 +1,6 @@
 # Changelog
 
-## 未发布
+## 5.12.1 (2026-10-26)
 
 > 修正 5.12.0 的 `dropForeignThinking` 漏判的一条腿：`isSameModel` 判据是 provider **且** api
 > **且** model id 三者全等，而 5.12.0 的 `isForeignAssistant` 只比了前两条。于是**在同一个区域内
