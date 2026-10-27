@@ -632,6 +632,7 @@ function safeMessage(error: unknown): string {
  */
 const UPSTREAM_SWITCH_FIELDS: ReadonlySet<string> = new Set([
   'usageIdentity',
+  'wireIdentity',
   'keepPromptLast',
   'extraInjectedPrefixes',
   'sessionTitle',
@@ -1967,7 +1968,7 @@ export function registerWorkBuddyStatusRoute(ctx: Context, deps: WorkBuddyStatus
           // the CLI route off must not look like it reset them.
           if (field !== 'regions' && field !== 'accounts' && field !== 'cliBridge'
             && !(typeof field === 'string' && UPSTREAM_SWITCH_FIELDS.has(field))) {
-            return json(res, 400, { error: 'field must be regions, accounts, cliBridge, usageIdentity, keepPromptLast, extraInjectedPrefixes, sessionTitle or dropForeignThinking' })
+            return json(res, 400, { error: 'field must be regions, accounts, cliBridge, usageIdentity, wireIdentity, keepPromptLast, extraInjectedPrefixes, sessionTitle or dropForeignThinking' })
           }
           const rows = settings.describe()
           const row = rows.find((r: any) => String(r.ns).includes('workbuddy'))

@@ -1619,6 +1619,138 @@ describe('the conversation-identity triple (issue #66)', () => {
     expect(seen['X-Request-ID']).toBeUndefined()
   })
 
+  it('speaks the installed app own chat header set when wireIdentity is on', async () => {
+    // MEASURED 2026-10-27 on the live CN gateway: this exact set answered HTTP
+    // 200 on BOTH www.workbuddy.cn and copilot.tencent.com, and so did every
+    // single-group removal. The plugin now sends it by default, so the shape is
+    // asserted name by name — a silently dropped group would otherwise be
+    // invisible, because the gateway accepts the request either way.
+    const seen = await headersOf('www.codebuddy.cn', { wireIdentity: true })
+    expect(seen['X-Agent-Intent']).toBe('craft')
+    expect(seen['X-Agent-Purpose']).toBe('conversation')
+    expect(seen['x-codebuddy-request']).toBe('1')
+    // The app's flag is `enableModelOptimization.enabled !== false`, i.e. ON by
+    // default, and the header carries its INVERSE — so a default install sends
+    // the string "false". Pinned so a "helpful" inversion cannot slip in.
+    expect(seen['X-Private-Data']).toBe('false')
+    expect(seen['X-IDE-Type']).toBe('WorkBuddy')
+    expect(seen['X-IDE-Name']).toBe('WorkBuddy')
+    expect(seen['X-IDE-Version']).toMatch(/^\d+\.\d+\.\d+/)
+    // W3C trace context + the B3 forms, all carrying ONE trace id.
+    expect(seen['traceparent']).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+    expect(seen['X-B3-TraceId']).toBe(seen['X-Trace-ID'])
+    expect(seen['traceparent']).toContain(seen['X-B3-TraceId']!)
+    expect(seen['b3']).toContain(seen['X-B3-TraceId']!)
+    expect(seen['X-Request-ID']).toBe(seen['X-Conversation-Message-ID'])
+    // The conversation ids take the app's 32-hex UUIDv7 form on this path too.
+    const v7 = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(v7)
+  })
+
+  it('drops the three headers the app does not send on chat', async () => {
+    // The app's bundle deletes its own User-Agent before the request goes out
+    // (`delete M.authorization, delete M["user-agent"]`) and never sets Origin
+    // or Referer — those are browser headers, and chat goes out from the main
+    // process. Sending them is a divergence from the app, not a safety feature;
+    // all three variants were measured 200, so matching the app costs nothing.
+    const seen = await headersOf('www.codebuddy.cn', { wireIdentity: true })
+    expect(seen['Origin']).toBeUndefined()
+    expect(seen['Referer']).toBeUndefined()
+    expect(seen['User-Agent']).toBeUndefined()
+    // The bare-JSON Accept the app uses, not the browser's wildcard list.
+    expect(seen['Accept']).toBe('application/json')
+  })
+
+  it('omits the X-No-* markers the app only uses on credential-less endpoints', async () => {
+    // The markers ARE real official constants (`HTTP_HEADER_NO_USER_ID` …), but
+    // the app's one use of them is the UNAUTHENTICATED `/v2/auth/state` call —
+    // "do not inject identity on this one". On chat it does the opposite: it
+    // fills `X-User-Id` from the account and its IOA helper returns immediately
+    // off an iOA deployment, so a personal account sends no enterprise header at
+    // all rather than a marker meaning "none".
+    //
+    // A credential with NO enterprise id is the case that used to emit
+    // `X-No-Enterprise-Id`. Measured 2026-10-27: the marker form, the app's
+    // empty-string form and the omitted form all answer HTTP 200, so this is a
+    // fidelity assertion, not a gate one.
+    // `exactOptionalPropertyTypes` is on, so "no enterprise id" means the key is
+    // ABSENT rather than present-and-undefined — which is also the real shape: a
+    // personal account's auth document simply carries no `enterpriseId`.
+    const { enterpriseId: _omitted, ...personal } = credential('www.codebuddy.cn')
+    const bare: WorkBuddyCredential = personal
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response('data: [DONE]\\n\\n', { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient(undefined, { wireIdentity: true }).chatStream(bare, '{}')
+    expect(seen['X-No-Enterprise-Id']).toBeUndefined()
+    expect(seen['X-No-User-Id']).toBeUndefined()
+    expect(seen['X-No-Department-Info']).toBeUndefined()
+    expect(seen['X-Enterprise-Id']).toBeUndefined()
+    // ... while the fields the app DOES always send are still there.
+    expect(seen['X-User-Id']).toBe('u')
+    // The app always writes this one, falling back to the empty string.
+    expect(seen['X-Department-Info']).toBe('')
+  })
+
+  it('keeps the X-No-* markers on the legacy shape, where they were measured', async () => {
+    // Turning the new shape off must restore what actually shipped, marker
+    // spellings included — a half-restored shape is a third thing nobody tested.
+    const { enterpriseId: _omitted, ...personal } = credential('www.codebuddy.cn')
+    const bare: WorkBuddyCredential = personal
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response('data: [DONE]\\n\\n', { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient(undefined, { wireIdentity: false }).chatStream(bare, '{}')
+    expect(seen['X-No-Enterprise-Id']).toBe('1')
+  })
+
+  it('falls back to the previous CLI-channel shape when wireIdentity is off', async () => {
+    // The escape hatch has to be BYTE-identical to what shipped before, or a
+    // user who turns the new shape off gets a third thing nobody measured.
+    const seen = await headersOf('www.codebuddy.cn', { wireIdentity: false })
+    expect(seen['User-Agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
+    expect(seen['Origin']).toBe('https://www.codebuddy.cn')
+    expect(seen['Referer']).toBe('https://www.codebuddy.cn/')
+    expect(seen['Accept']).toBe('application/json, text/plain, */*')
+    for (const name of [
+      'X-Agent-Intent', 'X-Agent-Purpose', 'x-codebuddy-request',
+      'X-Private-Data', 'traceparent', 'X-B3-TraceId', 'X-Trace-ID', 'X-Request-ID',
+    ]) expect(seen[name]).toBeUndefined()
+    // ... and the legacy id shape, hyphenated v4.
+    const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    for (const name of TRIPLE) expect(seen[name]).toMatch(hyphenated)
+  })
+
+  it('generates a fresh trace id per request, not one per process', async () => {
+    // A trace id is a REQUEST correlation id. Reusing one across requests would
+    // claim two separate model calls were one, which is exactly what the app's
+    // telemetry does not do.
+    const first = await headersOf('www.codebuddy.cn', { wireIdentity: true })
+    const second = await headersOf('www.codebuddy.cn', { wireIdentity: true })
+    expect(second['X-B3-TraceId']).not.toBe(first['X-B3-TraceId'])
+  })
+
+  it('carries the app header set on the probe path too', async () => {
+    // The probe is a real chat request against the same endpoint, so a shape
+    // applied only to `chatStream` would leave the pool testing accounts against
+    // a request the app never sends.
+    const seen: Record<string, string> = {}
+    vi.stubGlobal('fetch', async (_url: string, init: { headers: Record<string, string> }) => {
+      Object.assign(seen, init.headers)
+      return new Response('data: [DONE]\\n\\n', { status: 200 })
+    })
+    await new WorkBuddyUpstreamClient(undefined, { wireIdentity: true })
+      .probeChat(credential('www.codebuddy.cn'), '{}')
+    expect(seen['X-Agent-Intent']).toBe('craft')
+    expect(seen['x-codebuddy-request']).toBe('1')
+    expect(seen['X-IDE-Name']).toBe('WorkBuddy')
+  })
+
+
   it('does not carry them on the billing endpoint, which is not chat', async () => {
     // The triple is a CHAT-endpoint requirement. The reporter's matrix was taken
     // on the chat endpoint only, so sending it on the billing calls the official

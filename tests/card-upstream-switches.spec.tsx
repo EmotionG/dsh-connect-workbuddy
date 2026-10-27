@@ -90,13 +90,15 @@ const render = async (scopeValue: Record<string, unknown>) => {
 }
 
 describe('the upstream-identity switches', () => {
-  it('renders all three with their committed values', async () => {
+  it('renders all four with their committed values', async () => {
     const { m } = await render({
       usageIdentity: true,
+      wireIdentity: false,
       keepPromptLast: false,
       sessionTitle: { enabled: true, model: 'wb-lite' },
     })
     expect(switchFor(m.container, 'row.usageIdentityLabel').checked).toBe(true)
+    expect(switchFor(m.container, 'row.wireIdentityLabel').checked).toBe(false)
     expect(switchFor(m.container, 'row.keepPromptLastLabel').checked).toBe(false)
     expect(switchFor(m.container, 'row.sessionTitleLabel').checked).toBe(true)
   })
@@ -110,6 +112,20 @@ describe('the upstream-identity switches', () => {
     expect(switchFor(m.container, 'row.sessionTitleLabel').checked).toBe(false)
   })
 
+  it('shows wireIdentity ON when the field is absent, unlike its three siblings', async () => {
+    // The one deliberate inversion, and it is not an oversight: `wireIdentity`
+    // sends the shape the installed app itself sends, measured at HTTP 200 on
+    // both CN hosts. A default of OFF would mean a fresh install speaks the
+    // plugin's old invented header set, which is the shape with LESS evidence.
+    //
+    // The other three stay opt-in because they either spend quota
+    // (`sessionTitle`), reorder what the upstream counts (`keepPromptLast`) or
+    // rest on a reporter's measurement this plugin never reproduced
+    // (`usageIdentity`).
+    const { m } = await render({})
+    expect(switchFor(m.container, 'row.wireIdentityLabel').checked).toBe(true)
+  })
+
   it('writes only the field that was flipped, on its own path', async () => {
     const { m, scope } = await render({})
     await m.click(switchFor(m.container, 'row.usageIdentityLabel'))
@@ -119,6 +135,16 @@ describe('the upstream-identity switches', () => {
     expect(scope.writes[0].value).toBe(true)
     // And it did NOT arrive as a block of siblings.
     expect(scope.writes[0].value).not.toBeTypeOf('object')
+  })
+
+  it('writes wireIdentity off as an explicit false, which is how it is turned back', async () => {
+    // Because the field defaults ON, `false` is the only value that changes
+    // anything — and it must be written as a real boolean, not omitted.
+    const { m, scope } = await render({ wireIdentity: true })
+    await m.click(switchFor(m.container, 'row.wireIdentityLabel'))
+    await m.settle()
+    expect(scope.writes.map((w: { field: string }) => w.field)).toEqual(['wireIdentity'])
+    expect(scope.writes[0].value).toBe(false)
   })
 
   it('preserves the sessionTitle model when only the switch is flipped', async () => {
@@ -180,6 +206,22 @@ describe('reading the upstream switches out of a settings snapshot', () => {
     expect(sessionTitleOf({ sessionTitle: { enabled: 'yes', model: 5 } })).toEqual({ enabled: false, model: 'wb-lite' })
     // Blank model reads as the default rather than as an empty target.
     expect(sessionTitleOf({ sessionTitle: { enabled: true, model: '   ' } })).toEqual({ enabled: true, model: 'wb-lite' })
+  })
+
+  it('reads wireIdentity with its inverted default, and only an explicit false turns it off', () => {
+    // Inverted relative to its siblings ON PURPOSE — see the card test above.
+    // Every ABSENT or malformed value reads as ON, because ON is the shape the
+    // installed app sends and the shape this plugin measured at HTTP 200.
+    expect(upstreamSwitchOf({ wireIdentity: true }, 'wireIdentity')).toBe(true)
+    expect(upstreamSwitchOf({ wireIdentity: false }, 'wireIdentity')).toBe(false)
+    expect(upstreamSwitchOf({}, 'wireIdentity')).toBe(true)
+    expect(upstreamSwitchOf(undefined, 'wireIdentity')).toBe(true)
+    // Garbage reads as the default, not as an accidental OFF: `'false'` is a
+    // string, not the boolean, so it must NOT silently disable the app shape.
+    expect(upstreamSwitchOf({ wireIdentity: 'false' }, 'wireIdentity')).toBe(true)
+    expect(upstreamSwitchOf({ wireIdentity: 0 }, 'wireIdentity')).toBe(true)
+    // A volatile reference unwraps first, same as its siblings.
+    expect(upstreamSwitchOf({ wireIdentity: { get: () => false } }, 'wireIdentity')).toBe(false)
   })
 
   it('reads the extra prefix list defensively', () => {

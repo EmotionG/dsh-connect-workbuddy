@@ -564,6 +564,25 @@ export interface Config {
    */
   usageIdentity?: boolean
   /**
+   * Send the same chat request headers the installed WorkBuddy app sends.
+   *
+   * Adds `X-Agent-Intent` / `X-Agent-Purpose`, `x-codebuddy-request`,
+   * `X-Private-Data`, `X-IDE-*` naming WorkBuddy, W3C `traceparent` + B3 +
+   * `X-Trace-ID`, and `X-Request-ID`; removes `Origin` / `Referer` and the
+   * explicit CLI `User-Agent`, none of which the app sends on chat.
+   *
+   * ON by default, unlike {@link Config.usageIdentity}, because the evidence
+   * tiers are opposite: `usageIdentity` is a reporter's measurement this plugin
+   * never reproduced, while this one was measured here on 2026-10-27 — the
+   * app-shaped header set, and each row with one group removed, all answer
+   * HTTP 200 on both CN hosts. The body is untouched either way, and the
+   * system-prompt gate is NOT bypassed by it (a real DSH prompt still returns
+   * 400/11128 under the full app-shaped set).
+   *
+   * Turn OFF to restore the previous CLI-channel header set byte for byte.
+   */
+  wireIdentity?: boolean
+  /**
    * Move the harness's injected context above the real prompt (issue #132).
    *
    * The WorkBuddy usage page records the last `user` message as the request
@@ -887,6 +906,11 @@ export const Config: z<Config> = z.object({
       .default(false)
       .description("Make the upstream's usage page record these calls like the official client's: " + "add the X-IDE-* identity headers (which fill the 使用端 column) and send the conversation " + "ids as 32-hex UUIDv7. Off by default — it is a display alignment measured by a reporter, not by " + "this plugin, and the chat channel identity (User-Agent) and request body never change."),
   ) as unknown as z<boolean>,
+  wireIdentity: asVolatile(
+    z.boolean()
+      .default(true)
+      .description('Send the same chat request headers the installed WorkBuddy app sends: X-Agent-Intent/X-Agent-Purpose, x-codebuddy-request, X-Private-Data, X-IDE-* naming WorkBuddy, W3C/B3 trace headers and X-Request-ID — and drop the Origin/Referer/User-Agent headers the app does not send on chat. Measured 2026-10-27 on the live gateway: the app-shaped set and each single-group removal all answer HTTP 200 on both www.workbuddy.cn and copilot.tencent.com. It does NOT change the request body and does NOT bypass the system-prompt gate. Turn off to fall back to the previous CLI-channel header set.'),
+  ) as unknown as z<boolean>,
   keepPromptLast: asVolatile(
     z.boolean()
       .default(false)
@@ -1114,7 +1138,10 @@ export function apply(ctx: Context, config: Config): void {
     message => {
       ctx.logger.warn(`dsh-connect-workbuddy: ${message}`)
     },
-    { usageIdentity: unwrapVolatile(config.usageIdentity) === true },
+    {
+      usageIdentity: unwrapVolatile(config.usageIdentity) === true,
+      wireIdentity: unwrapVolatile(config.wireIdentity) !== false,
+    },
   )
 
   /**

@@ -7,3 +7,8 @@ coverage/
 .DS_Store
 .dsh-vision-router/
 .dsh-npm-cache/
+# Local scratch. The wire-fingerprint probes graduated to `scripts/wire-*.mjs`
+# (docs/WIRE-ALIGNMENT.md tells you to run them from there); what is left here is
+# one-off investigation material, including dumps of this machine's own session
+# transcript, which does not belong in a package.
+.dsh-ops/

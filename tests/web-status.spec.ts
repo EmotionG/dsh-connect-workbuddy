@@ -1830,6 +1830,7 @@ describe('registerWorkBuddyStatusRoute __save with a live-reference config', () 
   it('accepts each upstream switch and writes only its own path', async () => {
     for (const [field, value] of [
       ['usageIdentity', true],
+      ['wireIdentity', true],
       ['keepPromptLast', true],
       ['extraInjectedPrefixes', ['This is an efficiency nudge']],
       ['sessionTitle', { enabled: true, model: 'wb-lite' }],

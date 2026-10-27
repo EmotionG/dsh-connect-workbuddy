@@ -67,6 +67,7 @@ export class WorkBuddySettingsWriteError extends Error {
  */
 export type UpstreamSwitchField =
   | 'usageIdentity'
+  | 'wireIdentity'
   | 'keepPromptLast'
   | 'extraInjectedPrefixes'
   | 'sessionTitle'
@@ -189,9 +190,19 @@ export function cliBridgeEnabledOf(configured: unknown): boolean {
  * @param field - which switch to read.
  * @returns whether the switch is on.
  */
-export function upstreamSwitchOf(configured: unknown, field: 'usageIdentity' | 'keepPromptLast'): boolean {
-  const value = (configured as Record<string, unknown> | undefined)?.[field]
-  return unwrapVolatileDeep(value) === true
+export function upstreamSwitchOf(
+  configured: unknown,
+  field: 'usageIdentity' | 'wireIdentity' | 'keepPromptLast',
+): boolean {
+  const value = unwrapVolatileDeep((configured as Record<string, unknown> | undefined)?.[field])
+  // `wireIdentity` defaults ON — the opposite of the two opt-in switches beside
+  // it — because it sends the shape the installed app itself sends and this
+  // plugin measured that shape at HTTP 200. An ABSENT value therefore means ON,
+  // while an explicit `false` means OFF. A malformed value falls back to ON for
+  // the same reason the siblings fall back to OFF: the fallback follows the
+  // measured-good shape, and the card must show what the plugin will actually do.
+  if (field === 'wireIdentity') return value !== false
+  return value === true
 }
 
 /**
@@ -275,7 +286,7 @@ export async function writeUpstreamSwitch(
   }
   if (delivered) {
     const after = scope.getSnapshot().value
-    const landed = field === 'usageIdentity' || field === 'keepPromptLast'
+    const landed = field === 'usageIdentity' || field === 'wireIdentity' || field === 'keepPromptLast'
       ? upstreamSwitchOf(after, field) === value
       : field === 'sessionTitle'
         ? JSON.stringify(sessionTitleOf(after)) === JSON.stringify(value)

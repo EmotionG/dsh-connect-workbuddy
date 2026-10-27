@@ -697,6 +697,8 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
    */
   const [usageIdentityOn, setUsageIdentityOn] = useState<boolean | undefined>(undefined)
   const [usageIdentityBusy, setUsageIdentityBusy] = useState(false)
+  const [wireIdentityOn, setWireIdentityOn] = useState<boolean | undefined>(undefined)
+  const [wireIdentityBusy, setWireIdentityBusy] = useState(false)
   const [keepPromptLastOn, setKeepPromptLastOn] = useState<boolean | undefined>(undefined)
   const [keepPromptLastBusy, setKeepPromptLastBusy] = useState(false)
   const [sessionTitleOn, setSessionTitleOn] = useState<boolean | undefined>(undefined)
@@ -1300,6 +1302,9 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
   const usageIdentityValue = (): boolean =>
     usageIdentityOn ?? upstreamSwitchOf(settingsScope?.getSnapshot().value, 'usageIdentity')
 
+  const wireIdentityValue = (): boolean =>
+    wireIdentityOn ?? upstreamSwitchOf(settingsScope?.getSnapshot().value, 'wireIdentity')
+
   const keepPromptLastValue = (): boolean =>
     keepPromptLastOn ?? upstreamSwitchOf(settingsScope?.getSnapshot().value, 'keepPromptLast')
 
@@ -1321,16 +1326,18 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
    * stall #131 was about) for a number that cannot have moved.
    */
   const toggleUpstreamSwitch = async (
-    field: 'usageIdentity' | 'keepPromptLast' | 'sessionTitle',
+    field: 'usageIdentity' | 'wireIdentity' | 'keepPromptLast' | 'sessionTitle',
     enabled: boolean,
   ): Promise<void> => {
     if (settingsScope === undefined) return
     const setBusy = field === 'usageIdentity'
       ? setUsageIdentityBusy
-      : field === 'keepPromptLast' ? setKeepPromptLastBusy : setSessionTitleBusy
+      : field === 'wireIdentity' ? setWireIdentityBusy
+        : field === 'keepPromptLast' ? setKeepPromptLastBusy : setSessionTitleBusy
     const setOwn = field === 'usageIdentity'
       ? setUsageIdentityOn
-      : field === 'keepPromptLast' ? setKeepPromptLastOn : setSessionTitleOn
+      : field === 'wireIdentity' ? setWireIdentityOn
+        : field === 'keepPromptLast' ? setKeepPromptLastOn : setSessionTitleOn
     setBusy(true)
     try {
       // `sessionTitle` is the one switch whose field is an OBJECT: preserve the
@@ -2555,6 +2562,7 @@ function WorkBuddyCardBody({ t, settingsScope, view }: WorkBuddyCardProps & { vi
       <span className="dsm-workbuddy-pref-hint">{t('row.upstreamHint')}</span>
       {([
         ['usageIdentity', 'row.usageIdentityLabel', 'row.usageIdentityHint', usageIdentityValue(), usageIdentityBusy, setUsageIdentityOn],
+        ['wireIdentity', 'row.wireIdentityLabel', 'row.wireIdentityHint', wireIdentityValue(), wireIdentityBusy, setWireIdentityOn],
         ['keepPromptLast', 'row.keepPromptLastLabel', 'row.keepPromptLastHint', keepPromptLastValue(), keepPromptLastBusy, setKeepPromptLastOn],
         ['sessionTitle', 'row.sessionTitleLabel', 'row.sessionTitleHint', sessionTitleValue().enabled, sessionTitleBusy, setSessionTitleOn],
       ] as const).map(([field, labelKey, hintKey, on, busy, setOwn]) => (

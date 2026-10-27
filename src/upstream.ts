@@ -1417,7 +1417,15 @@ function originReferer(credential: WorkBuddyCredential): string {
   return regionOf(credential.domain) === 'global' ? globalBase(credential.domain) : CN_BILLING_BASE
 }
 
-/** Headers every upstream request shares. */
+/**
+ * Headers every upstream request shares.
+ *
+ * `Origin` / `Referer` are browser headers and the app's own main-process calls
+ * send neither, but they are harmless on the CONFIG and BILLING paths (measured:
+ * both answer 200 with them). The CHAT path is the one where the app's exact
+ * shape matters, so {@link chatHeaders} drops them when it is speaking as the
+ * app — see {@link WorkBuddyWireIdentity.wireIdentity}.
+ */
 function commonHeaders(credential: WorkBuddyCredential): Record<string, string> {
   return {
     'Accept': 'application/json, text/plain, */*',
@@ -1429,7 +1437,7 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
 }
 
 /**
- * The conversation-identity triple the chat endpoint now requires (issue #66).
+ * The conversation-identity triple the chat endpoint requires (issue #66).
  *
  * WHY THIS EXISTS. The international gateway added a second gate on top of the
  * `system`-head rule from 3.1.0: a chat request must carry the official desktop
@@ -1458,6 +1466,15 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  * those is required: `X-Conversation-Request-ID` and `-Message-ID` are needed
  * alongside `X-Conversation-ID` (that one alone still fails), and each of the
  * extras is satisfied by the triple without it. Hence exactly three.
+ *
+ * RE-MEASURED 2026-10-27, and the note above is worth being precise about: that
+ * bisection only ever showed the extras are not REQUIRED (a request without them
+ * answers 200). It never showed sending them is permitted-but-pointless versus
+ * permitted-and-better. The installed app sends the full set on every call, and
+ * this plugin measured the full set AND each single-group removal to answer 200
+ * on both CN hosts — so the extras are accepted, and aligning with the app is
+ * now the well-evidenced path rather than a guess. See
+ * {@link WorkBuddyWireIdentity.wireIdentity}.
  *
  * VALUES. The gateway does not verify where these ids come from — any well-formed
  * UUID passes — so nothing here is a secret and nothing is persisted. They are
@@ -1491,8 +1508,10 @@ function conversationHeaders(
   // about — so that path keeps the bytes known to answer instead of being swept
   // into an untested shape by a display-fidelity change.
   // The v7 shape travels with the same switch as `X-IDE-*`: both are the
-  // usage-page alignment the reporter measured, and neither is a gate.
-  const officialIds = shape === 'chat' && identity.usageIdentity === true
+  // usage-page alignment the reporter measured, and neither is a gate. The
+  // wire-identity switch takes the same shape, because the app's own captured
+  // request ids are 32-hex UUIDv7 as well.
+  const officialIds = shape === 'chat' && (identity.usageIdentity === true || identity.wireIdentity === true)
   const id = officialIds ? uuidv7 : randomUUID
   const messageId = id()
   return {
@@ -1535,16 +1554,24 @@ export function uuidv7(nowMs = Date.now()): string {
 }
 
 /**
- * How the plugin should identify itself where the upstream only RECORDS the
- * request (issue #132). One switch, because the two halves are one decision.
+ * How the plugin should identify itself on the wire.
+ *
+ * TWO INDEPENDENT SWITCHES, because they answer two different questions and
+ * have two different evidence tiers:
+ *
+ *   - {@link usageIdentity} — how the usage PAGE labels these calls. Display
+ *     only; measured by a reporter, not by this plugin.
+ *   - {@link wireIdentity} — how the REQUEST is shaped, byte for byte, versus
+ *     what the installed WorkBuddy app itself sends. Measured by this plugin
+ *     against the live gateway (see that field).
  */
 export interface WorkBuddyWireIdentity {
   /**
    * Adopt the official client's usage-page identity on chat requests.
    *
-   * ON adds `X-IDE-Type` / `X-IDE-Name` / `X-IDE-Version` and switches the
-   * conversation-identity triple to the 32-hex UUIDv7 shape the official client
-   * uses (plus `X-Request-ID`, which mirrors the message id there).
+   * ON adds `X-IDE-*` and switches the conversation-identity triple to the
+   * 32-hex UUIDv7 shape the official client uses (plus `X-Request-ID`, which
+   * mirrors the message id there).
    *
    * OFF by default, and the reason is the evidence tier, not the mechanism: the
    * reporter measured HTTP 200 on their own build of this PLUGIN at 5.3.1
@@ -1554,10 +1581,48 @@ export interface WorkBuddyWireIdentity {
    * the missing conversation id and a non-system first message, none of which a
    * header can change — but this gateway has repeatedly refused requests for
    * reasons visible only in the answer, so a display-only alignment ships behind a
-   * switch rather than as a silent upgrade for every account. `User-Agent` and the
-   * request BODY are untouched either way.
+   * switch rather than as a silent upgrade for every account.
    */
   usageIdentity?: boolean
+  /**
+   * Speak the installed WorkBuddy app's OWN chat request shape.
+   *
+   * ON sends the header set the app's `ModelProvider` builds, instead of the
+   * narrow CLI-channel set this plugin used to send:
+   *
+   *   - `X-Agent-Intent` / `X-Agent-Purpose` (the app's craft/conversation mode)
+   *   - `x-codebuddy-request: 1` (the app's security marker)
+   *   - `X-Private-Data` (whether model optimisation is on)
+   *   - `X-IDE-*` naming the app, not the CLI
+   *   - W3C `traceparent` + B3 + `X-Trace-ID` propagation
+   *   - `X-Request-ID` alongside the conversation triple
+   *
+   * It also drops two headers the app does NOT send on chat and this plugin
+   * used to add on its own account: `Origin` / `Referer` (browser-only; the
+   * app's main process sends neither) and the CLI-shaped `User-Agent` (the app
+   * deletes its own UA and lets the transport supply one).
+   *
+   * MEASURED, not inferred — 2026-10-27, live CN gateway, one real account,
+   * `hy3`, every other field held fixed. Ten permutations were sent: the
+   * app-shaped set answered HTTP 200 on BOTH `www.workbuddy.cn` and
+   * `copilot.tencent.com`, and so did each row that removed one group
+   * (`X-IDE-*`, agent intent/purpose, trace headers, `x-codebuddy-request`)
+   * and each UA variant (triple, `WorkBuddy/<v>` alone, CLI-shaped, absent).
+   *
+   * That last fact is the one that matters, and it is why this can be ON by
+   * default: the earlier "these extras are not REQUIRED" measurement only ever
+   * proved a request WITHOUT them answers 200. It never tested whether sending
+   * them is refused — and the app itself sends them on every single call, so
+   * matching the app is the shape with the most evidence behind it, not the
+   * shape with the least.
+   *
+   * WHAT IT DOES NOT DO: it does not touch the request BODY, and it does not
+   * silence the system-prompt gate. Both were measured — a real DSH system
+   * prompt still answers 400/11128 under the full app-shaped header set, and
+   * `developer` / object-`tool_choice` / `stream:false` still fail. See
+   * {@link prepareChatBody}: the body rewrites are load-bearing and stay.
+   */
+  wireIdentity?: boolean
 }
 
 /**
@@ -1572,16 +1637,22 @@ export interface WorkBuddyWireIdentity {
  * gate: the reporter measured that adding the header changes the usage column
  * and nothing else (HTTP 200, model unaffected).
  *
- * `X-IDE-Type` stays `CLI` on purpose. Claiming the desktop app's type as well
- * would be a bigger identity claim than the one this fix needs, and the mixed
- * CLI + WorkBuddy shape is what the reporter measured. The version comes from
- * {@link PRODUCT_UA} rather than a second hardcoded number, so the two cannot
- * drift apart when the app version is bumped.
+ * `X-IDE-Type` is `CLI` for {@link WorkBuddyWireIdentity.usageIdentity} alone —
+ * the mixed CLI + WorkBuddy shape the reporter measured. {@link
+ * WorkBuddyWireIdentity.wireIdentity} names the app instead, because that is
+ * what the app's own requests say.
  *
- * Sent only when {@link WorkBuddyWireIdentity.usageIdentity} is on — see that
- * field for the evidence tier behind the default.
+ * The version comes from {@link PRODUCT_UA} rather than a second hardcoded
+ * number, so the two cannot drift apart when the app version is bumped.
  */
 function ideHeaders(identity: WorkBuddyWireIdentity): Record<string, string> {
+  if (identity.wireIdentity === true) {
+    return {
+      'X-IDE-Type': 'WorkBuddy',
+      'X-IDE-Name': 'WorkBuddy',
+      'X-IDE-Version': APP_VERSION,
+    }
+  }
   if (identity.usageIdentity !== true) return {}
   return {
     'X-IDE-Type': 'CLI',
@@ -1590,25 +1661,168 @@ function ideHeaders(identity: WorkBuddyWireIdentity): Record<string, string> {
   }
 }
 
-/** Chat request headers, including the X-No-* conventions the official CLI uses. */
+/**
+ * The request-correlation headers the app propagates on every model call.
+ *
+ * W3C trace context plus the B3 single- and multi-header forms, because the
+ * app emits all of them: `traceparent`, `b3`, and the four `X-B3-*` fields
+ * alongside `X-Trace-ID`. All seven carry the same trace id, so an upstream
+ * that reads any one of them sees one consistent request.
+ *
+ * A fresh trace per request, for the same reason the conversation ids are
+ * fresh: this is a request correlation id, and reusing one would claim two
+ * calls were one.
+ */
+function traceHeaders(): Record<string, string> {
+  const traceId = randomBytes(16).toString('hex')
+  const spanId = randomBytes(8).toString('hex')
+  return {
+    'traceparent': `00-${traceId}-${spanId}-01`,
+    'b3': `${traceId}-${spanId}-1-${randomBytes(8).toString('hex')}`,
+    'X-B3-TraceId': traceId,
+    'X-B3-ParentSpanId': spanId,
+    'X-B3-SpanId': spanId,
+    'X-B3-Sampled': '1',
+    'X-Trace-ID': traceId,
+  }
+}
+
+/**
+ * The header groups the app adds on top of the bare chat contract.
+ *
+ * Split out so {@link chatHeaders} reads as one list and so the OFF path costs
+ * nothing: everything here is gated on {@link
+ * WorkBuddyWireIdentity.wireIdentity}.
+ */
+function appChannelHeaders(identity: WorkBuddyWireIdentity): Record<string, string> {
+  if (identity.wireIdentity !== true) return {}
+  return {
+    // The app's mode markers. `craft` is its default agent mode and
+    // `conversation` its default purpose; both were in every captured call.
+    'X-Agent-Intent': 'craft',
+    'X-Agent-Purpose': 'conversation',
+    // The app's own security marker, `withSecurityHeader()` in its bundle.
+    'x-codebuddy-request': '1',
+    // Whether model optimisation is on. The app computes this as
+    // `enableModelOptimization.enabled !== false`, i.e. ON by default, and the
+    // header carries the INVERSE of that flag — so a default install sends
+    // "false". Mirrored literally rather than reinterpreted.
+    'X-Private-Data': 'false',
+    ...traceHeaders(),
+  }
+}
+
+/**
+ * The user / enterprise / department annotations the app puts on a chat request.
+ *
+ * WHY `X-No-*` IS *NOT* HERE, though the plugin used to send it.
+ *
+ * `X-No-User-Id` / `X-No-Enterprise-Id` / `X-No-Department-Info` are REAL
+ * constants in the official bundle
+ * (`HTTP_HEADER_NO_USER_ID` etc. at `codebuddy-lite-wb.mjs:7109457`), so
+ * sending them is not an invention in the abstract — but the app only ever
+ * sends them on the UNAUTHENTICATED endpoints, and its one use in the bundle is
+ *
+ *     '/v2/auth/state?platform=…' with
+ *     { 'X-No-Authorization': 'true', 'X-No-User-Id': 'true', … }
+ *
+ * i.e. "do not inject identity headers on this credential-less call". On a CHAT
+ * request the app's `applyGatewayHeaders` does the opposite: it writes
+ * `X-User-Id` from `account.uid`, and its `.applyIOADefaultHeaders()` is a
+ * no-op unless the environment is iOA (`if (!this.isIOAEnvironment(i)) return`),
+ * so a personal account sends NO `X-Enterprise-Id` / `X-Tenant-Id` at all
+ * rather than an `X-No-*` marker for it.
+ *
+ * MEASURED 2026-10-27: the marker form, the app's empty-string form, and the
+ * omitted form all answer HTTP 200 on the CN gateway. So this is a fidelity
+ * choice, not a gate — and it goes to the app's form, because the goal is to
+ * speak what the app speaks.
+ *
+ * The `X-No-*` markers stay on the paths where the plugin is not impersonating a
+ * chat call: see {@link refreshHeaders} and the billing headers, where their
+ * meaning ("no identity on this request") is exactly what the app uses them for.
+ */
+function identityHeaders(credential: WorkBuddyCredential): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (credential.uid !== '') headers['X-User-Id'] = credential.uid
+  if (credential.enterpriseId !== undefined && credential.enterpriseId !== '') {
+    headers['X-Enterprise-Id'] = credential.enterpriseId
+    headers['X-Tenant-Id'] = credential.enterpriseId
+  }
+  if (credential.domain !== '') headers['X-Domain'] = credential.domain
+  // Sent even when empty, which is what the app does: its literal is
+  // `"X-Department-Info": account.departmentFullName || ""`. An empty value is
+  // a real field on this request, not an absence, and the gateway accepts it
+  // (measured 2026-10-27, HTTP 200).
+  //
+  // The plugin does not read the department name from the auth document, so the
+  // value is always the app's own fallback. That is deliberate: adding a field
+  // to `WorkBuddyCredential` would widen the card's privacy contract (which
+  // admits nickname, masked uin, expiry and credits) for a header the gateway
+  // only records.
+  headers['X-Department-Info'] = ''
+  return headers
+}
+
+/**
+ * Chat request headers, including the X-No-* conventions the official CLI uses.
+ *
+ * TWO SHAPES, one switch apart:
+ *
+ *   - {@link WorkBuddyWireIdentity.wireIdentity} OFF (legacy): the CLI channel's
+ *     narrow set — `Origin` / `Referer`, a CLI-shaped `User-Agent`, the
+ *     conversation triple, and an `X-No-*` marker for each absent identity
+ *     field. This is what every account has been answering since #66 and it
+ *     stays the fallback.
+ *   - ON: the header set the installed WorkBuddy app's own `ModelProvider`
+ *     builds, minus the credential-dependent parts. Concretely it ADDS the
+ *     agent-intent/purpose, security, private-data, `X-IDE-*` and trace groups
+ *     (see {@link appChannelHeaders} / {@link ideHeaders}) and REMOVES `Origin`,
+ *     `Referer` and the explicit `User-Agent`, none of which the app sends on
+ *     chat. The app's bundle does exactly this to its own headers,
+ *
+ *         delete M.authorization, delete M["user-agent"]
+ *
+ *     then re-adds `authorization` alone — so a chat request from the app leaves
+ *     with no `User-Agent` of its own. It also drops the `X-No-*` markers in
+ *     favour of simply omitting the field, which is the app's shape (see
+ *     {@link identityHeaders}).
+ *
+ * What is NOT switched: the conversation triple, `X-Product`, `Content-Type`
+ * and the presence of `X-User-Id` / `X-Domain`. Both paths need them and the app
+ * sends the same ones.
+ */
 function chatHeaders(
   credential: WorkBuddyCredential,
   identity: WorkBuddyWireIdentity = {},
 ): Record<string, string> {
+  const appShaped = identity.wireIdentity === true
+  const identityHeadersPart = appShaped
+    ? identityHeaders(credential)
+    : {
+        ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
+        ...credential.enterpriseId === undefined || credential.enterpriseId === ''
+          ? { 'X-No-Enterprise-Id': '1' }
+          : { 'X-Enterprise-Id': credential.enterpriseId },
+        ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
+      }
   const headers: Record<string, string> = {
-    ...commonHeaders(credential),
     'Content-Type': 'application/json',
     // 安全红线：chat 请求绝不携带 refresh token。
-    ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
-    ...credential.enterpriseId === undefined || credential.enterpriseId === ''
-      ? { 'X-No-Enterprise-Id': '1' }
-      : { 'X-Enterprise-Id': credential.enterpriseId },
-    ...credential.domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': credential.domain },
+    ...identityHeadersPart,
     'X-Product': 'SaaS',
+    ...appChannelHeaders(identity),
     ...ideHeaders(identity),
     ...conversationHeaders('chat', identity),
   }
-  return headers
+  if (appShaped) {
+    // The app's `Accept` is bare JSON, not the browser's wildcard list, and it
+    // sends no Origin/Referer/User-Agent on this path.
+    headers['Accept'] = 'application/json'
+    headers['x-requested-with'] = 'XMLHttpRequest'
+    return headers
+  }
+  return { ...commonHeaders(credential), ...headers }
 }
 
 /** Refresh-endpoint headers; X-Refresh-Token appears here and nowhere else. */

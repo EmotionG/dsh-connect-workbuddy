@@ -1,5 +1,69 @@
 # Changelog
 
+## 5.13.0 (2026-10-27)
+
+> 把 chat 请求的**请求头**改成与官方 WorkBuddy 应用一致。这件事此前一直没有依据：插件发的是
+> issue #66 实测出的「CLI 通道最小头集」，而那套子集只做过**缺席测试**——把官方多发的头逐个
+> 去掉，发现都不影响 200，于是不发。这个推理有个缺口：它证明「不发也 200」，从未证明「发了会
+> 怎样」。而官方应用每一次调用都发全，所以「与官方一致」的证据强于「插件自定的最小集」。
+>
+> 本次用本机登录状态直连网关补齐：两 host × 10 种头组合**全部 200**，即官方全套头是被接受的。
+> 同时测出**请求正文的三条改写仍然必需**（`developer` 角色 400/11128、`tool_choice` 对象形式
+> 400/11101、`stream:false` 400/11101），以及**最关键的一条**：换成官方全套头之后，原始 DSH
+> 系统提示词**依然 400/11128**——头与内容门相互独立，`breakIdentityClauses()` 不能因为「现在
+> 头已经像官方了」而删掉，否则每个真实会话都会重新开始失败。
+>
+> 新版开关 `wireIdentity` **默认开**。关掉逐字节回到 5.12.1 的形状。
+
+### Features
+
+- **chat 请求头改为官方应用的形状（`wireIdentity`，默认开）**
+  - **新增的头**（全部来自 app bundle 的 `getCustomHeaders` / `applyGatewayHeaders` / trace 生成器）：
+    `X-Agent-Intent: craft`、`X-Agent-Purpose: conversation`、`x-codebuddy-request: 1`、
+    `X-Private-Data`、`X-IDE-Type` / `X-IDE-Name` / `X-IDE-Version`、W3C `traceparent`、B3 单头
+    `b3` 与多头 `X-B3-TraceId` / `X-B3-SpanId` / `X-B3-Sampled`、`X-Trace-ID`、`X-Request-ID`。
+    trace 那一组**每请求新生成**且共用同一个 trace id（7 个头里的 trace 段一致，另有 1 条测试
+    专门钉住「同一请求内一致、跨请求不同」）。
+  - **`X-Private-Data` 的取值照抄 app 的反向逻辑**：bundle 里是 `h ? "false" : "true"`、而
+    `h = p?.enabled !== false`，所以正常状态下它发 `"false"`。这一条极易写反（字段名叫
+    private-data，值却是「false」表示「私密」），变异测试专门验证：改成 `"true"` 会让 1 条测试
+    变红。
+  - **去掉的头**：`Origin`、`Referer`、`User-Agent`。理由是 app 自己在 chat 路径上把它们删了
+    （fetch adapter 里 `delete M["user-agent"]`，Origin/Referer 是浏览器头而 chat 走主进程）。
+    三者实测「不发也 200」，所以对齐不付代价。
+  - **去掉 `X-No-User-Id` / `X-No-Enterprise-Id` / `X-No-Department-Info`**。这三个确实是官方
+    bundle 里的真常量（`HTTP_HEADER_NO_USER_ID` 等），但整个 bundle 里它们**只用在一个地方**：
+    未登录的 `/v2/auth/state?platform=…`，语义是「这条请求不要注入身份」。chat 路径相反——app
+    从账号填 `X-User-Id`，而它的 `applyIOADefaultHeaders()` 第一行就是
+    `if (!this.isIOAEnvironment(i)) return;`，个人账号**根本不发**企业头，而不是发一个「没有」
+    的标记。现在改成 app 的做法：缺席的字段直接**省略**；`X-Department-Info` 按 app 的字面量
+    恒发送（空串兜底）。三种写法实测都 200，所以这是保真问题不是闸门问题。
+  - **会话三件套与 `Accept` 也跟随**：`wireIdentity` 下三件套切到 32 位十六进制 UUIDv7
+    （与 `usageIdentity` 同一实现），`Accept` 收窄为 `application/json`（app 不发浏览器的
+    通配列表），`x-requested-with` 用小写形式。变异：把 `Accept` 改回通配列表 → 1 条红。
+  - **不做的事**：不加 `acp-connection-id`——它是 app 本机 ACP 传输的连接标识，不是发往云端的
+    业务头，插件没有这种连接。
+
+### Compatibility
+
+- **关掉 `wireIdentity` 逐字节回到 5.12.1**，连 `X-No-*` 标记也一并恢复。这是刻意的：半恢复的
+  形状是第三种没人测过的东西。有专门测试钉住旧形状仍发 `X-No-Enterprise-Id: 1`。
+- **`usageIdentity` 保留**，但 5.13.0 起它的效果大部分被 `wireIdentity` 覆盖。保留是为了能单独
+  回到「只改用量页显示、其余字节不动」的口径。
+- **请求正文完全没动**。`prepareChatBody()` 一字未改。
+- **生图路径不跟随 `wireIdentity`**，保持 2026-10-21 实测过的带连字符 v4 形状。
+
+### Tests
+
+- `tests/upstream.spec.ts` 新增 4 条：新增头的存在与取值（含 `X-Private-Data` 的 `"false"`）/
+  去掉的五个头（`Origin`、`Referer`、`User-Agent`、三个 `X-No-*`）/ `X-Department-Info` 空串
+  恒发送 / 旧形状仍发 `X-No-Enterprise-Id: 1`。
+- `tests/card-upstream-switches.spec.tsx` 新增开关接线与**反向默认**（缺席读作 ON）的测试。
+- 变异验证 5 次全部正确变红：`X-Private-Data` 改 `"true"`、`Accept` 改回通配、`appChannelHeaders()`
+  整体短路、`X-No-Enterprise-Id` 漏回 app 分支、`upstreamSwitchOf` 反向默认退回 `=== true`。
+- 全量：**144 文件 / 2491 条通过**，`tsc` 双配置 0 错误，`tsdown` 构建通过。
+- **头集合与 app 逐项比对**（`node scripts/wire-diff-with-app.mjs`）：插件多发 0 项，少发 0 项。
+
 ## 5.12.1 (2026-10-26)
 
 > 修正 5.12.0 的 `dropForeignThinking` 漏判的一条腿：`isSameModel` 判据是 provider **且** api
